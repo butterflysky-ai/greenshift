@@ -134,23 +134,35 @@ Exit status:
 ## Nextest filter
 
 ```
-greenshift nextest-filter [--rich | --poor] [--db PATH] [--source NAME]...
+greenshift nextest-filter --inventory FILE [--rich | --poor]
+                          [--db PATH] [--source NAME]...
                           [--min-runs N] [--coverage N] [--confidence N]
                           [--estimator wilson|empirical|smoothed]
 ```
 
 `nextest-filter` takes `select`'s options, works out the same lines, and
 prints one [filterset](https://nexte.st/docs/filtersets/) for
-`cargo nextest run -E`:
+`cargo nextest run -E`. `--inventory` is the current
+`cargo nextest list --message-format json` output, full or
+`--list-type binaries-only`, as a file or `-` for stdin:
 
 ```
-cargo nextest run -E "$(greenshift nextest-filter --source nextest)"
+cargo nextest list --list-type binaries-only --message-format json \
+    > inventory.json
+cargo nextest run -E "$(greenshift nextest-filter --source nextest \
+    --inventory inventory.json)"
 ```
 
 - **Terms.** In nextest's JUnit, a testcase's `classname` is the test
   binary's id and its `name` the test's name, so each stored test becomes
   `(binary_id(=<suite>) & test(=<name>))`. A test stored with an empty
   suite becomes `test(=<name>)`, which matches that name in every binary.
+- **Inventory.** Tests whose binary id is not in the inventory are left
+  out: nextest refuses a whole filterset in which a `binary_id(=...)`
+  matches no binary, as one does once a binary is renamed or removed.
+  List without `-E` or other filters, so the inventory has every binary.
+  The option is required, and an inventory that cannot be read or is not
+  such a listing is an error (exit 1).
 - **`--poor`** prints the terms of the poor tests joined by ` | `, or
   `none()` when there are none.
 - **`--rich`**, the default, prints every test but the poor ones:
