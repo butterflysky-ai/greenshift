@@ -30,6 +30,10 @@ const ODD: &[&str] = &[
 /// The `plain` binary's tests. `shared::same` is in both binaries.
 const PLAIN: &[&str] = &["shared::same", "plain::fast"];
 
+/// The `gone` binary's tests; it is in the project only while
+/// [`Project::with_gone`] says so.
+const GONE: &[&str] = &["gone::flaky", "gone::steady"];
+
 const FRESH_TEST: &str = "fresh::arrival";
 
 /// A test binary that lists `names` (and [`FRESH_TEST`] for `fresh`, when
@@ -77,26 +81,39 @@ impl Project {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join("tests")).unwrap();
         std::fs::create_dir_all(root.join(".config")).unwrap();
-        std::fs::write(
-            root.join("Cargo.toml"),
-            format!(
-                "[package]\nname = \"{PACKAGE}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
-                 publish = false\n\n[workspace]\n\n[lib]\ntest = false\ndoctest = false\n\n\
-                 [[test]]\nname = \"odd\"\nharness = false\n\n\
-                 [[test]]\nname = \"plain\"\nharness = false\n"
-            ),
-        )
-        .unwrap();
         std::fs::write(root.join("src/lib.rs"), "").unwrap();
         std::fs::write(root.join("tests/odd.rs"), harness("odd", ODD, true)).unwrap();
         std::fs::write(root.join("tests/plain.rs"), harness("plain", PLAIN, false)).unwrap();
+        std::fs::write(root.join("tests/gone.rs"), harness("gone", GONE, false)).unwrap();
         std::fs::write(
             root.join(".config/nextest.toml"),
             "[profile.default.junit]\npath = \"junit.xml\"\n",
         )
         .unwrap();
         let db = dir.path().join("history.sqlite");
-        Project { dir, db, runs: 0 }
+        let project = Project { dir, db, runs: 0 };
+        project.with_gone(false);
+        project
+    }
+
+    /// Write the manifest, with the `gone` test binary or without it.
+    fn with_gone(&self, gone: bool) {
+        let mut manifest = format!(
+            "[package]\nname = \"{PACKAGE}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             publish = false\nautotests = false\n\n[workspace]\n\n\
+             [lib]\ntest = false\ndoctest = false\n"
+        );
+        let binaries: &[&str] = if gone {
+            &["odd", "plain", "gone"]
+        } else {
+            &["odd", "plain"]
+        };
+        for binary in binaries {
+            manifest.push_str(&format!(
+                "\n[[test]]\nname = \"{binary}\"\nharness = false\n"
+            ));
+        }
+        std::fs::write(self.root().join("Cargo.toml"), manifest).unwrap();
     }
 
     fn root(&self) -> PathBuf {
@@ -149,11 +166,37 @@ impl Project {
             .success();
     }
 
+    /// The project's current `cargo nextest list --list-type binaries-only
+    /// --message-format json`, in a file.
+    fn inventory(&self) -> PathBuf {
+        let out = self
+            .cargo_nextest(&[
+                "list",
+                "--list-type",
+                "binaries-only",
+                "--message-format",
+                "json",
+            ])
+            .output()
+            .expect("cargo nextest runs (is cargo-nextest installed?)");
+        assert!(
+            out.status.success(),
+            "nextest could not list: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let file = self.dir.path().join("inventory.json");
+        std::fs::write(&file, out.stdout).unwrap();
+        file
+    }
+
+    /// `greenshift nextest-filter` with `args` and the current inventory.
     fn filter(&self, args: &[&str]) -> String {
         let out = greenshift()
             .arg("nextest-filter")
             .arg("--db")
             .arg(&self.db)
+            .arg("--inventory")
+            .arg(self.inventory())
             .args(args)
             .assert()
             .success();
@@ -273,9 +316,91 @@ fn empty_selections_match_nothing_or_everything() {
 }
 
 #[test]
+fn a_binary_gone_from_the_inventory_is_left_out() {
+    let mut p = Project::new();
+    p.with_gone(true);
+    // gone::flaky and plain::passes each fail in a run of their own, so
+    // both are rich; every other test is poor.
+    p.run(&[("gone", "gone::flaky")]);
+    p.run(&[("odd", "plain::passes")]);
+    p.run(&[]);
+    p.with_gone(false);
+
+    // Kept in, binary_id(=odd-names::gone) would make nextest refuse the
+    // whole filterset.
+    let rich_expr = p.filter(&["--source", "nextest", "--min-runs", "1", "--rich"]);
+    assert!(!rich_expr.contains("gone"), "{rich_expr}");
+    assert_eq!(
+        p.list(&rich_expr),
+        set(&[tests("odd", &["plain::passes", FRESH_TEST])]),
+        "{rich_expr}"
+    );
+
+    let poor_expr = p.filter(&["--source", "nextest", "--min-runs", "1", "--poor"]);
+    assert!(!poor_expr.contains("gone"), "{poor_expr}");
+    let mut poor = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
+    poor.remove(&("odd".to_owned(), "plain::passes".to_owned()));
+    assert_eq!(p.list(&poor_expr), poor, "{poor_expr}");
+}
+
+#[test]
+fn the_inventory_can_come_from_stdin() {
+    let mut p = Project::new();
+    p.run(&[]);
+    let inventory = std::fs::read(p.inventory()).unwrap();
+    greenshift()
+        .arg("nextest-filter")
+        .arg("--db")
+        .arg(&p.db)
+        .args(["--inventory", "-", "--poor"])
+        .write_stdin(inventory)
+        .assert()
+        .success()
+        .stdout("none()\n");
+}
+
+/// A `--inventory` file listing no binaries, in `dir`.
+fn empty_inventory(dir: &Path) -> PathBuf {
+    let file = dir.join("inventory.json");
+    std::fs::write(&file, r#"{"rust-build-meta":{},"rust-binaries":{}}"#).unwrap();
+    file
+}
+
+#[test]
+fn an_inventory_is_required_and_must_be_a_nextest_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    greenshift()
+        .args(["nextest-filter", "--poor"])
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(predicates::str::contains("--inventory"));
+    let bad = dir.path().join("bad.json");
+    std::fs::write(&bad, "[]").unwrap();
+    greenshift()
+        .arg("nextest-filter")
+        .arg("--inventory")
+        .arg(&bad)
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicates::str::contains("not cargo nextest list JSON"));
+    greenshift()
+        .arg("nextest-filter")
+        .arg("--inventory")
+        .arg(dir.path().join("missing.json"))
+        .assert()
+        .code(1)
+        .stdout("");
+}
+
+#[test]
 fn rich_and_poor_are_exclusive() {
+    let dir = tempfile::tempdir().unwrap();
     greenshift()
         .args(["nextest-filter", "--rich", "--poor"])
+        .arg("--inventory")
+        .arg(empty_inventory(dir.path()))
         .assert()
         .failure()
         .code(2)
@@ -292,6 +417,8 @@ fn no_history_prints_nothing_and_exits_2() {
             .arg("nextest-filter")
             .arg("--db")
             .arg(&db)
+            .arg("--inventory")
+            .arg(empty_inventory(dir.path()))
             .arg(class)
             .assert()
             .code(2)

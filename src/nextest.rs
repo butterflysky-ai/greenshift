@@ -4,7 +4,12 @@
 //! In nextest's JUnit, a testcase's `classname` is the test binary's id and
 //! its `name` the test's name, so a stored test is the nextest test
 //! `binary_id(=<suite>) & test(=<name>)`.
+//!
+//! nextest refuses a whole filterset when any `binary_id(=...)` in it
+//! matches no binary it knows, so terms are kept only for binaries in the
+//! current inventory: `cargo nextest list --message-format json`.
 
+use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use crate::select::{Class, Line};
@@ -72,13 +77,50 @@ pub fn all_but<'a>(tests: impl IntoIterator<Item = (&'a str, &'a str)>) -> Strin
     }
 }
 
+/// Why a file is not a `cargo nextest list --message-format json` listing.
+#[derive(Debug, thiserror::Error)]
+#[error("not cargo nextest list JSON: {0}")]
+pub struct InventoryError(String);
+
+/// The binary ids in a `cargo nextest list --message-format json`
+/// listing, full (`rust-suites`) or `--list-type binaries-only`
+/// (`rust-binaries`): each entry's `binary-id`.
+pub fn binary_ids(json: &str) -> Result<BTreeSet<String>, InventoryError> {
+    let listing: serde_json::Value =
+        serde_json::from_str(json).map_err(|err| InventoryError(err.to_string()))?;
+    let entries = ["rust-suites", "rust-binaries"]
+        .iter()
+        .find_map(|key| listing.get(key))
+        .ok_or_else(|| InventoryError("no rust-suites or rust-binaries".to_owned()))?
+        .as_object()
+        .ok_or_else(|| InventoryError("binaries are not an object".to_owned()))?;
+    entries
+        .values()
+        .map(|entry| {
+            entry
+                .get("binary-id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| InventoryError("a binary without a binary-id".to_owned()))
+        })
+        .collect()
+}
+
 /// The filterset for `class` from `select`'s `lines`. Both are decided by
 /// the poor lines alone: poor is exactly them, and rich is every other
 /// test, so tests new to the store, or not in it at all, run with rich.
-pub fn filter(lines: &[Line<'_>], class: Class) -> String {
+/// Poor lines whose suite is not one of `binaries` are left out: those
+/// tests are not in the inventory, and their terms would make nextest
+/// refuse the filterset. A line with no suite has no `binary_id` term and
+/// is kept.
+pub fn filter(lines: &[Line<'_>], class: Class, binaries: &BTreeSet<String>) -> String {
     let poor = lines
         .iter()
         .filter(|line| line.class == Class::Poor)
+        .filter(|line| {
+            let suite = line.suite.as_raw();
+            suite.is_empty() || binaries.contains(suite)
+        })
         .map(|line| (line.suite.as_raw(), line.name.as_raw()));
     match class {
         Class::Rich => all_but(poor),

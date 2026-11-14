@@ -90,6 +90,12 @@ pub struct NextestFilterArgs {
     #[command(flatten)]
     pub select: SelectArgs,
 
+    /// The current tests: `cargo nextest list --message-format json`
+    /// output (full or `--list-type binaries-only`), or `-` for stdin.
+    /// Tests of binaries not in it are left out of the filterset.
+    #[arg(long, value_name = "FILE", required = true)]
+    pub inventory: PathBuf,
+
     /// Match the rich tests: every test but the poor ones, so tests new to
     /// the store run too. The default.
     #[arg(long, conflicts_with = "poor")]
@@ -195,11 +201,20 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// Print the selection as one nextest filterset, from the same lines as
-/// [`select`] and with the same exits.
+/// [`select`] and with the same exits. The inventory is read first, so a
+/// bad one fails before the store is read.
 pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
+    let shown = args.inventory.display();
+    let json = if args.inventory.as_os_str() == "-" {
+        std::io::read_to_string(std::io::stdin().lock()).context("inventory on stdin")?
+    } else {
+        std::fs::read_to_string(&args.inventory).with_context(|| format!("inventory {shown}"))?
+    };
+    let binaries = nextest::binary_ids(&json).with_context(|| format!("inventory {shown}"))?;
     with_lines(&args.select, |lines| {
         let mut out = std::io::stdout().lock();
-        writeln!(out, "{}", nextest::filter(lines, args.class())).and_then(|()| out.flush())
+        writeln!(out, "{}", nextest::filter(lines, args.class(), &binaries))
+            .and_then(|()| out.flush())
     })
 }
 
@@ -356,7 +371,11 @@ mod tests {
     }
 
     fn nextest_filter_args(args: &[&str]) -> Result<NextestFilterArgs, clap::Error> {
-        let cli = Cli::try_parse_from(["greenshift", "nextest-filter"].iter().chain(args))?;
+        let cli = Cli::try_parse_from(
+            ["greenshift", "nextest-filter", "--inventory", "inv.json"]
+                .iter()
+                .chain(args),
+        )?;
         let Command::NextestFilter(args) = cli.command else {
             panic!("not nextest-filter");
         };
@@ -367,6 +386,8 @@ mod tests {
     fn nextest_filter_takes_select_options_and_a_class() {
         let args = nextest_filter_args(&[]).unwrap();
         assert_eq!(args.class(), Class::Rich);
+        assert_eq!(args.inventory, PathBuf::from("inv.json"));
+        assert!(Cli::try_parse_from(["greenshift", "nextest-filter"]).is_err());
         assert_eq!(args.select.db, PathBuf::from(".greenshift/history.sqlite"));
         assert_eq!(args.select.min_runs, 120);
         let args = nextest_filter_args(&[

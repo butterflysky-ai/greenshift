@@ -1,5 +1,6 @@
 use super::*;
 use crate::junit::Tainted;
+use std::collections::BTreeSet;
 
 #[test]
 fn escape_leaves_ordinary_text_alone() {
@@ -86,6 +87,10 @@ fn all_but_negates_and_matches_everything_when_empty() {
     );
 }
 
+fn bins(ids: &[&str]) -> BTreeSet<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
 fn line<'a>(class: Class, suite: &'a Tainted, name: &'a Tainted) -> Line<'a> {
     Line {
         class,
@@ -110,11 +115,11 @@ fn filter_rich_is_everything_but_poor() {
         line(Class::Poor, &b, &q),
     ];
     assert_eq!(
-        filter(&lines, Class::Rich),
+        filter(&lines, Class::Rich, &bins(&["bin"])),
         "not ((binary_id(=bin) & test(=poor_one)) | (binary_id(=bin) & test(=poor_two)))"
     );
     assert_eq!(
-        filter(&lines, Class::Poor),
+        filter(&lines, Class::Poor, &bins(&["bin"])),
         "(binary_id(=bin) & test(=poor_one)) | (binary_id(=bin) & test(=poor_two))"
     );
 }
@@ -123,8 +128,75 @@ fn filter_rich_is_everything_but_poor() {
 fn filter_with_no_poor_line() {
     let (b, r) = (Tainted::from("bin"), Tainted::from("rich_one"));
     let lines = [line(Class::Rich, &b, &r)];
-    assert_eq!(filter(&lines, Class::Rich), "all()");
-    assert_eq!(filter(&lines, Class::Poor), "none()");
-    assert_eq!(filter(&[], Class::Rich), "all()");
-    assert_eq!(filter(&[], Class::Poor), "none()");
+    assert_eq!(filter(&lines, Class::Rich, &bins(&["bin"])), "all()");
+    assert_eq!(filter(&lines, Class::Poor, &bins(&["bin"])), "none()");
+    assert_eq!(filter(&[], Class::Rich, &bins(&[])), "all()");
+    assert_eq!(filter(&[], Class::Poor, &bins(&[])), "none()");
+}
+
+#[test]
+fn filter_leaves_out_binaries_not_in_the_inventory() {
+    // nextest refuses a whole filterset in which a binary_id(=...) matches
+    // no binary.
+    let (b, gone, none, p, q, r) = (
+        Tainted::from("bin"),
+        Tainted::from("gone"),
+        Tainted::from(""),
+        Tainted::from("poor_one"),
+        Tainted::from("poor_two"),
+        Tainted::from("rich_one"),
+    );
+    let lines = [
+        line(Class::Rich, &gone, &r),
+        line(Class::Poor, &gone, &p),
+        line(Class::Poor, &b, &q),
+        line(Class::Poor, &none, &p),
+    ];
+    let inventory = bins(&["bin", "other"]);
+    assert_eq!(
+        filter(&lines, Class::Poor, &inventory),
+        "(binary_id(=bin) & test(=poor_two)) | test(=poor_one)"
+    );
+    assert_eq!(
+        filter(&lines, Class::Rich, &inventory),
+        "not ((binary_id(=bin) & test(=poor_two)) | test(=poor_one))"
+    );
+    let only_gone = [line(Class::Rich, &gone, &r), line(Class::Poor, &gone, &p)];
+    assert_eq!(filter(&only_gone, Class::Poor, &inventory), "none()");
+    assert_eq!(filter(&only_gone, Class::Rich, &inventory), "all()");
+}
+
+/// Trimmed `cargo nextest list --message-format json` output from 0.9.143.
+const FULL_LIST: &str = r#"{"rust-build-meta":{"target-directory":"/t","base-output-directories":["debug"],"non-test-binaries":{},"linked-paths":[]},"test-count":2,"rust-suites":{"greenshift":{"package-name":"greenshift","binary-id":"greenshift","binary-name":"greenshift","kind":"lib","status":"listed","testcases":{"cli::tests::ingest_options":{"kind":"test","ignored":false,"filter-match":{"status":"matches"}}}},"greenshift::cli":{"package-name":"greenshift","binary-id":"greenshift::cli","binary-name":"cli","kind":"test","status":"listed","testcases":{}}}}"#;
+
+/// Trimmed `cargo nextest list --list-type binaries-only --message-format
+/// json` output from 0.9.143.
+const BINARIES_ONLY: &str = r#"{"rust-build-meta":{"target-directory":"/t"},"rust-binaries":{"greenshift":{"binary-id":"greenshift","binary-name":"greenshift","kind":"lib","build-platform":"target"},"greenshift::bin/greenshift":{"binary-id":"greenshift::bin/greenshift","binary-name":"greenshift","kind":"bin","build-platform":"target"}}}"#;
+
+#[test]
+fn binary_ids_from_a_full_or_binaries_only_listing() {
+    assert_eq!(
+        binary_ids(FULL_LIST).unwrap(),
+        bins(&["greenshift", "greenshift::cli"])
+    );
+    assert_eq!(
+        binary_ids(BINARIES_ONLY).unwrap(),
+        bins(&["greenshift", "greenshift::bin/greenshift"])
+    );
+    assert_eq!(binary_ids(r#"{"rust-binaries":{}}"#).unwrap(), bins(&[]));
+}
+
+#[test]
+fn binary_ids_refuses_anything_else() {
+    for bad in [
+        "",
+        "not json",
+        "[]",
+        "{}",
+        r#"{"rust-suites":[]}"#,
+        r#"{"rust-binaries":{"x":{"binary-name":"x"}}}"#,
+        r#"{"rust-binaries":{"x":{"binary-id":7}}}"#,
+    ] {
+        assert!(binary_ids(bad).is_err(), "{bad:?}");
+    }
 }
