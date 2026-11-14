@@ -8,9 +8,9 @@ use anyhow::Context;
 use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::junit;
-use crate::select::{self, Empirical, Estimator, Smoothed, Thresholds, Wilson};
+use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Thresholds, Wilson};
 use crate::store::{self, NewRun, Store};
+use crate::{junit, nextest};
 
 /// Pick which tests to run from what your tests have done before.
 #[derive(Debug, Parser)]
@@ -26,6 +26,8 @@ pub enum Command {
     Ingest(IngestArgs),
     /// Print which tests to run first (rich) and after (poor), from history.
     Select(SelectArgs),
+    /// Print select's choice as a cargo-nextest filterset (`-E`).
+    NextestFilter(NextestFilterArgs),
 }
 
 #[derive(Debug, Args)]
@@ -83,6 +85,38 @@ pub struct SelectArgs {
     pub estimator: EstimatorKind,
 }
 
+#[derive(Debug, Args)]
+pub struct NextestFilterArgs {
+    #[command(flatten)]
+    pub select: SelectArgs,
+
+    /// The current tests: `cargo nextest list --message-format json`
+    /// output (full or `--list-type binaries-only`), or `-` for stdin.
+    /// Tests of binaries not in it are left out of the filterset.
+    #[arg(long, value_name = "FILE", required = true)]
+    pub inventory: PathBuf,
+
+    /// Match the rich tests: every test but the poor ones, so tests new to
+    /// the store run too. The default.
+    #[arg(long, conflicts_with = "poor")]
+    pub rich: bool,
+
+    /// Match the poor tests.
+    #[arg(long)]
+    pub poor: bool,
+}
+
+impl NextestFilterArgs {
+    /// Which tests the filterset is to match.
+    pub fn class(&self) -> Class {
+        if self.poor {
+            Class::Poor
+        } else {
+            Class::Rich
+        }
+    }
+}
+
 /// The confidence estimators `select` offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum EstimatorKind {
@@ -120,6 +154,7 @@ pub fn run() -> anyhow::Result<ExitCode> {
     match Cli::parse().command {
         Command::Ingest(args) => ingest(&args).map(|()| ExitCode::SUCCESS),
         Command::Select(args) => select(&args),
+        Command::NextestFilter(args) => nextest_filter(&args),
     }
 }
 
@@ -156,13 +191,55 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
 /// Print the selection. Reads the store only; with no full run from the
 /// chosen sources (or no store at all), says so and exits [`NO_HISTORY`].
 pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
+    with_lines(args, |lines| {
+        let Some(lines) = lines else {
+            return Ok(ExitCode::from(NO_HISTORY));
+        };
+        let mut out = std::io::stdout().lock();
+        lines
+            .iter()
+            .try_for_each(|line| writeln!(out, "{line}"))
+            .and_then(|()| out.flush())
+            .map(|()| ExitCode::SUCCESS)
+    })
+}
+
+/// Print the selection as one nextest filterset, from the same lines as
+/// [`select`]. With no history there are no lines, so every test is rich:
+/// it prints `all()` or `none()` and exits 0. The inventory is read first,
+/// so a bad one fails before the store is read.
+pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
+    let shown = args.inventory.display();
+    let json = if args.inventory.as_os_str() == "-" {
+        std::io::read_to_string(std::io::stdin().lock()).context("inventory on stdin")?
+    } else {
+        std::fs::read_to_string(&args.inventory).with_context(|| format!("inventory {shown}"))?
+    };
+    let binaries = nextest::binary_ids(&json).with_context(|| format!("inventory {shown}"))?;
+    with_lines(&args.select, |lines| {
+        let mut out = std::io::stdout().lock();
+        let lines = lines.unwrap_or_default();
+        writeln!(out, "{}", nextest::filter(lines, args.class(), &binaries))
+            .and_then(|()| out.flush())
+            .map(|()| ExitCode::SUCCESS)
+    })
+}
+
+/// Compute `select`'s lines from the store and hand them to `write`, which
+/// decides the exit status, then name any threshold not reached on stderr.
+/// With no full run from the chosen sources (or no store at all), says so
+/// on stderr and hands `write` `None`.
+fn with_lines(
+    args: &SelectArgs,
+    write: impl FnOnce(Option<&[Line<'_>]>) -> std::io::Result<ExitCode>,
+) -> anyhow::Result<ExitCode> {
     let history = match Store::open_read_only(&args.db)? {
         Some(store) => store.history(&args.source)?,
         None => Default::default(),
     };
     let Some(analysis) = select::analyse(&history) else {
         eprintln!("no history: run the full suite");
-        return Ok(ExitCode::from(NO_HISTORY));
+        return written(write(None));
     };
     let estimator = args.estimator.estimator();
     let decided = select::split(
@@ -173,20 +250,21 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
             confidence: args.confidence,
         },
     );
-    let mut out = std::io::stdout().lock();
-    let written = select::lines(&analysis, estimator, decided.rich, args.min_runs)
-        .iter()
-        .try_for_each(|line| writeln!(out, "{line}"))
-        .and_then(|()| out.flush());
-    match written {
-        // A reader that stops early (`| head`) has all the lines it wants.
-        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
-        written => written?,
-    }
+    let lines = select::lines(&analysis, estimator, decided.rich, args.min_runs);
+    let code = written(write(Some(&lines)))?;
     for missed in decided.unreached {
         eprintln!("greenshift: {missed}");
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(code)
+}
+
+/// The exit status from writing output. A reader that stops early
+/// (`| head`) has all the lines it wants, so that is a success.
+fn written(result: std::io::Result<ExitCode>) -> anyhow::Result<ExitCode> {
+    match result {
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(ExitCode::SUCCESS),
+        result => Ok(result?),
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +380,57 @@ mod tests {
                 assert!(select_args(&[flag, bad]).is_err(), "{flag} {bad}");
             }
         }
+    }
+
+    fn nextest_filter_args(args: &[&str]) -> Result<NextestFilterArgs, clap::Error> {
+        let cli = Cli::try_parse_from(
+            ["greenshift", "nextest-filter", "--inventory", "inv.json"]
+                .iter()
+                .chain(args),
+        )?;
+        let Command::NextestFilter(args) = cli.command else {
+            panic!("not nextest-filter");
+        };
+        Ok(args)
+    }
+
+    #[test]
+    fn nextest_filter_takes_select_options_and_a_class() {
+        let args = nextest_filter_args(&[]).unwrap();
+        assert_eq!(args.class(), Class::Rich);
+        assert_eq!(args.inventory, PathBuf::from("inv.json"));
+        assert!(Cli::try_parse_from(["greenshift", "nextest-filter"]).is_err());
+        assert_eq!(args.select.db, PathBuf::from(".greenshift/history.sqlite"));
+        assert_eq!(args.select.min_runs, 120);
+        let args = nextest_filter_args(&[
+            "--db",
+            "h.sqlite",
+            "--source",
+            "nextest",
+            "--min-runs",
+            "3",
+            "--coverage",
+            "90",
+            "--confidence",
+            "80",
+            "--estimator",
+            "empirical",
+            "--poor",
+        ])
+        .unwrap();
+        assert_eq!(args.class(), Class::Poor);
+        assert_eq!(args.select.db, PathBuf::from("h.sqlite"));
+        assert_eq!(args.select.source, ["nextest"]);
+        assert_eq!(args.select.min_runs, 3);
+        assert_eq!(args.select.coverage, Some(90.0));
+        assert_eq!(args.select.confidence, Some(80.0));
+        assert_eq!(args.select.estimator, EstimatorKind::Empirical);
+        assert_eq!(
+            nextest_filter_args(&["--rich"]).unwrap().class(),
+            Class::Rich
+        );
+        assert!(nextest_filter_args(&["--rich", "--poor"]).is_err());
+        assert!(nextest_filter_args(&["--coverage", "101"]).is_err());
     }
 
     #[test]

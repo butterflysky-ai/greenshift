@@ -3,8 +3,9 @@
 greenshift picks which tests to run from what your tests have done before.
 
 It is early. This release records test history from JUnit XML into a
-per-repo SQLite store (`greenshift ingest`) and chooses tests from that
-history (`greenshift select`).
+per-repo SQLite store (`greenshift ingest`), chooses tests from that
+history (`greenshift select`) and writes that choice as a cargo-nextest
+filterset (`greenshift nextest-filter`).
 
 ## Ingest
 
@@ -130,11 +131,75 @@ Exit status:
 - 2: no full run from the chosen sources, or no store at all. stderr says
   `no history: run the full suite` and nothing is printed to stdout.
 
+## Nextest filter
+
+```
+greenshift nextest-filter --inventory FILE [--rich | --poor]
+                          [--db PATH] [--source NAME]...
+                          [--min-runs N] [--coverage N] [--confidence N]
+                          [--estimator wilson|empirical|smoothed]
+```
+
+`nextest-filter` takes `select`'s options, works out the same lines, and
+prints one [filterset](https://nexte.st/docs/filtersets/) for
+`cargo nextest run -E`. `--inventory` is the current
+`cargo nextest list --message-format json` output, full or
+`--list-type binaries-only`, as a file or `-` for stdin:
+
+```
+cargo nextest list --list-type binaries-only --message-format json \
+    > inventory.json
+cargo nextest run -E "$(greenshift nextest-filter --source nextest \
+    --inventory inventory.json)"
+```
+
+- **Terms.** In nextest's JUnit, a testcase's `classname` is the test
+  binary's id and its `name` the test's name, so each stored test becomes
+  `(binary_id(=<suite>) & test(=<name>))`. A test stored with an empty
+  suite becomes `test(=<name>)`, which matches that name in every binary.
+- **Inventory.** Tests whose binary id is not in the inventory are left
+  out: nextest refuses a whole filterset in which a `binary_id(=...)`
+  matches no binary, as one does once a binary is renamed or removed.
+  A binaries-only listing ignores `-E`, and a full one keeps binaries it
+  filters out (as `skipped`), so neither drops a binary; `-p`,
+  `--exclude` and the target-selection flags (`--lib`, `--test` and so
+  on) do, so leave them out when making the inventory.
+  The option is required, and an inventory that cannot be read or is not
+  such a listing is an error (exit 1).
+- **`--poor`** prints the terms of the poor tests joined by ` | `, or
+  `none()` when there are none.
+- **`--rich`**, the default, prints every test but the poor ones:
+  `not (<poor terms>)`, or `all()` when there are none. So tests that are
+  new, or not in the store at all, run with the rich tests.
+- **Escaping.** Within a term, `)`, `,`, `\` and `/` are escaped with a
+  backslash, newline, carriage return and tab as `\n`, `\r` and `\t`, and
+  other control characters as `\u{HEX}`, so the filterset is one line.
+  Everything else, spaces and `(`, `|`, `&` and `::` included, is written
+  as is: nextest reads a matcher up to the first unescaped `)` or `,`.
+
+- **Size.** Linux limits one command-line argument to 128 KiB
+  (MAX_ARG_STRLEN, 131,072 bytes with its terminating NUL). A term is
+  about 92 bytes (greenshift's own 193 tests average 91.5), so
+  `-E "$(...)"` fails with `argument list too long` from about
+  131,072 / 92 ≈ 1,400 poor tests on. Past that, the filterset has to
+  reach nextest another way than as one argument, such as from a file or
+  as a profile's `default-filter` in `.config/nextest.toml`.
+
+With no history (where `select` exits 2) there is no poor test, so
+`--rich` prints `all()` and `--poor` prints `none()`, and a fresh repo
+runs every test; stderr still says `no history: run the full suite`, and
+the exit status is 0. Otherwise the exit status, and stderr for a
+threshold never reached, are as for `select`.
+
 ## Building
 
 ```
 cargo build --release
 ```
+
+The test suite needs [cargo-nextest](https://nexte.st/) installed: some
+tests run it on a scratch project. Run it with `cargo nextest run`, and
+the doctests with `cargo test --doc`.
 
 SQLite is bundled, so release builds for `x86_64-unknown-linux-musl` are
 fully static.
