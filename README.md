@@ -3,8 +3,9 @@
 greenshift picks which tests to run from what your tests have done before.
 
 It is early. This release records test history from JUnit XML into a
-per-repo SQLite store (`greenshift ingest`) and chooses tests from that
-history (`greenshift select`).
+per-repo SQLite store (`greenshift ingest`), chooses tests from that
+history (`greenshift select`) and writes that choice as a cargo-nextest
+filterset (`greenshift nextest-filter`).
 
 ## Ingest
 
@@ -129,6 +130,40 @@ Exit status:
 - 1: an error, such as a `--db` file that is not a greenshift store.
 - 2: no full run from the chosen sources, or no store at all. stderr says
   `no history: run the full suite` and nothing is printed to stdout.
+
+## Nextest filter
+
+```
+greenshift nextest-filter [--rich | --poor] [--db PATH] [--source NAME]...
+                          [--min-runs N] [--coverage N] [--confidence N]
+                          [--estimator wilson|empirical|smoothed]
+```
+
+`nextest-filter` takes `select`'s options, works out the same lines, and
+prints one [filterset](https://nexte.st/docs/filtersets/) for
+`cargo nextest run -E`:
+
+```
+cargo nextest run -E "$(greenshift nextest-filter --source nextest)"
+```
+
+- **Terms.** In nextest's JUnit, a testcase's `classname` is the test
+  binary's id and its `name` the test's name, so each stored test becomes
+  `(binary_id(=<suite>) & test(=<name>))`. A test stored with an empty
+  suite becomes `test(=<name>)`, which matches that name in every binary.
+- **`--poor`** prints the terms of the poor tests joined by ` | `, or
+  `none()` when there are none.
+- **`--rich`**, the default, prints every test but the poor ones:
+  `not (<poor terms>)`, or `all()` when there are none. So tests that are
+  new, or not in the store at all, run with the rich tests.
+- **Escaping.** Within a term, `)`, `,`, `\` and `/` are escaped with a
+  backslash, newline, carriage return and tab as `\n`, `\r` and `\t`, and
+  other control characters as `\u{HEX}`, so the filterset is one line.
+  Everything else, spaces and `(`, `|`, `&` and `::` included, is written
+  as is: nextest reads a matcher up to the first unescaped `)` or `,`.
+
+Exit status, and stderr for a threshold never reached, are as for
+`select`; with no history (exit 2) nothing is printed to stdout.
 
 ## Building
 
