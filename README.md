@@ -160,7 +160,10 @@ cargo nextest run -E "$(greenshift nextest-filter --source nextest \
 - **Inventory.** Tests whose binary id is not in the inventory are left
   out: nextest refuses a whole filterset in which a `binary_id(=...)`
   matches no binary, as one does once a binary is renamed or removed.
-  List without `-E` or other filters, so the inventory has every binary.
+  A binaries-only listing ignores `-E`, and a full one keeps binaries it
+  filters out (as `skipped`), so neither drops a binary; `-p`,
+  `--exclude` and the target-selection flags (`--lib`, `--test` and so
+  on) do, so leave them out when making the inventory.
   The option is required, and an inventory that cannot be read or is not
   such a listing is an error (exit 1).
 - **`--poor`** prints the terms of the poor tests joined by ` | `, or
@@ -174,6 +177,14 @@ cargo nextest run -E "$(greenshift nextest-filter --source nextest \
   Everything else, spaces and `(`, `|`, `&` and `::` included, is written
   as is: nextest reads a matcher up to the first unescaped `)` or `,`.
 
+- **Size.** Linux limits one command-line argument to 128 KiB
+  (MAX_ARG_STRLEN, 131,072 bytes with its terminating NUL). A term is
+  about 92 bytes (greenshift's own 193 tests average 91.5), so
+  `-E "$(...)"` fails with `argument list too long` from about
+  131,072 / 92 ≈ 1,400 poor tests on. Past that, the filterset has to
+  reach nextest another way than as one argument, such as from a file or
+  as a profile's `default-filter` in `.config/nextest.toml`.
+
 With no history (where `select` exits 2) there is no poor test, so
 `--rich` prints `all()` and `--poor` prints `none()`, and a fresh repo
 runs every test; stderr still says `no history: run the full suite`, and
@@ -185,6 +196,10 @@ threshold never reached, are as for `select`.
 ```
 cargo build --release
 ```
+
+The test suite needs [cargo-nextest](https://nexte.st/) installed: some
+tests run it on a scratch project. Run it with `cargo nextest run`, and
+the doctests with `cargo test --doc`.
 
 SQLite is bundled, so release builds for `x86_64-unknown-linux-musl` are
 fully static.

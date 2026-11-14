@@ -42,7 +42,7 @@ jobs:
           cargo nextest list --locked --list-type binaries-only \
             --message-format json > target/nextest-inventory.json
           for class in rich poor; do
-            expr="$(cargo run --locked -q -- nextest-filter --source nextest \
+            expr="$(cargo run --locked -q -- nextest-filter --source nextest --min-runs 1 \
               --inventory target/nextest-inventory.json --$class)"
             echo "$class: $expr"
             cargo nextest list --locked -E "$expr" > /dev/null

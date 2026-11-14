@@ -42,8 +42,9 @@ pub fn escape(text: &str) -> String {
 }
 
 /// The filterset term matching exactly the stored test `suite`, `name`.
-/// With no suite, which nextest's JUnit always gives, it matches the name
-/// in every binary: an empty `binary_id(=)` is not a valid filterset.
+/// nextest's JUnit always gives a suite; only other JUnit can lack one.
+/// With none, the term matches the name in every binary: an empty
+/// `binary_id(=)` is not a valid filterset.
 pub fn term(suite: &str, name: &str) -> String {
     if suite.is_empty() {
         format!("test(={})", escape(name))
