@@ -39,8 +39,14 @@ jobs:
         run: |
           cargo run --locked -q -- ingest target/nextest/default/junit.xml \
             --commit "$GITHUB_SHA" --source nextest
-          echo "rich: $(cargo run --locked -q -- nextest-filter --source nextest --rich)"
-          echo "poor: $(cargo run --locked -q -- nextest-filter --source nextest --poor)"
+          cargo nextest list --locked --list-type binaries-only \
+            --message-format json > target/nextest-inventory.json
+          for class in rich poor; do
+            expr="$(cargo run --locked -q -- nextest-filter --source nextest \
+              --inventory target/nextest-inventory.json --$class)"
+            echo "$class: $expr"
+            cargo nextest list --locked -E "$expr" > /dev/null
+          done
 
   release-musl:
     name: static release build (x86_64-unknown-linux-musl)
