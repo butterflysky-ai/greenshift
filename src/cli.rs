@@ -146,7 +146,7 @@ fn percentage(text: &str) -> Result<f64, String> {
     }
 }
 
-/// `select`'s and `nextest-filter`'s exit status when there is no full run to select from.
+/// `select`'s exit status when there is no full run to select from.
 pub const NO_HISTORY: u8 = 2;
 
 /// Parse `std::env::args` and run the requested command.
@@ -192,17 +192,22 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
 /// chosen sources (or no store at all), says so and exits [`NO_HISTORY`].
 pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
     with_lines(args, |lines| {
+        let Some(lines) = lines else {
+            return Ok(ExitCode::from(NO_HISTORY));
+        };
         let mut out = std::io::stdout().lock();
         lines
             .iter()
             .try_for_each(|line| writeln!(out, "{line}"))
             .and_then(|()| out.flush())
+            .map(|()| ExitCode::SUCCESS)
     })
 }
 
 /// Print the selection as one nextest filterset, from the same lines as
-/// [`select`] and with the same exits. The inventory is read first, so a
-/// bad one fails before the store is read.
+/// [`select`]. With no history there are no lines, so every test is rich:
+/// it prints `all()` or `none()` and exits 0. The inventory is read first,
+/// so a bad one fails before the store is read.
 pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
     let shown = args.inventory.display();
     let json = if args.inventory.as_os_str() == "-" {
@@ -213,18 +218,20 @@ pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
     let binaries = nextest::binary_ids(&json).with_context(|| format!("inventory {shown}"))?;
     with_lines(&args.select, |lines| {
         let mut out = std::io::stdout().lock();
+        let lines = lines.unwrap_or_default();
         writeln!(out, "{}", nextest::filter(lines, args.class(), &binaries))
             .and_then(|()| out.flush())
+            .map(|()| ExitCode::SUCCESS)
     })
 }
 
-/// Compute `select`'s lines from the store and hand them to `write`, then
-/// name any threshold not reached on stderr. With no full run from the
-/// chosen sources (or no store at all), says so and exits [`NO_HISTORY`]
-/// without calling `write`.
+/// Compute `select`'s lines from the store and hand them to `write`, which
+/// decides the exit status, then name any threshold not reached on stderr.
+/// With no full run from the chosen sources (or no store at all), says so
+/// on stderr and hands `write` `None`.
 fn with_lines(
     args: &SelectArgs,
-    write: impl FnOnce(&[Line<'_>]) -> std::io::Result<()>,
+    write: impl FnOnce(Option<&[Line<'_>]>) -> std::io::Result<ExitCode>,
 ) -> anyhow::Result<ExitCode> {
     let history = match Store::open_read_only(&args.db)? {
         Some(store) => store.history(&args.source)?,
@@ -232,7 +239,7 @@ fn with_lines(
     };
     let Some(analysis) = select::analyse(&history) else {
         eprintln!("no history: run the full suite");
-        return Ok(ExitCode::from(NO_HISTORY));
+        return written(write(None));
     };
     let estimator = args.estimator.estimator();
     let decided = select::split(
@@ -244,15 +251,20 @@ fn with_lines(
         },
     );
     let lines = select::lines(&analysis, estimator, decided.rich, args.min_runs);
-    match write(&lines) {
-        // A reader that stops early (`| head`) has all the lines it wants.
-        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
-        written => written?,
-    }
+    let code = written(write(Some(&lines)))?;
     for missed in decided.unreached {
         eprintln!("greenshift: {missed}");
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(code)
+}
+
+/// The exit status from writing output. A reader that stops early
+/// (`| head`) has all the lines it wants, so that is a success.
+fn written(result: std::io::Result<ExitCode>) -> anyhow::Result<ExitCode> {
+    match result {
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(ExitCode::SUCCESS),
+        result => Ok(result?),
+    }
 }
 
 #[cfg(test)]

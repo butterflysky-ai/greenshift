@@ -409,10 +409,10 @@ fn rich_and_poor_are_exclusive() {
 }
 
 #[test]
-fn no_history_prints_nothing_and_exits_2() {
+fn no_history_matches_every_test_as_rich() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("missing.sqlite");
-    for class in ["--rich", "--poor"] {
+    for (class, expr) in [("--rich", "all()\n"), ("--poor", "none()\n")] {
         greenshift()
             .arg("nextest-filter")
             .arg("--db")
@@ -421,9 +421,27 @@ fn no_history_prints_nothing_and_exits_2() {
             .arg(empty_inventory(dir.path()))
             .arg(class)
             .assert()
-            .code(2)
-            .stdout("")
+            .success()
+            .stdout(expr)
             .stderr("no history: run the full suite\n");
     }
     assert!(!Path::new(&db).exists());
+}
+
+#[test]
+fn a_fresh_project_runs_everything() {
+    let mut p = Project::new();
+    // No store yet.
+    let everything = set(&[
+        tests("odd", ODD),
+        tests("odd", &[FRESH_TEST]),
+        tests("plain", PLAIN),
+    ]);
+    assert_eq!(p.filter(&["--rich"]), "all()");
+    assert_eq!(p.list(&p.filter(&[])), everything);
+    assert_eq!(p.filter(&["--poor"]), "none()");
+    // A store with runs only from another source is no history either.
+    p.run(&[]);
+    assert_eq!(p.filter(&["--source", "elsewhere", "--rich"]), "all()");
+    assert_eq!(p.filter(&["--source", "elsewhere", "--poor"]), "none()");
 }

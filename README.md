@@ -174,8 +174,11 @@ cargo nextest run -E "$(greenshift nextest-filter --source nextest \
   Everything else, spaces and `(`, `|`, `&` and `::` included, is written
   as is: nextest reads a matcher up to the first unescaped `)` or `,`.
 
-Exit status, and stderr for a threshold never reached, are as for
-`select`; with no history (exit 2) nothing is printed to stdout.
+With no history (where `select` exits 2) there is no poor test, so
+`--rich` prints `all()` and `--poor` prints `none()`, and a fresh repo
+runs every test; stderr still says `no history: run the full suite`, and
+the exit status is 0. Otherwise the exit status, and stderr for a
+threshold never reached, are as for `select`.
 
 ## Building
 
