@@ -282,6 +282,7 @@ fn a_store_with_no_runs_is_ok_and_every_test_is_rich() {
     let empty_file = h.dir.path().join("empty.sqlite");
     std::fs::write(&empty_file, "").unwrap();
     for db in [&h.db, &empty_file] {
+        let before = std::fs::read(db).unwrap();
         let out = greenshift()
             .arg("plan")
             .arg("--db")
@@ -294,6 +295,8 @@ fn a_store_with_no_runs_is_ok_and_every_test_is_rich() {
         assert_eq!(plan.0, owned(NOW), "{db:?}");
         assert!(plan.1.is_empty(), "{db:?}");
         assert_eq!(stderr(&out), "no history: run the full suite\n");
+        // An existing store is only read: never migrated or written.
+        assert_eq!(std::fs::read(db).unwrap(), before, "{db:?} was written");
     }
 }
 
@@ -569,4 +572,16 @@ fn names_that_differ_only_in_whitespace_are_different_tests() {
 #[test]
 fn suites_that_differ_only_in_whitespace_are_different_tests() {
     assert_near_twins_are_distinct(|suite| (suite, "case"));
+}
+
+#[test]
+fn a_store_with_runs_is_only_read() {
+    let h = history();
+    let before = std::fs::read(&h.db).unwrap();
+    h.plan(&inventory(NOW), &["--min-runs", "3"]).success();
+    assert_eq!(
+        std::fs::read(&h.db).unwrap(),
+        before,
+        "the store was written"
+    );
 }
