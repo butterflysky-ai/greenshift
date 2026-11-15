@@ -275,7 +275,7 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// Print the selection as one nextest filterset, from the same lines as
-/// [`select`]. With no history there are no lines, so every test is rich:
+/// [`select()`]. With no history there are no lines, so every test is rich:
 /// it prints `all()` or `none()` and exits 0. The inventory is read first,
 /// so a bad one fails before the store is read.
 pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
