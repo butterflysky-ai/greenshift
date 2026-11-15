@@ -1,0 +1,220 @@
+use super::*;
+use crate::select::{Class, Line};
+use crate::tainted::Tainted;
+
+fn id(suite: &str, name: &str) -> TestId {
+    TestId {
+        suite: suite.to_owned(),
+        name: name.to_owned(),
+    }
+}
+
+/// Stored tests, as `select`'s lines borrow them.
+struct Stored(Vec<(Class, Tainted, Tainted)>);
+
+impl Stored {
+    fn new(tests: &[(Class, &str, &str)]) -> Stored {
+        Stored(
+            tests
+                .iter()
+                .map(|&(class, suite, name)| (class, Tainted::raw(suite), Tainted::raw(name)))
+                .collect(),
+        )
+    }
+
+    fn lines(&self) -> Vec<Line<'_>> {
+        self.0
+            .iter()
+            .map(|(class, suite, name)| Line {
+                class: *class,
+                coverage: 100.0,
+                confidence: 100.0,
+                suite,
+                name,
+            })
+            .collect()
+    }
+}
+
+fn ids(tests: &[&TestId]) -> Vec<(String, String)> {
+    tests
+        .iter()
+        .map(|t| (t.suite.clone(), t.name.clone()))
+        .collect()
+}
+
+fn pairs(tests: &[(&str, &str)]) -> Vec<(String, String)> {
+    tests
+        .iter()
+        .map(|&(s, n)| (s.to_owned(), n.to_owned()))
+        .collect()
+}
+
+/// Every inventory test is in exactly one group, and nothing else is.
+fn assert_partition(plan: &Plan<'_>, inventory: &[TestId]) {
+    let mut seen: Vec<&TestId> = plan.rich.iter().chain(&plan.poor).copied().collect();
+    seen.sort();
+    let mut want: Vec<&TestId> = inventory.iter().collect();
+    want.sort();
+    want.dedup();
+    assert_eq!(seen, want);
+}
+
+#[test]
+fn parses_json_lines() {
+    let text = "{\"suite\":\"s\",\"name\":\"a, b (c)\"}\n\
+                \n\
+                {\"name\": \"back\\\\slash\", \"suite\": \"\"}\r\n\
+                {\"suite\":\"s\",\"name\":\"uni \\u00fc \u{2713}\",\"extra\":1}";
+    assert_eq!(
+        parse_inventory(text).unwrap(),
+        [
+            id("s", "a, b (c)"),
+            id("", r"back\slash"),
+            id("s", "uni \u{fc} \u{2713}"),
+        ]
+    );
+}
+
+#[test]
+fn an_empty_inventory_has_no_tests() {
+    assert_eq!(parse_inventory("").unwrap(), []);
+    assert_eq!(parse_inventory("\n \n").unwrap(), []);
+}
+
+#[test]
+fn a_malformed_inventory_names_the_line() {
+    for (text, line) in [
+        ("not json", 1),
+        ("{\"suite\":\"s\",\"name\":\"a\"}\n[\"s\",\"a\"]", 2),
+        ("{\"suite\":\"s\"}", 1),
+        ("{\"name\":\"a\"}", 1),
+        ("{\"suite\":\"s\",\"name\":7}", 1),
+        ("{\"suite\":null,\"name\":\"a\"}", 1),
+        (
+            "{\"suite\":\"s\",\"name\":\"a\"} {\"suite\":\"s\",\"name\":\"b\"}",
+            1,
+        ),
+        ("\n\n{\"suite\":\"s\",\"name\":\"a\"", 3),
+    ] {
+        let err = parse_inventory(text).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&format!("not a greenshift inventory: line {line}: ")),
+            "{text:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn poor_is_the_poor_lines_in_the_inventory_and_rich_is_the_rest() {
+    let stored = Stored::new(&[
+        (Class::Rich, "s", "picked"),
+        (Class::Poor, "s", "steady"),
+        (Class::Poor, "s", "slow"),
+    ]);
+    let inventory = [
+        id("s", "fresh"),
+        id("s", "slow"),
+        id("s", "steady"),
+        id("s", "picked"),
+        id("s", "under_observed"),
+    ];
+    let lines = stored.lines();
+    let plan = plan(&lines, &inventory);
+    // Rich in pick order, then the rest in inventory order; poor in
+    // select's order.
+    assert_eq!(
+        ids(&plan.rich),
+        pairs(&[("s", "picked"), ("s", "fresh"), ("s", "under_observed")])
+    );
+    assert_eq!(ids(&plan.poor), pairs(&[("s", "steady"), ("s", "slow")]));
+    assert_partition(&plan, &inventory);
+}
+
+#[test]
+fn stored_tests_not_in_the_inventory_are_left_out() {
+    let stored = Stored::new(&[
+        (Class::Rich, "s", "gone_rich"),
+        (Class::Poor, "s", "gone_poor"),
+        (Class::Poor, "other", "kept"),
+        (Class::Poor, "s", "kept"),
+    ]);
+    let inventory = [id("s", "kept")];
+    let lines = stored.lines();
+    let plan = plan(&lines, &inventory);
+    assert!(plan.rich.is_empty());
+    assert_eq!(ids(&plan.poor), pairs(&[("s", "kept")]));
+    assert_partition(&plan, &inventory);
+}
+
+#[test]
+fn with_no_lines_every_test_is_rich() {
+    let inventory = [id("s", "a"), id("", "b")];
+    let plan = plan(&[], &inventory);
+    assert_eq!(ids(&plan.rich), pairs(&[("s", "a"), ("", "b")]));
+    assert!(plan.poor.is_empty());
+    assert_partition(&plan, &inventory);
+}
+
+#[test]
+fn a_test_listed_twice_is_planned_once() {
+    let stored = Stored::new(&[(Class::Poor, "s", "p")]);
+    let inventory = [id("s", "p"), id("s", "r"), id("s", "p"), id("s", "r")];
+    let lines = stored.lines();
+    let plan = plan(&lines, &inventory);
+    assert_eq!(ids(&plan.rich), pairs(&[("s", "r")]));
+    assert_eq!(ids(&plan.poor), pairs(&[("s", "p")]));
+    assert_partition(&plan, &inventory);
+}
+
+#[test]
+fn an_empty_inventory_plans_nothing() {
+    let stored = Stored::new(&[(Class::Rich, "s", "a"), (Class::Poor, "s", "b")]);
+    let lines = stored.lines();
+    let plan = plan(&lines, &[]);
+    assert!(plan.rich.is_empty() && plan.poor.is_empty());
+    assert_eq!(plan.to_json(), r#"{"rich":[],"poor":[]}"#);
+}
+
+#[test]
+fn names_are_matched_and_written_raw() {
+    let odd = [
+        ("s", "a, b (c)"),
+        ("s", r"back\slash"),
+        ("s", "tab\there"),
+        ("s", "uni \u{fc}n\u{ef} \u{2713}"),
+        ("s", "quote\"d"),
+        ("s,(x)", "esc\u{1b}[31m"),
+    ];
+    let stored = Stored::new(&odd.map(|(s, n)| (Class::Poor, s, n)));
+    let inventory: Vec<TestId> = odd.iter().map(|&(s, n)| id(s, n)).collect();
+    let lines = stored.lines();
+    let plan = plan(&lines, &inventory);
+    assert!(plan.rich.is_empty());
+    assert_eq!(ids(&plan.poor), pairs(&odd));
+    let json: serde_json::Value = serde_json::from_str(&plan.to_json()).unwrap();
+    let poor: Vec<(String, String)> = json["poor"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            (
+                t["suite"].as_str().unwrap().to_owned(),
+                t["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(poor, pairs(&odd));
+    assert!(!plan.to_json().contains('\u{1b}'), "{}", plan.to_json());
+}
+
+#[test]
+fn json_has_rich_then_poor_on_one_line() {
+    let stored = Stored::new(&[(Class::Poor, "s", "p")]);
+    let inventory = [id("s", "p"), id("", "r")];
+    let lines = stored.lines();
+    assert_eq!(
+        plan(&lines, &inventory).to_json(),
+        r#"{"rich":[{"suite":"","name":"r"}],"poor":[{"suite":"s","name":"p"}]}"#
+    );
+}

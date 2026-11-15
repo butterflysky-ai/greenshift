@@ -9,6 +9,7 @@
 pub mod cli;
 pub mod junit;
 pub mod nextest;
+pub mod plan;
 pub mod select;
 pub mod store;
 pub mod tainted;
