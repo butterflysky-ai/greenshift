@@ -335,3 +335,9 @@ fn every_invisible_character_is_escaped_and_reads_back() {
     assert!(!json.chars().any(invisible), "{json:?}");
     assert_eq!(read_group(&json, "rich"), pairs(&odd));
 }
+
+#[test]
+fn a_repeated_member_takes_its_last_value() {
+    let text = r#"{"suite":"s","name":"first","name":"last","suite":"t"}"#;
+    assert_eq!(parse_inventory(text).unwrap(), [id("t", "last")]);
+}

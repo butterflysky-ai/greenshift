@@ -241,7 +241,8 @@ It prints one line of JSON:
 - **Tests.** A test is its `suite` and `name`, both required strings
   (the suite may be empty), compared exactly with the store's suite and
   name as ingested. Other members are ignored, blank lines are skipped,
-  and a test listed twice is planned once.
+  and a test listed twice is planned once. A member repeated within one
+  object takes its last value.
 - **Groups.** Every inventory test is in exactly one group. Poor is the
   inventory tests on `select`'s poor lines, in `select`'s order. Rich is
   every other inventory test: first `select`'s rich tests in pick order,
