@@ -20,7 +20,8 @@ use crate::tainted::Tainted;
 
 /// A test, as the inventory gives it and the plan writes it. Suite and
 /// name are text from outside the program, so they are [`Tainted`]: the
-/// raw text is reachable only through [`Tainted::as_raw`].
+/// raw text is reachable only through [`Tainted::as_raw`]. It is matched
+/// with the store by suite and name, never by the store's test id.
 ///
 /// ```
 /// let tests = greenshift::plan::parse_inventory(r#"{"suite":"s","name":"n"}"#).unwrap();
@@ -32,7 +33,7 @@ use crate::tainted::Tainted;
 /// let name: &str = &tests[0].name;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestId {
+pub struct InventoryTest {
     pub suite: Tainted,
     pub name: Tainted,
 }
@@ -48,7 +49,7 @@ pub struct InventoryError {
 /// The tests of an inventory: JSON lines, each an object with string
 /// `suite` and `name` members (other members are ignored). Blank lines
 /// are skipped.
-pub fn parse_inventory(text: &str) -> Result<Vec<TestId>, InventoryError> {
+pub fn parse_inventory(text: &str) -> Result<Vec<InventoryTest>, InventoryError> {
     let mut tests = Vec::new();
     for (at, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -67,7 +68,7 @@ pub fn parse_inventory(text: &str) -> Result<Vec<TestId>, InventoryError> {
                 .map(Tainted::raw)
                 .ok_or_else(|| error(format!("no string {key:?}")))
         };
-        tests.push(TestId {
+        tests.push(InventoryTest {
             suite: member("suite")?,
             name: member("name")?,
         });
@@ -80,21 +81,21 @@ pub fn parse_inventory(text: &str) -> Result<Vec<TestId>, InventoryError> {
 pub struct Plan<'a> {
     /// `select`'s rich tests in pick order, then every other non-poor
     /// inventory test in inventory order.
-    pub rich: Vec<&'a TestId>,
+    pub rich: Vec<&'a InventoryTest>,
     /// `select`'s poor tests in its order.
-    pub poor: Vec<&'a TestId>,
+    pub poor: Vec<&'a InventoryTest>,
 }
 
 /// Split `inventory` by `select`'s `lines`: poor is the inventory tests on
 /// poor lines, rich the rest, rich lines' tests first. A test listed twice
 /// is planned once. With no lines (no history) every test is rich.
-pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [TestId]) -> Plan<'a> {
-    let key = |t: &'a TestId| (t.suite.as_raw(), t.name.as_raw());
+pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [InventoryTest]) -> Plan<'a> {
+    let key = |t: &'a InventoryTest| (t.suite.as_raw(), t.name.as_raw());
     // A test listed twice has one key. The last pass below, not this map,
     // puts the rest in inventory order.
-    let mut unplanned: BTreeMap<(&str, &str), &'a TestId> =
+    let mut unplanned: BTreeMap<(&str, &str), &'a InventoryTest> =
         inventory.iter().map(|test| (key(test), test)).collect();
-    let mut take = |class: Class| -> Vec<&'a TestId> {
+    let mut take = |class: Class| -> Vec<&'a InventoryTest> {
         lines
             .iter()
             .filter(|line| line.class == class)
@@ -155,7 +156,7 @@ impl Plan<'_> {
     /// character included, so the plan is one line and no control
     /// character reaches a terminal raw.
     pub fn to_json(&self, history: HistoryState) -> String {
-        let group = |tests: &[&TestId]| {
+        let group = |tests: &[&InventoryTest]| {
             let tests: Vec<String> = tests
                 .iter()
                 .map(|t| {

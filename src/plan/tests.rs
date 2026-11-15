@@ -2,8 +2,8 @@ use super::*;
 use crate::select::{Class, Line};
 use crate::tainted::Tainted;
 
-fn id(suite: &str, name: &str) -> TestId {
-    TestId {
+fn id(suite: &str, name: &str) -> InventoryTest {
+    InventoryTest {
         suite: Tainted::raw(suite),
         name: Tainted::raw(name),
     }
@@ -36,7 +36,7 @@ impl Stored {
     }
 }
 
-fn ids(tests: &[&TestId]) -> Vec<(String, String)> {
+fn ids(tests: &[&InventoryTest]) -> Vec<(String, String)> {
     tests
         .iter()
         .map(|t| (t.suite.as_raw().to_owned(), t.name.as_raw().to_owned()))
@@ -51,8 +51,8 @@ fn pairs(tests: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 /// Every inventory test is in exactly one group, and nothing else is.
-fn assert_partition(plan: &Plan<'_>, inventory: &[TestId]) {
-    let planned: Vec<&TestId> = plan.rich.iter().chain(&plan.poor).copied().collect();
+fn assert_partition(plan: &Plan<'_>, inventory: &[InventoryTest]) {
+    let planned: Vec<&InventoryTest> = plan.rich.iter().chain(&plan.poor).copied().collect();
     let mut seen = ids(&planned);
     seen.sort();
     let mut want = ids(&inventory.iter().collect::<Vec<_>>());
@@ -222,7 +222,7 @@ fn names_are_matched_and_written_raw() {
         ("s,(x)", "esc\u{1b}[31m"),
     ];
     let stored = Stored::new(&odd.map(|(s, n)| (Class::Poor, s, n)));
-    let inventory: Vec<TestId> = odd.iter().map(|&(s, n)| id(s, n)).collect();
+    let inventory: Vec<InventoryTest> = odd.iter().map(|&(s, n)| id(s, n)).collect();
     let lines = stored.lines();
     let plan = plan(&lines, &inventory);
     assert!(plan.rich.is_empty());
@@ -252,7 +252,7 @@ fn every_control_character_is_escaped_and_reads_back() {
     // DEL and C1 (CSI, NEL) are control characters that JSON may leave
     // raw; the plan escapes them all, as nextest's filterset does.
     let odd = [("s", "del\u{7f}"), ("s\u{9b}31m", "csi\u{9b}nel\u{85}x")];
-    let inventory: Vec<TestId> = odd.iter().map(|&(s, n)| id(s, n)).collect();
+    let inventory: Vec<InventoryTest> = odd.iter().map(|&(s, n)| id(s, n)).collect();
     let plan = plan(&[], &inventory);
     let json = plan.to_json(HistoryState::Ok);
     assert!(!json.chars().any(char::is_control), "{json:?}");
