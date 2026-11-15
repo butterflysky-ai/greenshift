@@ -37,7 +37,7 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-/// The output holds `shown` and no raw ESC or `raw`.
+/// The output holds `shown` and neither a raw ESC nor `EVIL` itself.
 #[cfg(unix)]
 fn shows_escaped(output: &[u8], shown: &str) {
     let text = String::from_utf8_lossy(output);
