@@ -32,7 +32,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 
-use crate::junit::{Outcome, Tainted, TestCase};
+use crate::junit::{Outcome, TestCase};
+use crate::tainted::Tainted;
 
 /// The default store location, relative to the working directory.
 pub const DEFAULT_PATH: &str = ".greenshift/history.sqlite";
@@ -95,12 +96,13 @@ pub enum StoreError {
         source: std::io::Error,
     },
     // SQLite's messages can quote text from the store file itself (a
-    // malformed schema, say), so the whole cause chain is escaped into
-    // `message` rather than chained as a source and printed raw.
+    // malformed schema, say), so the whole cause chain is kept in
+    // `message` as `Tainted`, escaped when displayed, rather than chained
+    // as a source and printed raw.
     #[error("history store {path}: {message}")]
     Sqlite {
         path: Tainted,
-        message: String,
+        message: Tainted,
         sqlite: rusqlite::Error,
     },
     #[error(
@@ -317,8 +319,8 @@ impl Store {
 
     /// A migrated store that lives only in memory.
     pub fn open_in_memory() -> Result<Store, StoreError> {
-        let conn = Connection::open_in_memory().map_err(sqlite_err(&Tainted::from(":memory:")))?;
-        Store::init(conn, Tainted::from(":memory:"))
+        let conn = Connection::open_in_memory().map_err(sqlite_err(&Tainted::raw(":memory:")))?;
+        Store::init(conn, Tainted::raw(":memory:"))
     }
 
     fn init(conn: Connection, path: Tainted) -> Result<Store, StoreError> {
@@ -506,11 +508,13 @@ impl Store {
             .and_then(|mut stmt| {
                 stmt.query_map(params_from_iter(sources), |r| {
                     let outcome: String = r.get(2)?;
+                    // Raw, not `{:?}`: the message is kept as `Tainted`,
+                    // which escapes it when shown.
                     let outcome = stored_outcome(&outcome).ok_or_else(|| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
                             rusqlite::types::Type::Text,
-                            format!("unknown outcome {outcome:?}").into(),
+                            format!("unknown outcome \"{outcome}\"").into(),
                         )
                     })?;
                     Ok((
@@ -531,7 +535,7 @@ impl Store {
                 stmt.query_map([], |r| {
                     let suite: String = r.get(1)?;
                     let name: String = r.get(2)?;
-                    Ok((r.get(0)?, (suite.into(), name.into())))
+                    Ok((r.get(0)?, (Tainted::raw(suite), Tainted::raw(name))))
                 })?
                 .collect()
             })
@@ -604,7 +608,7 @@ fn sqlite_err(path: &Tainted) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
         }
         StoreError::Sqlite {
             path: path.clone(),
-            message: crate::junit::escape_file_text(&chain),
+            message: Tainted::raw(chain),
             sqlite,
         }
     }

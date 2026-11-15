@@ -484,47 +484,6 @@ fn references_in_attributes_greenshift_does_not_read_are_not_checked() {
 }
 
 #[test]
-fn escape_file_text_leaves_quotes_alone() {
-    assert_eq!(escape_file_text("a\"b'c\u{1b}\\"), "a\"b'c\\u{1b}\\\\");
-}
-
-#[test]
-fn tainted_displays_control_bytes_escaped() {
-    for (raw, shown) in [
-        ("\u{1b}[31mevil", r"\u{1b}[31mevil"),
-        ("nul\0byte", r"nul\0byte"),
-        ("bell\u{7}del\u{7f}", r"bell\u{7}del\u{7f}"),
-        ("line\nfeed\rtab\t", r"line\nfeed\rtab\t"),
-        ("\u{202e}evil", r"\u{202e}evil"),
-        ("back\\slash", r"back\\slash"),
-    ] {
-        let text = Tainted::from(raw).to_string();
-        assert_eq!(text, shown, "{raw:?}");
-        assert!(!text.chars().any(char::is_control), "{text:?}");
-    }
-}
-
-#[test]
-fn tainted_displays_printable_text_and_quotes_unchanged() {
-    let raw = "widgets::parses \"a\" 'sprocket' & caf\u{e9} \u{263a}";
-    assert_eq!(Tainted::from(raw).to_string(), raw);
-}
-
-#[test]
-fn tainted_debug_escapes_control_bytes() {
-    let text = format!("{:?}", Tainted::from("\u{1b}[31mevil\0"));
-    assert!(!text.chars().any(char::is_control), "{text:?}");
-    assert!(text.contains(r"\u{1b}[31mevil\0"), "{text:?}");
-}
-
-#[test]
-fn tainted_as_raw_is_the_text_unchanged() {
-    let raw = "\u{1b}[31mevil\0\"q\"";
-    assert_eq!(Tainted::from(raw).as_raw(), raw);
-    assert_eq!(Tainted::from(raw.to_string()).as_raw(), raw);
-}
-
-#[test]
 fn not_utf8_file_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("latin1.xml");
@@ -562,7 +521,7 @@ fn wrong_root_error_escapes_control_bytes_in_the_tag_name() {
     // The tag name comes straight from the input file: a crafted root
     // element name must not be able to put a raw control byte (e.g. an
     // ANSI escape) into the error text printed to the user's terminal.
-    let err = JunitError::WrongRoot("\u{1b}[31mevil".into());
+    let err = JunitError::WrongRoot(Tainted::raw("\u{1b}[31mevil"));
     let text = err.to_string();
     assert!(!text.contains('\u{1b}'), "{text:?}");
     assert!(text.contains("evil"), "{text:?}");
@@ -572,8 +531,8 @@ fn wrong_root_error_escapes_control_bytes_in_the_tag_name() {
 fn bad_time_error_escapes_control_bytes_in_name_and_time() {
     let err = JunitError::BadTime {
         position: 0,
-        name: "\u{1b}[31msprocket".into(),
-        time: "\u{1b}[31mbad".into(),
+        name: Tainted::raw("\u{1b}[31msprocket"),
+        time: Tainted::raw("\u{1b}[31mbad"),
     };
     let text = err.to_string();
     assert!(!text.contains('\u{1b}'), "{text:?}");
@@ -613,6 +572,7 @@ fn errors_from_parsing_escape_control_bytes_in_file_text() {
         let text = err.to_string();
         assert!(!text.contains('\u{1b}'), "{xml:?}: {text:?}");
         assert!(text.contains(r"\u{1b}[31mevil"), "{xml:?}: {text:?}");
+        assert!(!text.contains(r"\\u{1b}"), "{xml:?}: escaped twice: {text:?}");
     }
 }
 
@@ -640,6 +600,33 @@ fn xml_errors_escape_control_bytes_quoted_from_the_file() {
         let text = err.to_string();
         assert!(!text.contains('\u{1b}'), "{text:?}");
         assert!(text.contains(r"\u{1b}[31mevil"), "{text:?}");
+        assert!(!text.contains(r"\\u{1b}"), "escaped twice: {text:?}");
+    }
+}
+
+#[test]
+fn every_error_quoting_file_text_escapes_it_exactly_once() {
+    let evil = || Tainted::raw("\u{1b}[31mevil");
+    for err in [
+        JunitError::Xml {
+            position: 0,
+            message: evil(),
+        },
+        JunitError::UnknownEntity {
+            position: 0,
+            name: evil(),
+        },
+        JunitError::WrongRoot(evil()),
+        JunitError::BadTime {
+            position: 0,
+            name: evil(),
+            time: evil(),
+        },
+    ] {
+        let text = err.to_string();
+        assert!(text.contains(r"\u{1b}[31mevil"), "{text:?}");
+        assert!(!text.contains(r"\\u{1b}"), "escaped twice: {text:?}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
     }
 }
 

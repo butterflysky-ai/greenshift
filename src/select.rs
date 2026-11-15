@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::junit::Outcome;
-use crate::junit::Tainted;
 use crate::store::{History, StoredRun};
+use crate::tainted::Tainted;
 
 /// A run is full when it has at least this share of the largest result
 /// count among the [`FULL_WINDOW`] full runs before it, as a fraction

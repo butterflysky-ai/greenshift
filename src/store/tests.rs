@@ -4,8 +4,8 @@ use super::*;
 
 fn tc(suite: &str, name: &str, outcome: Outcome, ms: Option<i64>) -> TestCase {
     TestCase {
-        suite: suite.into(),
-        name: name.into(),
+        suite: Tainted::raw(suite),
+        name: Tainted::raw(name),
         outcome,
         duration_ms: ms,
     }
@@ -851,4 +851,88 @@ fn a_commit_id_is_kept_in_lower_case() {
     assert_eq!(id.as_str(), "0123abcdef");
     assert_eq!(id.to_string(), "0123abcdef");
     assert_eq!(id, "0123abcdef".parse().unwrap());
+}
+
+#[test]
+fn a_sqlite_error_keeps_its_message_raw_and_displays_it_escaped_once() {
+    // A store whose schema text holds a terminal escape and a backslash:
+    // SQLite's "malformed database schema" message quotes it from the file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        r"CREATE TABLE t(x);
+         PRAGMA writable_schema = ON;
+         UPDATE sqlite_schema SET name = 't' || char(27) || '[31mRED\',
+             sql = 'CREATE TABLE t(x) ' || char(27) || '[31mRED\';",
+    )
+    .unwrap();
+    drop(conn);
+    let err = Store::open(&path).unwrap_err();
+    let StoreError::Sqlite { message, .. } = &err else {
+        panic!("not a SQLite error: {err:?}");
+    };
+    assert!(message.as_raw().contains("\u{1b}[31mRED\\"), "{message:?}");
+    let shown = err.to_string();
+    assert!(shown.contains(r"\u{1b}[31mRED\\"), "{shown:?}");
+    assert!(!shown.contains(r"\\u{1b}"), "escaped twice: {shown:?}");
+    assert!(!shown.contains('\u{1b}'), "{shown:?}");
+}
+
+#[test]
+fn every_store_error_escapes_its_path_and_message_exactly_once() {
+    let path = || Tainted::from(std::path::Path::new("\u{1b}[31mevil.sqlite"));
+    let io = || std::io::Error::other("io");
+    for err in [
+        StoreError::CreateDir {
+            path: path(),
+            source: io(),
+        },
+        StoreError::Sqlite {
+            path: path(),
+            message: Tainted::raw("\u{1b}[31mevil"),
+            sqlite: rusqlite::Error::QueryReturnedNoRows,
+        },
+        StoreError::TooNew {
+            path: path(),
+            found: 9,
+            supported: 1,
+        },
+        StoreError::NotAStore {
+            path: path(),
+            found: 1,
+            expected: 2,
+        },
+        StoreError::BadVersion {
+            path: path(),
+            found: 9,
+        },
+        StoreError::MemoryPath { path: path() },
+    ] {
+        let text = err.to_string();
+        assert!(text.contains(r"\u{1b}[31mevil"), "{text:?}");
+        assert!(!text.contains(r"\\u{1b}"), "escaped twice: {text:?}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+    }
+}
+
+#[test]
+fn an_unknown_outcome_in_the_store_is_shown_escaped_exactly_once() {
+    // The outcome comes from the store file. It goes into the error raw
+    // and is escaped once, when the error is displayed.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_run(&RUN, &[tc("s", "t", Outcome::Passed, Some(1))])
+        .unwrap();
+    store
+        .conn
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE results SET outcome = char(27) || '[31mevil';",
+        )
+        .unwrap();
+    let shown = store.history(&[]).unwrap_err().to_string();
+    assert!(shown.contains(r#""\u{1b}[31mevil""#), "{shown:?}");
+    assert!(!shown.contains(r"\\u{1b}"), "escaped twice: {shown:?}");
+    assert!(!shown.contains('\u{1b}'), "{shown:?}");
 }
