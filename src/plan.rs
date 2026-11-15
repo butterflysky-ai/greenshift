@@ -133,6 +133,8 @@ pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [InventoryTest]) -> Plan<'a> 
 /// [`crate::nextest::escape`] escapes control characters for a filterset.
 fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
+    // serde_json's own escapes are printable ASCII, so this pass leaves
+    // them whole and touches only the characters it left raw.
     for c in serde_json::Value::from(text).to_string().chars() {
         if c.is_control() || invisible(c) {
             for unit in c.encode_utf16(&mut [0; 2]) {
