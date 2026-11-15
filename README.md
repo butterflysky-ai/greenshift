@@ -5,7 +5,8 @@ greenshift picks which tests to run from what your tests have done before.
 It is early. This release records test history from JUnit XML into a
 per-repo SQLite store (`greenshift ingest`), chooses tests from that
 history (`greenshift select`) and writes that choice as a cargo-nextest
-filterset (`greenshift nextest-filter`).
+filterset (`greenshift nextest-filter`) or, for any test runner, as JSON
+rich and poor groups of the current tests (`greenshift plan`).
 
 ## Ingest
 
@@ -204,6 +205,61 @@ With no history (where `select` exits 2) there is no poor test, so
 runs every test; stderr still says `no history: run the full suite`, and
 the exit status is 0. Otherwise the exit status, and stderr for a
 threshold never reached, are as for `select`.
+
+## Plan
+
+```
+greenshift plan --inventory FILE [--db PATH] [--source NAME]...
+                [--min-runs N] [--coverage N] [--confidence N]
+                [--estimator wilson|empirical|smoothed]
+```
+
+`plan` is `nextest-filter` for any test runner. It takes `select`'s
+options, works out the same lines, and splits the tests that exist now
+into a rich group, to run first, and a poor group, to run after.
+`--inventory` lists those tests, one JSON object per line, as a file or
+`-` for stdin:
+
+```
+{"suite":"vaelii.core-test","name":"parses-a-rule"}
+{"suite":"vaelii.core-test","name":"rejects a bent, (odd) name"}
+```
+
+It prints one line of JSON:
+
+```
+{"rich":[{"suite":"…","name":"…"},…],"poor":[{"suite":"…","name":"…"},…]}
+```
+
+- **Tests.** A test is its `suite` and `name`, both required strings
+  (the suite may be empty), compared exactly with the store's suite and
+  name as ingested. Other members are ignored, blank lines are skipped,
+  and a test listed twice is planned once.
+- **Groups.** Every inventory test is in exactly one group. Poor is the
+  inventory tests on `select`'s poor lines, in `select`'s order. Rich is
+  every other inventory test: first `select`'s rich tests in pick order,
+  then the rest in inventory order. So tests the store has never seen, and
+  those with fewer than `--min-runs` results (`select`'s *new* tests), are
+  rich. Stored tests that are not in the inventory are left out.
+- **Names.** Suite and name are written as JSON strings of the raw text:
+  JSON's own escapes only (`\"`, `\\`, `\t`, `\u001b` and so on), none of
+  `select`'s display escaping, so they read back exactly as stored.
+  Commas, parentheses, slashes and non-ASCII text are written as they are.
+
+With no history (where `select` exits 2) there is no poor test, so every
+inventory test is rich; stderr still says `no history: run the full
+suite`. An empty inventory prints `{"rich":[],"poor":[]}`.
+
+Exit status:
+
+- 0: the plan was printed, with or without history. stderr names any
+  `--coverage` or `--confidence` threshold never reached, as for
+  `select`.
+- 1: an error, and nothing is printed to stdout: an inventory that
+  cannot be read, or a line of it that is not a JSON object with string
+  `suite` and `name` (stderr names the line), or a `--db` file that is
+  not a greenshift store.
+- 2: a usage error, such as no `--inventory`.
 
 ## Building
 
