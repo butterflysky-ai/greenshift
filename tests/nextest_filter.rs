@@ -185,6 +185,15 @@ impl Project {
                 .env_remove("FRESH")
                 .output()
                 .expect("cargo nextest runs (is cargo-nextest installed?)");
+            // Green, or failing only a test asked to fail (nextest's exit
+            // code 100); never refusing to run, say an empty pass (4).
+            let failed_as_asked = !fail.is_empty() && out.status.code() == Some(100);
+            assert!(
+                out.status.success() || failed_as_asked,
+                "nextest exited {:?} for {expr:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
             let junit = self.root().join("target/nextest/default/junit.xml");
             assert!(
                 junit.exists(),
