@@ -57,7 +57,7 @@ pub fn parse_inventory(text: &str) -> Result<Vec<InventoryTest>, InventoryError>
         }
         let error = |why: String| InventoryError { line: at + 1, why };
         let value: serde_json::Value =
-            serde_json::from_str(line).map_err(|err| error(err.to_string()))?;
+            serde_json::from_str(line).map_err(|err| error(json_why(&err)))?;
         let Some(object) = value.as_object() else {
             return Err(error("not an object".to_owned()));
         };
@@ -74,6 +74,18 @@ pub fn parse_inventory(text: &str) -> Result<Vec<InventoryTest>, InventoryError>
         });
     }
     Ok(tests)
+}
+
+/// serde_json's message for an error in one inventory line, which it
+/// places at line 1 of the line: the column only, as the line number is
+/// the inventory's.
+fn json_why(err: &serde_json::Error) -> String {
+    let full = err.to_string();
+    let at = format!(" at line {} column {}", err.line(), err.column());
+    match full.strip_suffix(&at) {
+        Some(what) => format!("{what} at column {}", err.column()),
+        None => full,
+    }
 }
 
 /// The inventory split into rich and poor.

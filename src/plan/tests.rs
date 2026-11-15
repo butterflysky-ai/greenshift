@@ -103,6 +103,7 @@ fn a_malformed_inventory_names_the_line() {
             err.starts_with(&format!("not a greenshift inventory: line {line}: ")),
             "{text:?}: {err}"
         );
+        assert_eq!(err.matches("line").count(), 1, "two line numbers: {err}");
     }
 }
 
@@ -305,4 +306,13 @@ fn a_test_is_its_suite_and_name_not_its_name_alone() {
     assert_eq!(ids(&plan.rich), pairs(&[("t", "same"), ("t", "pick")]));
     assert_eq!(ids(&plan.poor), pairs(&[("s", "same")]));
     assert_partition(&plan, &inventory);
+}
+
+#[test]
+fn a_json_error_names_its_line_once_and_its_column() {
+    let text = "{\"suite\":\"s\",\"name\":\"a\"}\n\n{\"suite\": x}";
+    assert_eq!(
+        parse_inventory(text).unwrap_err().to_string(),
+        "not a greenshift inventory: line 3: expected value at column 11"
+    );
 }
