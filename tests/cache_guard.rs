@@ -61,6 +61,32 @@ fn the_combined_cache_action_fails() {
 }
 
 #[test]
+fn action_names_match_without_case() {
+    let workflow = good_with("actions/cache/restore@v4", "Actions/Cache@v4");
+    guard(&workflow).code(1).stdout("").stderr(contains(
+        "1 step(s) use actions/cache, which saves on pull requests too",
+    ));
+    let workflow = good_with("actions/cache/save@v4", "Actions/Cache/save@v4");
+    guard(&workflow).success();
+    let workflow = good_with(
+        "      - if: always() && github.event_name == 'push'\n        uses: actions/cache/save@v4",
+        "      - uses: ACTIONS/CACHE/save@v4",
+    );
+    guard(&workflow)
+        .code(1)
+        .stdout("")
+        .stderr(contains("an actions/cache/save step runs if '(always)'"));
+}
+
+#[test]
+fn a_job_calling_a_reusable_workflow_fails() {
+    let workflow = format!("{GOOD}  shared:\n    uses: ./.github/workflows/shared.yml\n");
+    guard(&workflow).code(1).stdout("").stderr(contains(
+        r#"jobs ["shared"] call a reusable workflow, whose steps this check cannot see"#,
+    ));
+}
+
+#[test]
 fn a_save_on_any_other_condition_fails() {
     let workflow = good_with("always() && github.event_name == 'push'", "always()");
     guard(&workflow)
