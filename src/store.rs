@@ -90,7 +90,7 @@ pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 pub enum StoreError {
     #[error("could not create {path}")]
     CreateDir {
-        path: String,
+        path: Tainted,
         #[source]
         source: std::io::Error,
     },
@@ -99,7 +99,7 @@ pub enum StoreError {
     // `message` rather than chained as a source and printed raw.
     #[error("history store {path}: {message}")]
     Sqlite {
-        path: String,
+        path: Tainted,
         message: String,
         sqlite: rusqlite::Error,
     },
@@ -107,7 +107,7 @@ pub enum StoreError {
         "history store {path} has schema version {found}, newer than this greenshift supports ({supported}); upgrade greenshift"
     )]
     TooNew {
-        path: String,
+        path: Tainted,
         found: i64,
         supported: i64,
     },
@@ -115,16 +115,16 @@ pub enum StoreError {
         "{path} is not a greenshift history store (SQLite application_id {found}, expected {expected}); refusing to use it"
     )]
     NotAStore {
-        path: String,
+        path: Tainted,
         found: i32,
         expected: i32,
     },
     #[error("history store {path} has schema version {found}, which no greenshift writes")]
-    BadVersion { path: String, found: i64 },
+    BadVersion { path: Tainted, found: i64 },
     #[error(
-        "{path} is SQLite's special name for a private in-memory database, not a file; pass a real path"
+        "\"{path}\" is SQLite's special name for a private in-memory database, not a file; pass a real path"
     )]
-    MemoryPath { path: String },
+    MemoryPath { path: Tainted },
 }
 
 /// A commit id as `ingest --commit` takes it: 7 to 64 hex digits, a full
@@ -230,7 +230,7 @@ pub struct History {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
-    path: String,
+    path: Tainted,
 }
 
 impl Store {
@@ -238,10 +238,10 @@ impl Store {
     /// directory, and migrate it to [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         refuse_memory_path(path)?;
-        let shown = Tainted::from(path).to_string();
+        let shown = Tainted::from(path);
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|source| StoreError::CreateDir {
-                path: Tainted::from(dir).to_string(),
+                path: Tainted::from(dir),
                 source,
             })?;
         }
@@ -266,7 +266,7 @@ impl Store {
         if matches!(path.try_exists(), Ok(false)) {
             return Ok(None);
         }
-        let shown = Tainted::from(path).to_string();
+        let shown = Tainted::from(path);
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn =
             Connection::open_with_flags(as_plain_file(path), flags).map_err(sqlite_err(&shown))?;
@@ -317,11 +317,11 @@ impl Store {
 
     /// A migrated store that lives only in memory.
     pub fn open_in_memory() -> Result<Store, StoreError> {
-        let conn = Connection::open_in_memory().map_err(sqlite_err(":memory:"))?;
-        Store::init(conn, ":memory:".into())
+        let conn = Connection::open_in_memory().map_err(sqlite_err(&Tainted::from(":memory:")))?;
+        Store::init(conn, Tainted::from(":memory:"))
     }
 
-    fn init(conn: Connection, path: String) -> Result<Store, StoreError> {
+    fn init(conn: Connection, path: Tainted) -> Result<Store, StoreError> {
         let mut store = Store { conn, path };
         store
             .conn
@@ -558,7 +558,7 @@ fn refuse_memory_path(path: &Path) -> Result<(), StoreError> {
     // when the connection closes, so nothing would persist.
     if path == Path::new(":memory:") || path.as_os_str().is_empty() {
         return Err(StoreError::MemoryPath {
-            path: format!("{:?}", path.as_os_str()),
+            path: Tainted::from(path),
         });
     }
     Ok(())
@@ -593,7 +593,7 @@ fn stored_outcome(text: &str) -> Option<Outcome> {
 }
 
 /// Wraps a SQLite error with the store path it happened on.
-fn sqlite_err(path: &str) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
+fn sqlite_err(path: &Tainted) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
     move |sqlite| {
         let mut chain = sqlite.to_string();
         let mut cause = std::error::Error::source(&sqlite);
@@ -603,7 +603,7 @@ fn sqlite_err(path: &str) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
             cause = c.source();
         }
         StoreError::Sqlite {
-            path: path.to_owned(),
+            path: path.clone(),
             message: crate::junit::escape_file_text(&chain),
             sqlite,
         }

@@ -132,3 +132,27 @@ fn an_inventory_path_from_argv_is_shown_escaped() {
         &format!("inventory {}", dir.path().join(EVIL_SHOWN).display()),
     );
 }
+
+// Bytes that are not UTF-8 show as U+FFFD, as Path::display shows them.
+#[cfg(unix)]
+#[test]
+fn a_path_that_is_not_utf8_is_shown_with_replacement_characters() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir
+        .path()
+        .join(std::ffi::OsStr::from_bytes(b"bad\xffname.xml"));
+    let out = greenshift()
+        .arg("ingest")
+        .arg("--db")
+        .arg(dir.path().join("history.sqlite"))
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("bad\u{fffd}name.xml: could not read file"),
+        "{stderr:?}"
+    );
+}

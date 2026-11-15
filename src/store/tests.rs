@@ -169,7 +169,7 @@ fn a_parent_that_is_a_file_is_a_create_dir_error() {
     std::fs::write(&blocker, "").unwrap();
     let err = Store::open(&blocker.join("sub/history.sqlite")).unwrap_err();
     assert!(
-        matches!(err, StoreError::CreateDir { ref path, .. } if *path == blocker.join("sub").display().to_string()),
+        matches!(err, StoreError::CreateDir { ref path, .. } if *path == Tainted::from(blocker.join("sub").as_path())),
         "{err:?}"
     );
     assert!(blocker.is_file());
