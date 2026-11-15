@@ -150,10 +150,13 @@ fn json_string(text: &str) -> String {
 }
 
 /// Whether `c` does not print, by the tables `str::escape_debug` uses
-/// (as [`Tainted`]'s display does): it escapes `c` as `\u{…}` in text:
+/// for a character that follows another: it escapes `c` as `\u{…}` there:
 /// a format character (Unicode Cf: bidi controls, U+200B, U+FEFF and
 /// so on), a line or paragraph separator (U+2028, U+2029), a space other
-/// than U+0020, a private-use or unassigned code point, or a control.
+/// than U+0020, a private-use or unassigned code point, or a control. A
+/// combining mark such as U+0301 is not one: it prints on the character
+/// before it, so the plan writes it raw. [`Tainted`]'s display, which
+/// escapes each character alone, escapes combining marks too.
 fn invisible(c: char) -> bool {
     // `str::escape_debug` escapes a combining mark only first in the
     // text, so `c` follows another character.
