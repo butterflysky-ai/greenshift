@@ -132,6 +132,37 @@ fn poor_is_the_poor_lines_in_the_inventory_and_rich_is_the_rest() {
 }
 
 #[test]
+fn rich_picks_keep_select_s_pick_order() {
+    // Pick order is neither name nor inventory order.
+    let stored = Stored::new(&[
+        (Class::Rich, "s", "m_pick"),
+        (Class::Rich, "s", "z_pick"),
+        (Class::Rich, "s", "a_pick"),
+        (Class::Poor, "s", "steady"),
+    ]);
+    let inventory = [
+        id("s", "a_pick"),
+        id("s", "fresh"),
+        id("s", "steady"),
+        id("s", "z_pick"),
+        id("s", "m_pick"),
+    ];
+    let lines = stored.lines();
+    let plan = plan(&lines, &inventory);
+    assert_eq!(
+        ids(&plan.rich),
+        pairs(&[
+            ("s", "m_pick"),
+            ("s", "z_pick"),
+            ("s", "a_pick"),
+            ("s", "fresh")
+        ])
+    );
+    assert_eq!(ids(&plan.poor), pairs(&[("s", "steady")]));
+    assert_partition(&plan, &inventory);
+}
+
+#[test]
 fn stored_tests_not_in_the_inventory_are_left_out() {
     let stored = Stored::new(&[
         (Class::Rich, "s", "gone_rich"),
