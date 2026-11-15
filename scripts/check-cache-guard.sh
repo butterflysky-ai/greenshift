@@ -36,15 +36,16 @@ fi
 saves="$(yq "[$steps | select(.uses // \"\" | test(\"^actions/cache/save@\"))] | length" "$workflow")"
 if [ "$saves" -eq 0 ]; then
     fail "no actions/cache/save step to check"
+else
+    # Read the conditions first, so a yq failure stops the script (set -e)
+    # rather than leaving the loop nothing to check.
+    conds="$(yq "$steps | select(.uses // \"\" | test(\"^actions/cache/save@\")) | .if // \"(always)\"" "$workflow")"
+    while IFS= read -r cond; do
+        if [ "$cond" != "$save_if" ]; then
+            fail "an actions/cache/save step runs if '$cond', not '$save_if'"
+        fi
+    done <<< "$conds"
 fi
-# Read the conditions first, so a yq failure stops the script (set -e)
-# rather than leaving the loop nothing to check.
-conds="$(yq "$steps | select(.uses // \"\" | test(\"^actions/cache/save@\")) | .if // \"(always)\"" "$workflow")"
-while IFS= read -r cond; do
-    if [ "$cond" != "$save_if" ]; then
-        fail "an actions/cache/save step runs if '$cond', not '$save_if'"
-    fi
-done <<< "$conds"
 
 branches="$(yq -o=json -I=0 '.on.push.branches' "$workflow")"
 if [ "$branches" != '["main"]' ]; then
