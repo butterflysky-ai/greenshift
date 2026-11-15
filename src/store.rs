@@ -90,7 +90,7 @@ pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 pub enum StoreError {
     #[error("could not create {path}")]
     CreateDir {
-        path: String,
+        path: Tainted,
         #[source]
         source: std::io::Error,
     },
@@ -99,7 +99,7 @@ pub enum StoreError {
     // `message` rather than chained as a source and printed raw.
     #[error("history store {path}: {message}")]
     Sqlite {
-        path: String,
+        path: Tainted,
         message: String,
         sqlite: rusqlite::Error,
     },
@@ -107,7 +107,7 @@ pub enum StoreError {
         "history store {path} has schema version {found}, newer than this greenshift supports ({supported}); upgrade greenshift"
     )]
     TooNew {
-        path: String,
+        path: Tainted,
         found: i64,
         supported: i64,
     },
@@ -115,23 +115,76 @@ pub enum StoreError {
         "{path} is not a greenshift history store (SQLite application_id {found}, expected {expected}); refusing to use it"
     )]
     NotAStore {
-        path: String,
+        path: Tainted,
         found: i32,
         expected: i32,
     },
     #[error("history store {path} has schema version {found}, which no greenshift writes")]
-    BadVersion { path: String, found: i64 },
+    BadVersion { path: Tainted, found: i64 },
     #[error(
-        "{path} is SQLite's special name for a private in-memory database, not a file; pass a real path"
+        "\"{path}\" is SQLite's special name for a private in-memory database, not a file; pass a real path"
     )]
-    MemoryPath { path: String },
+    MemoryPath { path: Tainted },
+}
+
+/// A commit id as `ingest --commit` takes it: 7 to 64 hex digits, a full
+/// SHA-1 (40) or SHA-256 (64) object name or an abbreviation of one at
+/// least as long as git's default. Upper-case digits are accepted and kept
+/// in lower case, as git writes them, so one commit is stored one way.
+///
+/// Only new input is checked: `runs.commit_sha` has no constraint, and
+/// rows written before this check may hold anything. Nothing reads them
+/// back as a `CommitId`, so they are never rejected.
+///
+/// ```
+/// let id: greenshift::store::CommitId = "0123ABCD".parse().unwrap();
+/// assert_eq!(id.as_str(), "0123abcd");
+/// assert!("HEAD".parse::<greenshift::store::CommitId>().is_err());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CommitId(String);
+
+/// Why text is not a [`CommitId`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("a commit is {min} to {max} hex digits", min = CommitId::MIN_LEN, max = CommitId::MAX_LEN)]
+pub struct CommitIdError;
+
+impl CommitId {
+    /// The fewest digits taken: git's default abbreviation.
+    pub const MIN_LEN: usize = 7;
+    /// The most digits taken: a full SHA-256 object name.
+    pub const MAX_LEN: usize = 64;
+
+    /// The id in lower case, as stored.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for CommitId {
+    type Err = CommitIdError;
+
+    fn from_str(text: &str) -> Result<CommitId, CommitIdError> {
+        let len_ok = (CommitId::MIN_LEN..=CommitId::MAX_LEN).contains(&text.len());
+        if len_ok && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Ok(CommitId(text.to_ascii_lowercase()))
+        } else {
+            Err(CommitIdError)
+        }
+    }
+}
+
+impl std::fmt::Display for CommitId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// A run about to be recorded.
 #[derive(Debug, Clone, Copy)]
 pub struct NewRun<'a> {
     /// The commit the tests ran against, if known.
-    pub commit: Option<&'a str>,
+    pub commit: Option<&'a CommitId>,
     /// Which producer or CI job the results came from.
     pub source: &'a str,
     /// The JUnit files the results came from, in the order given.
@@ -177,7 +230,7 @@ pub struct History {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
-    path: String,
+    path: Tainted,
 }
 
 impl Store {
@@ -185,10 +238,10 @@ impl Store {
     /// directory, and migrate it to [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         refuse_memory_path(path)?;
-        let shown = path.display().to_string();
+        let shown = Tainted::from(path);
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|source| StoreError::CreateDir {
-                path: dir.display().to_string(),
+                path: Tainted::from(dir),
                 source,
             })?;
         }
@@ -213,7 +266,7 @@ impl Store {
         if matches!(path.try_exists(), Ok(false)) {
             return Ok(None);
         }
-        let shown = path.display().to_string();
+        let shown = Tainted::from(path);
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn =
             Connection::open_with_flags(as_plain_file(path), flags).map_err(sqlite_err(&shown))?;
@@ -264,11 +317,11 @@ impl Store {
 
     /// A migrated store that lives only in memory.
     pub fn open_in_memory() -> Result<Store, StoreError> {
-        let conn = Connection::open_in_memory().map_err(sqlite_err(":memory:"))?;
-        Store::init(conn, ":memory:".into())
+        let conn = Connection::open_in_memory().map_err(sqlite_err(&Tainted::from(":memory:")))?;
+        Store::init(conn, Tainted::from(":memory:"))
     }
 
-    fn init(conn: Connection, path: String) -> Result<Store, StoreError> {
+    fn init(conn: Connection, path: Tainted) -> Result<Store, StoreError> {
         let mut store = Store { conn, path };
         store
             .conn
@@ -365,7 +418,7 @@ impl Store {
         let tx = self.conn.transaction().map_err(&sqlite)?;
         tx.execute(
             "INSERT INTO runs (commit_sha, source) VALUES (?1, ?2)",
-            params![run.commit, run.source],
+            params![run.commit.map(CommitId::as_str), run.source],
         )
         .map_err(&sqlite)?;
         let run_id = tx.last_insert_rowid();
@@ -505,7 +558,7 @@ fn refuse_memory_path(path: &Path) -> Result<(), StoreError> {
     // when the connection closes, so nothing would persist.
     if path == Path::new(":memory:") || path.as_os_str().is_empty() {
         return Err(StoreError::MemoryPath {
-            path: format!("{:?}", path.as_os_str()),
+            path: Tainted::from(path),
         });
     }
     Ok(())
@@ -540,7 +593,7 @@ fn stored_outcome(text: &str) -> Option<Outcome> {
 }
 
 /// Wraps a SQLite error with the store path it happened on.
-fn sqlite_err(path: &str) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
+fn sqlite_err(path: &Tainted) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
     move |sqlite| {
         let mut chain = sqlite.to_string();
         let mut cause = std::error::Error::source(&sqlite);
@@ -550,7 +603,7 @@ fn sqlite_err(path: &str) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
             cause = c.source();
         }
         StoreError::Sqlite {
-            path: path.to_owned(),
+            path: path.clone(),
             message: crate::junit::escape_file_text(&chain),
             sqlite,
         }

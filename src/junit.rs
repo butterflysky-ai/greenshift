@@ -295,7 +295,8 @@ pub(crate) fn escape_file_text(text: &str) -> String {
     out
 }
 
-/// Text read from an input file, which may hold terminal control bytes.
+/// Text read from an input file, or a path given on the command line,
+/// which may hold terminal control bytes.
 ///
 /// `Display` writes it escaped: control and invisible characters and
 /// backslash as `{:?}` would show them (an ESC
@@ -325,7 +326,8 @@ pub(crate) fn escape_file_text(text: &str) -> String {
 pub struct Tainted(String);
 
 impl Tainted {
-    /// The text exactly as read from the file, control bytes and all.
+    /// The text as given, control bytes and all: unchanged for text read
+    /// from an input file, and for a path its lossy UTF-8 form.
     /// Never print it: format the `Tainted` itself instead.
     pub fn as_raw(&self) -> &str {
         &self.0
@@ -341,6 +343,15 @@ impl From<String> for Tainted {
 impl From<&str> for Tainted {
     fn from(text: &str) -> Tainted {
         Tainted(text.to_owned())
+    }
+}
+
+impl From<&Path> for Tainted {
+    /// The path as [`Path::display`] shows it (bytes that are not UTF-8
+    /// become U+FFFD), so that printing it escapes control characters:
+    /// a path from argv is as untrusted as text from a file.
+    fn from(path: &Path) -> Tainted {
+        Tainted(path.to_string_lossy().into_owned())
     }
 }
 

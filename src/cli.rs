@@ -5,11 +5,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use clap::builder::NonEmptyStringValueParser;
+use clap::builder::{NonEmptyStringValueParser, StringValueParser, TypedValueParser};
+use clap::error::{ContextKind, ContextValue};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::junit::Tainted;
 use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Thresholds, Wilson};
-use crate::store::{self, NewRun, Store};
+use crate::store::{self, CommitId, NewRun, Store};
 use crate::{junit, nextest};
 
 /// Pick which tests to run from what your tests have done before.
@@ -40,9 +42,10 @@ pub struct IngestArgs {
     #[arg(long, value_name = "PATH", default_value = store::DEFAULT_PATH)]
     pub db: PathBuf,
 
-    /// Commit the tests ran against.
-    #[arg(long, value_name = "SHA", value_parser = NonEmptyStringValueParser::new())]
-    pub commit: Option<String>,
+    /// Commit the tests ran against: 7 to 64 hex digits, as
+    /// `git rev-parse HEAD` prints it. Stored in lower case.
+    #[arg(long, value_name = "SHA", value_parser = CommitIdParser)]
+    pub commit: Option<CommitId>,
 
     /// Where the results came from, e.g. the test runner or CI job.
     #[arg(
@@ -139,6 +142,36 @@ impl EstimatorKind {
     }
 }
 
+/// Parses `--commit` as a [`CommitId`]. clap's own error for a rejected
+/// value quotes it raw; this one replaces the quoted value with its
+/// escaped form, as [`Tainted`] shows text, so a value holding terminal
+/// control bytes prints harmlessly. The rest of the message is clap's.
+#[derive(Debug, Clone, Copy)]
+struct CommitIdParser;
+
+impl TypedValueParser for CommitIdParser {
+    type Value = CommitId;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<CommitId, clap::Error> {
+        StringValueParser::new()
+            .try_map(|text| text.parse::<CommitId>())
+            .parse_ref(cmd, arg, value)
+            .map_err(|mut err| {
+                let shown = Tainted::from(value.to_string_lossy().as_ref());
+                err.insert(
+                    ContextKind::InvalidValue,
+                    ContextValue::String(shown.to_string()),
+                );
+                err
+            })
+    }
+}
+
 fn percentage(text: &str) -> Result<f64, String> {
     match text.parse::<f64>() {
         Ok(n) if (0.0..=100.0).contains(&n) => Ok(n),
@@ -163,13 +196,13 @@ pub fn run() -> anyhow::Result<ExitCode> {
 pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
     let mut cases = Vec::new();
     for file in &args.files {
-        let report = junit::parse_file(file).with_context(|| format!("{}", file.display()))?;
+        let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
         cases.extend(report.cases);
     }
     let mut store = Store::open(&args.db)?;
     let recorded = store.record_run(
         &NewRun {
-            commit: args.commit.as_deref(),
+            commit: args.commit.as_ref(),
             source: &args.source,
             files: &args.files,
         },
@@ -183,7 +216,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         plural(recorded.results),
         args.files.len(),
         plural(args.files.len()),
-        args.db.display()
+        Tainted::from(args.db.as_path())
     );
     Ok(())
 }
@@ -209,7 +242,7 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
 /// it prints `all()` or `none()` and exits 0. The inventory is read first,
 /// so a bad one fails before the store is read.
 pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
-    let shown = args.inventory.display();
+    let shown = Tainted::from(args.inventory.as_path());
     let json = if args.inventory.as_os_str() == "-" {
         std::io::read_to_string(std::io::stdin().lock()).context("inventory on stdin")?
     } else {
@@ -297,7 +330,7 @@ mod tests {
             "--db",
             "h.sqlite",
             "--commit",
-            "abc123",
+            "abc1234",
             "--source",
             "nextest",
             "a.xml",
@@ -307,7 +340,7 @@ mod tests {
             panic!("not ingest");
         };
         assert_eq!(args.db, PathBuf::from("h.sqlite"));
-        assert_eq!(args.commit.as_deref(), Some("abc123"));
+        assert_eq!(args.commit.as_ref().map(CommitId::as_str), Some("abc1234"));
         assert_eq!(args.source, "nextest");
     }
 
