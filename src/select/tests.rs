@@ -436,6 +436,104 @@ fn a_partial_poor_only_run_is_not_full() {
     assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 11));
 }
 
+/// The names of the tests `analysis`'s cover picks, in pick order.
+fn picks(analysis: &Analysis) -> Vec<&str> {
+    analysis
+        .cover
+        .iter()
+        .map(|pick| analysis.tests[pick.test].name.as_raw())
+        .collect()
+}
+
+/// Whether a test is one of suite `s`'s `names`.
+fn among<'a>(names: &'a [&str]) -> impl Fn(&Tainted, &Tainted) -> bool + 'a {
+    move |suite, name| suite.as_raw() == "s" && names.contains(&name.as_raw())
+}
+
+#[test]
+fn the_cover_among_eligible_tests_picks_the_witnesses_left() {
+    // a fails with b in the first run and with c in the second: a alone
+    // covers both, but with a gone, b and c are each the witness left for
+    // one run.
+    let store = store_of(&[
+        vec![t("a", F, 10), t("b", F, 10), t("c", P, 10)],
+        vec![t("a", F, 10), t("b", P, 10), t("c", F, 10)],
+        vec![t("a", P, 10), t("b", P, 10), t("c", P, 10)],
+    ]);
+    let history = store.history(&[]).unwrap();
+    assert_eq!(picks(&analyse(&history).unwrap()), ["a"]);
+    let a = analyse_among(&history, among(&["b", "c"])).unwrap();
+    let mut picked = picks(&a);
+    picked.sort_unstable();
+    assert_eq!(picked, ["b", "c"]);
+    assert_eq!((a.rows, a.green, a.tests.len()), (2, 1, 2));
+    // With no eligible test there is nothing to cover, and the two runs
+    // that failed are still not green.
+    let none = analyse_among(&history, among(&[])).unwrap();
+    assert_eq!((none.rows, none.green, none.cover.len()), (0, 1, 0));
+}
+
+#[test]
+fn a_gone_witness_is_replaced_by_one_test_that_failed_with_it() {
+    // a, b and c fail together: with a gone, one of b and c covers the
+    // run, and the other is not picked.
+    let store = store_of(&[
+        vec![t("a", F, 10), t("b", F, 10), t("c", F, 10)],
+        vec![t("a", P, 10), t("b", P, 10), t("c", P, 10)],
+    ]);
+    let history = store.history(&[]).unwrap();
+    let a = analyse_among(&history, among(&["b", "c"])).unwrap();
+    assert_eq!(picks(&a), ["b"]);
+}
+
+#[test]
+fn a_run_failing_only_tests_left_out_is_not_green() {
+    // a fails alone in the first run; b, the test left, never fails.
+    let store = store_of(&[
+        vec![t("a", F, 10), t("b", P, 10)],
+        vec![t("a", P, 10), t("b", P, 10)],
+    ]);
+    let history = store.history(&[]).unwrap();
+    let a = analyse_among(&history, among(&["b"])).unwrap();
+    // No row, as b cannot catch it, and not green, as it failed.
+    assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 1));
+    // With every test eligible it is a row, as before.
+    let all = analyse(&history).unwrap();
+    assert_eq!((all.rows, all.green, all.tests.len()), (1, 1, 2));
+}
+
+#[test]
+fn every_test_eligible_still_counts_a_run_failing_only_gone_tests_green() {
+    // `old` fails in the first run but is not in the newest full run, so
+    // it is outside the universe; with no test left out, that run is
+    // green, as select has always counted it.
+    let store = store_of(&[
+        with(fillers(10), &[t("old", F, 10)]),
+        with(fillers(10), &[t("b", P, 10)]),
+    ]);
+    let history = store.history(&[]).unwrap();
+    let a = analyse(&history).unwrap();
+    assert_eq!((a.rows, a.green), (0, 2));
+    assert_eq!(analyse_among(&history, |_, _| true), Some(a));
+}
+
+#[test]
+fn leaving_tests_out_never_makes_a_short_run_full() {
+    // Run 2 was cut short: 2 of 12 results, so not full, though it has
+    // every eligible test. Run 3 is marked partial.
+    let mut store = store_of(&[
+        with(fillers(10), &[t("b", P, 10), t("c", P, 10)]),
+        vec![t("b", F, 10), t("c", P, 10)],
+    ]);
+    record_as(&mut store, "ci", true, &[t("b", P, 10), t("c", F, 10)]);
+    let history = store.history(&[]).unwrap();
+    let a = analyse_among(&history, among(&["b", "c"])).unwrap();
+    assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 2));
+    assert!(a.cover.is_empty(), "{a:?}");
+    // Their results still count towards min-runs.
+    assert!(a.tests.iter().all(|t| t.results == 3), "{a:?}");
+}
+
 #[test]
 fn a_partial_run_alone_is_no_full_run() {
     let mut store = Store::open_in_memory().unwrap();

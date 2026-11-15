@@ -1,5 +1,6 @@
 //! Command-line interface.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,7 +13,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Thresholds, Wilson};
 use crate::store::{self, CommitId, NewRun, Store};
 use crate::tainted::Tainted;
-use crate::{junit, nextest};
+use crate::{junit, nextest, plan};
 
 /// Pick which tests to run from what your tests have done before.
 #[derive(Debug, Parser)]
@@ -30,6 +31,9 @@ pub enum Command {
     Select(SelectArgs),
     /// Print select's choice as a cargo-nextest filterset (`-E`).
     NextestFilter(NextestFilterArgs),
+    /// Print select's choice for the current tests as JSON rich and poor
+    /// groups, for any test runner.
+    Plan(PlanArgs),
 }
 
 #[derive(Debug, Args)]
@@ -113,6 +117,20 @@ pub struct NextestFilterArgs {
     /// Match the poor tests.
     #[arg(long)]
     pub poor: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(mut_arg("db", |db| {
+    db.help("History store to read (created empty if missing, else never written)")
+}))]
+pub struct PlanArgs {
+    #[command(flatten)]
+    pub select: SelectArgs,
+
+    /// The current tests, one `{"suite": ..., "name": ...}` JSON object
+    /// per line, or `-` for stdin. Each lands in exactly one group.
+    #[arg(long, value_name = "FILE", required = true)]
+    pub inventory: PathBuf,
 }
 
 impl NextestFilterArgs {
@@ -231,7 +249,14 @@ pub fn run() -> anyhow::Result<ExitCode> {
         Command::Ingest(args) => ingest(&args).map(|()| ExitCode::SUCCESS),
         Command::Select(args) => select(&args),
         Command::NextestFilter(args) => nextest_filter(&args),
+        Command::Plan(args) => plan(&args),
     }
+}
+
+/// Name `err` on stderr as greenshift names every error, whether it ends
+/// the run (from `main`) or is planned past (by [`plan()`]).
+pub fn show_error(err: &anyhow::Error) {
+    eprintln!("greenshift: error: {err:#}");
 }
 
 /// Parse every file first, so a bad file leaves the store untouched, then
@@ -269,7 +294,8 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
 /// Print the selection. Reads the store only; with no full run from the
 /// chosen sources (or no store at all), says so and exits [`NO_HISTORY`].
 pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
-    with_lines(args, |lines| {
+    let every_test = |_: &Tainted, _: &Tainted| true;
+    with_lines(args, every_test, |lines| {
         let Some(lines) = lines else {
             return Ok(ExitCode::from(NO_HISTORY));
         };
@@ -282,25 +308,86 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
     })
 }
 
-/// Print the selection as one nextest filterset, from the same lines as
-/// [`select()`]. With no history there are no lines, so every test is rich:
-/// it prints `all()` or `none()` and exits 0. The inventory is read first,
-/// so a bad one fails before the store is read.
+/// Print the selection as one nextest filterset, from lines made as
+/// [`select()`] makes them but chosen from the inventory's tests only
+/// ([`nextest::Listing::has`]), so rich is never a test the inventory
+/// shows is gone.
+/// With no history there are no lines, so every test is rich: it prints
+/// `all()` or `none()` and exits 0. The inventory is read first, so a bad
+/// one fails before the store is read.
 pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
-    let context = || InventoryContext(Tainted::from(args.inventory.as_path()));
-    let json = if args.inventory.as_os_str() == "-" {
-        std::io::read_to_string(std::io::stdin().lock()).context("inventory on stdin")?
-    } else {
-        std::fs::read_to_string(&args.inventory).with_context(context)?
-    };
-    let binaries = nextest::binary_ids(&json).with_context(context)?;
-    with_lines(&args.select, |lines| {
+    let listing = read_inventory(&args.inventory, nextest::listing)?;
+    let eligible = |suite: &Tainted, name: &Tainted| listing.has(suite.as_raw(), name.as_raw());
+    with_lines(&args.select, eligible, |lines| {
         let mut out = std::io::stdout().lock();
         let lines = lines.unwrap_or_default();
-        writeln!(out, "{}", nextest::filter(lines, args.class(), &binaries))
+        let filter = nextest::filter(lines, args.class(), &listing.binaries);
+        writeln!(out, "{filter}")
             .and_then(|()| out.flush())
             .map(|()| ExitCode::SUCCESS)
     })
+}
+
+/// Print the plan: the inventory split into rich and poor, from lines made
+/// as [`select()`] makes them but chosen from the inventory's tests only,
+/// by suite and name, as one line of JSON. A missing store is created
+/// empty, through [`Store::open`]; an existing one is only read. With no
+/// history there are no lines, so every test is rich. A store that cannot
+/// be created or read is no history too: the plan's `history` is `error`,
+/// stderr names the error, and it still exits 0, so a broken store never
+/// stops the tests from running. The inventory is read first, so a bad
+/// one fails, with nothing printed, before the store is touched.
+pub fn plan(args: &PlanArgs) -> anyhow::Result<ExitCode> {
+    let tests = read_inventory(&args.inventory, plan::parse_inventory)?;
+    let known: HashSet<(&Tainted, &Tainted)> =
+        tests.iter().map(|test| (&test.suite, &test.name)).collect();
+    let eligible = |suite: &Tainted, name: &Tainted| known.contains(&(suite, name));
+    let write = |history: plan::HistoryState, lines: Option<&[Line<'_>]>| {
+        let mut out = std::io::stdout().lock();
+        let lines = lines.unwrap_or_default();
+        writeln!(out, "{}", plan::plan(lines, &tests).to_json(history))
+            .and_then(|()| out.flush())
+            .map(|()| ExitCode::SUCCESS)
+    };
+    match plan_history(&args.select) {
+        Ok(history) => with_history(&history, &args.select, eligible, |lines| {
+            write(plan::HistoryState::Ok, lines)
+        }),
+        Err(err) => {
+            show_error(&err);
+            written(write(plan::HistoryState::Error, None))
+        }
+    }
+}
+
+/// The history `plan` reads. A missing store is created, and its history
+/// read through the same connection: none, unless another process wrote
+/// runs to it after the check found it missing.
+fn plan_history(args: &SelectArgs) -> anyhow::Result<store::History> {
+    // Only a store known to be missing is created; any other trouble
+    // finding it is left to the read below to name.
+    if matches!(args.db.try_exists(), Ok(false)) {
+        return Ok(Store::open(&args.db)?.history(&args.source)?);
+    }
+    read_history(args)
+}
+
+/// Read the inventory at `path` (`-` for stdin) and `parse` it, with any
+/// error naming the inventory.
+fn read_inventory<T, E>(
+    path: &std::path::Path,
+    parse: impl FnOnce(&str) -> Result<T, E>,
+) -> anyhow::Result<T>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let context = || InventoryContext(Tainted::from(path));
+    let text = if path.as_os_str() == "-" {
+        std::io::read_to_string(std::io::stdin().lock()).context("inventory on stdin")?
+    } else {
+        std::fs::read_to_string(path).with_context(context)?
+    };
+    parse(&text).with_context(context)
 }
 
 /// The error context naming the inventory file: the path is kept raw and
@@ -317,16 +404,33 @@ impl std::fmt::Display for InventoryContext {
 /// Compute `select`'s lines from the store and hand them to `write`, which
 /// decides the exit status, then name any threshold not reached on stderr.
 /// With no full run from the chosen sources (or no store at all), says so
-/// on stderr and hands `write` `None`.
+/// on stderr and hands `write` `None`. The lines are chosen from the
+/// tests `eligible` keeps, by suite and name; see [`select::analyse_among`].
 fn with_lines(
     args: &SelectArgs,
+    eligible: impl Fn(&Tainted, &Tainted) -> bool,
     write: impl FnOnce(Option<&[Line<'_>]>) -> std::io::Result<ExitCode>,
 ) -> anyhow::Result<ExitCode> {
-    let history = match Store::open_read_only(&args.db)? {
+    with_history(&read_history(args)?, args, eligible, write)
+}
+
+/// The history of the chosen sources in the store, read only: none if
+/// there is no store.
+fn read_history(args: &SelectArgs) -> anyhow::Result<store::History> {
+    Ok(match Store::open_read_only(&args.db)? {
         Some(store) => store.history(&args.source)?,
         None => Default::default(),
-    };
-    let Some(analysis) = select::analyse(&history) else {
+    })
+}
+
+/// [`with_lines`] from `history`, already read.
+fn with_history(
+    history: &store::History,
+    args: &SelectArgs,
+    eligible: impl Fn(&Tainted, &Tainted) -> bool,
+    write: impl FnOnce(Option<&[Line<'_>]>) -> std::io::Result<ExitCode>,
+) -> anyhow::Result<ExitCode> {
+    let Some(analysis) = select::analyse_among(history, eligible) else {
         eprintln!("no history: run the full suite");
         return written(write(None));
     };
@@ -523,6 +627,38 @@ mod tests {
         );
         assert!(nextest_filter_args(&["--rich", "--poor"]).is_err());
         assert!(nextest_filter_args(&["--coverage", "101"]).is_err());
+    }
+
+    #[test]
+    fn plan_takes_select_options_and_an_inventory() {
+        assert!(Cli::try_parse_from(["greenshift", "plan"]).is_err());
+        let cli = Cli::try_parse_from([
+            "greenshift",
+            "plan",
+            "--inventory",
+            "-",
+            "--db",
+            "h.sqlite",
+            "--source",
+            "lein",
+            "--min-runs",
+            "3",
+            "--coverage",
+            "90",
+            "--estimator",
+            "smoothed",
+        ])
+        .unwrap();
+        let Command::Plan(args) = cli.command else {
+            panic!("not plan");
+        };
+        assert_eq!(args.inventory, PathBuf::from("-"));
+        assert_eq!(args.select.db, PathBuf::from("h.sqlite"));
+        assert_eq!(args.select.source, ["lein"]);
+        assert_eq!(args.select.min_runs, 3);
+        assert_eq!(args.select.coverage, Some(90.0));
+        assert_eq!(args.select.estimator, EstimatorKind::Smoothed);
+        assert!(Cli::try_parse_from(["greenshift", "plan", "--inventory", "-", "--poor"]).is_err());
     }
 
     #[test]

@@ -132,20 +132,45 @@ pub struct Analysis {
     pub cover: Vec<Pick>,
     /// Matrix rows: full runs in which a universe test failed.
     pub rows: u64,
-    /// Full runs in which no universe test failed.
+    /// Full runs in which no universe test failed, and no test that
+    /// [`analyse_among`]'s `eligible` left out failed either.
     pub green: u64,
 }
 
 /// Analyse `history`, which holds only the runs from the chosen sources.
 /// `None` when it has no full run.
 pub fn analyse(history: &History) -> Option<Analysis> {
+    analyse_among(history, |_, _| true)
+}
+
+/// [`analyse`], with only the tests `eligible` keeps, by suite and name,
+/// in the universe: the tests that can run now, so the cover is chosen
+/// from them rather than from tests that are gone. Which runs are full is
+/// still decided on the whole runs, every test in them, so leaving tests
+/// out never makes a run that was cut short count as full. A run in which
+/// only tests left out failed is not a matrix row, as no test that can
+/// run now caught its failure, and it is not green either: it failed, and
+/// counting it green would overstate the confidence. With every test
+/// eligible there is no such run, so [`analyse`] is unchanged by this.
+pub fn analyse_among(
+    history: &History,
+    eligible: impl Fn(&Tainted, &Tainted) -> bool,
+) -> Option<Analysis> {
     let full = full_runs(&history.runs);
     let newest = full.last()?;
 
     // The universe, by suite and name; `index` maps a test id into it.
-    let mut ids: Vec<i64> = newest.results.iter().map(|r| r.test_id).collect();
     let no_name = (Tainted::default(), Tainted::default());
     let name_of = |id: &i64| history.tests.get(id).unwrap_or(&no_name);
+    let mut ids: Vec<i64> = newest
+        .results
+        .iter()
+        .map(|r| r.test_id)
+        .filter(|id| {
+            let (suite, name) = name_of(id);
+            eligible(suite, name)
+        })
+        .collect();
     let raw = |id: &i64| {
         let (suite, name) = name_of(id);
         (suite.as_raw(), name.as_raw())
@@ -159,8 +184,15 @@ pub fn analyse(history: &History) -> Option<Analysis> {
     let mut green = 0;
     for run in &full {
         let mut failing = Vec::new();
+        // Whether a test `eligible` left out failed in the run.
+        let mut left_out_failed = false;
         for r in &run.results {
+            let failed = matches!(r.outcome, Outcome::Failed | Outcome::Error);
             let Some(&i) = index.get(&r.test_id) else {
+                if failed && !left_out_failed {
+                    let (suite, name) = name_of(&r.test_id);
+                    left_out_failed = !eligible(suite, name);
+                }
                 continue;
             };
             match r.outcome {
@@ -169,10 +201,10 @@ pub fn analyse(history: &History) -> Option<Analysis> {
                 Outcome::Skipped => {}
             }
         }
-        if failing.is_empty() {
-            green += 1;
-        } else {
+        if !failing.is_empty() {
             matrix.push(failing);
+        } else if !left_out_failed {
+            green += 1;
         }
     }
 
