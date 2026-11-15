@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Output};
 
 use assert_cmd::Command;
+use greenshift::store::Store;
 
 const PACKAGE: &str = "odd-names";
 
@@ -234,6 +235,30 @@ impl Project {
             .args(files)
             .assert()
             .success();
+    }
+
+    /// Every run in the store, oldest first, as the `(binary, name)` of
+    /// each of its results.
+    fn stored_runs(&self) -> Vec<BTreeSet<(String, String)>> {
+        let store = Store::open_read_only(&self.db)
+            .unwrap()
+            .expect("a store to read");
+        let history = store.history(&[]).unwrap();
+        let prefix = format!("{PACKAGE}::");
+        history
+            .runs
+            .iter()
+            .map(|run| {
+                run.results
+                    .iter()
+                    .map(|result| {
+                        let (suite, name) = &history.tests[&result.test_id];
+                        let binary = suite.as_raw().strip_prefix(&prefix).expect("a test binary");
+                        (binary.to_owned(), name.as_raw().to_owned())
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// The project's current `cargo nextest list --list-type binaries-only
@@ -557,4 +582,11 @@ fn a_failure_in_one_two_pass_run_is_rich_in_the_next() {
     assert_eq!(p.list(&passes.rich), rich, "{passes:?}");
     assert!(poor.is_disjoint(&rich));
     assert_eq!(&poor | &rich, everything);
+
+    // Both of that run's passes ran tests, and their JUnit went into the
+    // store as one run holding the results of both, not a run per pass.
+    let runs = p.stored_runs();
+    assert_eq!(runs.len(), 5, "a run per run_passes: {runs:?}");
+    let ran = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
+    assert_eq!(runs[4], ran, "the last run holds both passes' results");
 }
