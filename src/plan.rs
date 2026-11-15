@@ -14,6 +14,7 @@
 //! Names are compared and written raw, as stored.
 
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use crate::select::{Class, Line};
 use crate::tainted::Tainted;
@@ -133,7 +134,7 @@ fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     for c in serde_json::Value::from(text).to_string().chars() {
         if c.is_control() {
-            out.push_str(&format!(r"\u{:04x}", u32::from(c)));
+            let _ = write!(out, r"\u{:04x}", u32::from(c));
         } else {
             out.push(c);
         }
