@@ -56,16 +56,16 @@ pub fn parse_inventory(text: &str) -> Result<Vec<TestId>, InventoryError> {
         let error = |why: String| InventoryError { line: at + 1, why };
         let value: serde_json::Value =
             serde_json::from_str(line).map_err(|err| error(err.to_string()))?;
+        let Some(object) = value.as_object() else {
+            return Err(error("not an object".to_owned()));
+        };
         let member = |key: &str| {
-            value
+            object
                 .get(key)
                 .and_then(serde_json::Value::as_str)
                 .map(Tainted::raw)
                 .ok_or_else(|| error(format!("no string {key:?}")))
         };
-        if !value.is_object() {
-            return Err(error("not an object".to_owned()));
-        }
         tests.push(TestId {
             suite: member("suite")?,
             name: member("name")?,
@@ -89,10 +89,10 @@ pub struct Plan<'a> {
 /// is planned once. With no lines (no history) every test is rich.
 pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [TestId]) -> Plan<'a> {
     let key = |t: &'a TestId| (t.suite.as_raw(), t.name.as_raw());
-    let mut unplanned: BTreeMap<(&str, &str), &'a TestId> = BTreeMap::new();
-    for test in inventory.iter().rev() {
-        unplanned.insert(key(test), test);
-    }
+    // A test listed twice has one key. The last pass below, not this map,
+    // puts the rest in inventory order.
+    let mut unplanned: BTreeMap<(&str, &str), &'a TestId> =
+        inventory.iter().map(|test| (key(test), test)).collect();
     let mut take = |class: Class| -> Vec<&'a TestId> {
         lines
             .iter()
