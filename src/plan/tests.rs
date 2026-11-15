@@ -4,8 +4,8 @@ use crate::tainted::Tainted;
 
 fn id(suite: &str, name: &str) -> TestId {
     TestId {
-        suite: suite.to_owned(),
-        name: name.to_owned(),
+        suite: Tainted::raw(suite),
+        name: Tainted::raw(name),
     }
 }
 
@@ -39,7 +39,7 @@ impl Stored {
 fn ids(tests: &[&TestId]) -> Vec<(String, String)> {
     tests
         .iter()
-        .map(|t| (t.suite.clone(), t.name.clone()))
+        .map(|t| (t.suite.as_raw().to_owned(), t.name.as_raw().to_owned()))
         .collect()
 }
 
@@ -52,9 +52,10 @@ fn pairs(tests: &[(&str, &str)]) -> Vec<(String, String)> {
 
 /// Every inventory test is in exactly one group, and nothing else is.
 fn assert_partition(plan: &Plan<'_>, inventory: &[TestId]) {
-    let mut seen: Vec<&TestId> = plan.rich.iter().chain(&plan.poor).copied().collect();
+    let planned: Vec<&TestId> = plan.rich.iter().chain(&plan.poor).copied().collect();
+    let mut seen = ids(&planned);
     seen.sort();
-    let mut want: Vec<&TestId> = inventory.iter().collect();
+    let mut want = ids(&inventory.iter().collect::<Vec<_>>());
     want.sort();
     want.dedup();
     assert_eq!(seen, want);

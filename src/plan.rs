@@ -15,12 +15,25 @@
 use std::collections::BTreeMap;
 
 use crate::select::{Class, Line};
+use crate::tainted::Tainted;
 
-/// A test, as the inventory gives it and the plan writes it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// A test, as the inventory gives it and the plan writes it. Suite and
+/// name are text from outside the program, so they are [`Tainted`]: the
+/// raw text is reachable only through [`Tainted::as_raw`].
+///
+/// ```
+/// let tests = greenshift::plan::parse_inventory(r#"{"suite":"s","name":"n"}"#).unwrap();
+/// assert_eq!(tests[0].name.as_raw(), "n");
+/// ```
+///
+/// ```compile_fail
+/// let tests = greenshift::plan::parse_inventory(r#"{"suite":"s","name":"n"}"#).unwrap();
+/// let name: &str = &tests[0].name;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestId {
-    pub suite: String,
-    pub name: String,
+    pub suite: Tainted,
+    pub name: Tainted,
 }
 
 /// Why an inventory cannot be read: the 1-based line and what is wrong.
@@ -47,7 +60,7 @@ pub fn parse_inventory(text: &str) -> Result<Vec<TestId>, InventoryError> {
             value
                 .get(key)
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
+                .map(Tainted::raw)
                 .ok_or_else(|| error(format!("no string {key:?}")))
         };
         if !value.is_object() {
@@ -75,7 +88,7 @@ pub struct Plan<'a> {
 /// poor lines, rich the rest, rich lines' tests first. A test listed twice
 /// is planned once. With no lines (no history) every test is rich.
 pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [TestId]) -> Plan<'a> {
-    let key = |t: &'a TestId| (t.suite.as_str(), t.name.as_str());
+    let key = |t: &'a TestId| (t.suite.as_raw(), t.name.as_raw());
     let mut unplanned: BTreeMap<(&str, &str), &'a TestId> = BTreeMap::new();
     for test in inventory.iter().rev() {
         unplanned.insert(key(test), test);
@@ -125,8 +138,8 @@ impl Plan<'_> {
                 .map(|t| {
                     format!(
                         r#"{{"suite":{},"name":{}}}"#,
-                        json_string(&t.suite),
-                        json_string(&t.name)
+                        json_string(t.suite.as_raw()),
+                        json_string(t.name.as_raw())
                     )
                 })
                 .collect();
