@@ -503,3 +503,15 @@ fn a_store_that_is_a_directory_is_an_error_and_every_test_is_rich() {
     std::fs::create_dir(&h.db).unwrap();
     assert_store_error(&h, &format!("{}", h.db.display()));
 }
+
+#[test]
+fn a_poor_name_in_another_suite_is_new_and_rich() {
+    let h = history();
+    let now = [("kit2", TAB), ("kit", TAB), ("", TAB)];
+    let plan = groups(&stdout(
+        &h.plan(&inventory(&now), &["--min-runs", "3"]).success(),
+    ));
+    assert_eq!(plan.0, owned(&[("kit2", TAB), ("", TAB)]));
+    assert_eq!(plan.1, owned(&[("kit", TAB)]));
+    assert_partition(&plan, &now);
+}

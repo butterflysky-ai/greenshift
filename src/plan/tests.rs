@@ -293,3 +293,16 @@ fn json_names_the_history_state_first() {
         r#"{"history":"error","rich":[{"suite":"s","name":"r"}],"poor":[]}"#
     );
 }
+
+#[test]
+fn a_test_is_its_suite_and_name_not_its_name_alone() {
+    // A poor name in another suite is a different test, new to the
+    // store, so rich.
+    let stored = Stored::new(&[(Class::Poor, "s", "same"), (Class::Rich, "s", "pick")]);
+    let inventory = [id("t", "same"), id("s", "same"), id("t", "pick")];
+    let lines = stored.lines();
+    let plan = plan(&lines, &inventory);
+    assert_eq!(ids(&plan.rich), pairs(&[("t", "same"), ("t", "pick")]));
+    assert_eq!(ids(&plan.poor), pairs(&[("s", "same")]));
+    assert_partition(&plan, &inventory);
+}
