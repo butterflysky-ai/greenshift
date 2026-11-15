@@ -171,7 +171,14 @@ impl Project {
                 .path()
                 .join(format!("run{}-{profile}.xml", self.runs));
             // Either pass can be empty, which nextest fails by default.
-            let out = self.pass(profile, &["--no-tests=pass", "-E", expr], &fail, &file);
+            // One test at a time, so a profile that stopped at the first
+            // failure would leave the tests after it out of the run.
+            let out = self.pass(
+                profile,
+                &["--no-tests=pass", "--test-threads", "1", "-E", expr],
+                &fail,
+                &file,
+            );
             // Green, or failing only a test asked to fail (nextest's exit
             // code 100); never refusing to run, say an empty pass (4).
             let failed_as_asked = !fail.is_empty() && out.status.code() == Some(100);
