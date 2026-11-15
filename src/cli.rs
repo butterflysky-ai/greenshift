@@ -242,6 +242,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
             commit: args.commit.as_ref(),
             source: &args.source,
             files: &args.files,
+            partial: false,
         },
         &cases,
     )?;

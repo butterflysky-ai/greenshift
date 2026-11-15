@@ -113,6 +113,7 @@ fn record(store: &mut Store, source: &str, cases: &[TestCase]) {
                 commit: None,
                 source,
                 files: &[],
+                partial: false,
             },
             cases,
         )
