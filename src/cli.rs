@@ -310,7 +310,8 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
 
 /// Print the selection as one nextest filterset, from lines made as
 /// [`select()`] makes them but chosen from the inventory's tests only
-/// ([`nextest::Listing::has`]), so rich is never a test that cannot run.
+/// ([`nextest::Listing::has`]), so rich is never a test the inventory
+/// shows is gone.
 /// With no history there are no lines, so every test is rich: it prints
 /// `all()` or `none()` and exits 0. The inventory is read first, so a bad
 /// one fails before the store is read.

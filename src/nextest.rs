@@ -9,7 +9,9 @@
 //! matches no binary it knows, so terms are kept only for binaries in the
 //! current inventory: `cargo nextest list --message-format json`. The
 //! selection itself is made from the tests the inventory has (see
-//! [`Listing::has`]), so the rich tests are ones that can run now.
+//! [`Listing::has`]): a gone binary's tests, and a full listing's gone
+//! tests, are never rich. A binaries-only listing names no tests, so a
+//! test gone from a binary it lists can still be.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
