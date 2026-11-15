@@ -16,8 +16,9 @@
 # MAX - 17 characters, and gets "-" and the first 16 hex digits of the
 # SHA-256 of the name as given appended, so two branches that clean up
 # alike still get keys of their own. The result is at most MAX (200)
-# characters, which leaves the key greenshift-db-BRANCH-RUN_ID-ATTEMPT well
-# under 512.
+# characters, which leaves the key greenshift-db-BRANCH:RUN_ID-ATTEMPT well
+# under 512. The result never holds a ":", which CI's key puts after the
+# branch so that one branch's restore prefix cannot match another's keys.
 set -euo pipefail
 export LC_ALL=C
 

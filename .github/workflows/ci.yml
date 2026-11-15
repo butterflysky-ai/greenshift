@@ -60,16 +60,18 @@ jobs:
           echo "name=$name" >> "$GITHUB_OUTPUT"
       # Cache entries cannot be overwritten, so each run saves under a key
       # of its own, and restores the newest entry for its branch, or else
-      # main's.
+      # main's. Restore keys match by prefix, so the branch ends at a ":",
+      # which the cleaned-up name never holds: feat's prefix, unlike
+      # "greenshift-db-feat-", cannot match feat-x's keys.
       - name: Restore test history
         id: restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.GREENSHIFT_DB }}
-          key: greenshift-db-${{ steps.branch.outputs.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: greenshift-db-${{ steps.branch.outputs.name }}:${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            greenshift-db-${{ steps.branch.outputs.name }}-
-            greenshift-db-main-
+            greenshift-db-${{ steps.branch.outputs.name }}:
+            greenshift-db-main:
       - name: Build greenshift and list the tests
         run: |
           cargo build --locked

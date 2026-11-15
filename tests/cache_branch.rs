@@ -10,6 +10,10 @@ use predicates::str::contains;
 /// The longest name the script prints.
 const MAX: usize = 200;
 
+/// What ends the branch in CI's cache key. The script never prints it,
+/// so one branch's restore prefix cannot match another branch's keys.
+const SEP: char = ':';
+
 fn script() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/cache-branch.sh")
 }
@@ -30,7 +34,7 @@ fn clean(branch: &str) -> String {
 /// packages/cache/src/cache.ts), on the key CI builds, with a run id and
 /// attempt as long as they get.
 fn assert_valid_key(name: &str) {
-    let key = format!("greenshift-db-{name}-9223372036854775807-999999");
+    let key = format!("greenshift-db-{name}{SEP}9223372036854775807-999999");
     assert!(key.chars().count() <= 512, "{key}");
     assert!(!key.contains(','), "{key}");
     assert!(!key.contains('\n'), "{key}");
@@ -88,6 +92,23 @@ fn a_long_name_is_cut_and_hashed() {
 }
 
 #[test]
+fn no_name_holds_the_key_separator() {
+    for branch in [
+        "main".to_owned(),
+        "a:b".to_owned(),
+        ":".to_owned(),
+        "fix,typo".to_owned(),
+        "héllo".to_owned(),
+        ":".repeat(MAX + 1),
+        "c".repeat(MAX + 1),
+        (0x21u8..0x7f).map(char::from).collect(),
+    ] {
+        let name = clean(&branch);
+        assert!(!name.contains(SEP), "{branch:?} gave {name:?}");
+    }
+}
+
+#[test]
 fn no_branch_is_a_usage_error() {
     for args in [&[][..], &[""], &["a", "b"]] {
         Command::new("bash")
@@ -113,20 +134,64 @@ fn restore_step(expr: &str) -> String {
     String::from_utf8(out.get_output().stdout.clone()).unwrap()
 }
 
+const BRANCH_EXPR: &str = "${{ steps.branch.outputs.name }}";
+
+/// The restore step's key and restore keys, as CI would expand them for
+/// `branch` in run 123, attempt 1.
+fn ci_keys(branch: &str) -> (String, Vec<String>) {
+    let name = clean(branch);
+    let expand = |s: &str| {
+        s.replace(BRANCH_EXPR, &name)
+            .replace("${{ github.run_id }}", "123")
+            .replace("${{ github.run_attempt }}", "1")
+    };
+    let key = expand(restore_step(".with.key").trim_end());
+    let restore_keys = restore_step(".with.restore-keys")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(expand)
+        .collect();
+    (key, restore_keys)
+}
+
 #[test]
 fn ci_keys_the_cache_by_the_cleaned_branch_name() {
-    let branch = "${{ steps.branch.outputs.name }}";
+    let branch = BRANCH_EXPR;
     assert_eq!(
         restore_step(".with.key"),
-        format!("greenshift-db-{branch}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}\n")
+        format!(
+            "greenshift-db-{branch}{SEP}${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}\n"
+        )
     );
-    // The first restore key is the key's prefix, up to the run id.
-    let prefix = format!("greenshift-db-{branch}-");
+    // The first restore key is the key's prefix, up to the run id; the
+    // second, main's.
+    let prefix = format!("greenshift-db-{branch}{SEP}");
+    let main = format!("greenshift-db-main{SEP}");
     assert_eq!(
         restore_step(".with.restore-keys")
             .lines()
             .collect::<Vec<_>>(),
-        [prefix.as_str(), "greenshift-db-main-", ""]
+        [prefix.as_str(), main.as_str(), ""]
     );
     assert_eq!(clean("main"), "main");
+}
+
+#[test]
+fn a_branch_restores_only_its_own_history_or_mains() {
+    let (feat_key, feat_restore) = ci_keys("feat");
+    let (feat_x_key, _) = ci_keys("feat-x");
+    let (main_x_key, _) = ci_keys("main-x");
+    let (main_key, _) = ci_keys("main");
+    let [own, main] = feat_restore.as_slice() else {
+        panic!("restore keys {feat_restore:?}")
+    };
+    assert!(feat_key.starts_with(own.as_str()), "{feat_key} {own}");
+    assert!(main_key.starts_with(main.as_str()), "{main_key} {main}");
+    // feat's prefix does not match feat-x's keys, nor main's main-x's.
+    assert!(!feat_x_key.starts_with(own.as_str()), "{feat_x_key} {own}");
+    assert!(
+        !main_x_key.starts_with(main.as_str()),
+        "{main_x_key} {main}"
+    );
 }
