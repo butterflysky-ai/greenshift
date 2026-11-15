@@ -32,8 +32,10 @@ jobs:
       BRANCH: ${{ github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
-      # yq is on GitHub's Ubuntu runners.
-      - name: Check pull requests cannot save the test history
+      # GitHub's ref scoping is what keeps pull requests from writing
+      # main's test history; this lints the workflow against edits that
+      # would have them save it. yq is on GitHub's Ubuntu runners.
+      - name: Check only pushes to main save the test history
         run: scripts/check-cache-guard.sh
       - name: Install Rust
         run: |

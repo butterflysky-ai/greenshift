@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Check, from the workflow file, that a pull request cannot write the test
-# history main's runs read:
+# What stops a pull request writing the test history main's runs read is
+# GitHub, which scopes caches by ref: a cache saved by a pull request is
+# restorable only from that pull request. This script is a regression
+# lint against honest edits: it checks, from the workflow file, that the
+# workflow still asks for only pushes to main to save the history:
 #
+# - no job calls a reusable workflow, whose steps this cannot see;
 # - no step uses actions/cache itself, which saves in a post step on
 #   every event, pull requests included;
 # - every actions/cache/save step runs only on push events, under
 #   exactly the condition below;
 # - push events are main's only.
 #
-# A static check: it reads what the workflow asks for, and cannot show
-# what GitHub does with it. (GitHub also scopes caches by ref: one saved
-# by a pull request is restorable only from that pull request.)
+# A static check of this one file: it reads what the workflow asks for,
+# and cannot show what GitHub does with it, nor see into other workflow
+# files or into actions other than actions/cache.
 #
 #   scripts/check-cache-guard.sh [WORKFLOW]   (default .github/workflows/ci.yml)
 #
