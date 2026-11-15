@@ -20,8 +20,9 @@ jobs:
     # greenshift dogfoods itself: it orders this job's tests from the test
     # history of earlier runs, kept in the actions cache. Pushes to main
     # save the history; run them one at a time, so each starts from the
-    # history the one before saved and no run's results are lost. Every
-    # other run gets a group of its own.
+    # history the one before saved. A group holds one pending run: a push
+    # that lands while another waits cancels the waiting one, which then
+    # records nothing. Every other run gets a group of its own.
     concurrency:
       group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'greenshift-db-main' || format('check-{0}', github.run_id) }}
       cancel-in-progress: false
