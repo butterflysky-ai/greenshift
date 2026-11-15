@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command as Process;
+use std::process::{Command as Process, Output};
 
 use assert_cmd::Command;
 
@@ -66,6 +66,11 @@ fn main() {{
 "#,
         fresh = fresh.then_some(FRESH_TEST),
     )
+}
+
+/// `fail`'s `(binary, name)`s as the harness reads `FAIL`.
+fn fail_lines(fail: &[(&str, &str)]) -> String {
+    fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect()
 }
 
 struct Project {
@@ -141,30 +146,10 @@ impl Project {
     /// Run every test with nextest, failing `fail` (`(binary, name)`), and
     /// ingest its JUnit as one run.
     fn run(&mut self, fail: &[(&str, &str)]) {
-        let fail: String = fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect();
-        let out = self
-            .cargo_nextest(&["run", "--no-fail-fast"])
-            .env("FAIL", &fail)
-            .env_remove("FRESH")
-            .output()
-            .expect("cargo nextest runs (is cargo-nextest installed?)");
-        let junit = self.root().join("target/nextest/default/junit.xml");
-        assert!(
-            junit.exists(),
-            "nextest wrote no JUnit: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
         self.runs += 1;
         let kept = self.dir.path().join(format!("run{}.xml", self.runs));
-        std::fs::rename(&junit, &kept).unwrap();
-        greenshift()
-            .arg("ingest")
-            .arg("--db")
-            .arg(&self.db)
-            .args(["--source", "nextest"])
-            .arg(&kept)
-            .assert()
-            .success();
+        self.pass("default", &["--no-fail-fast"], &fail_lines(fail), &kept);
+        self.ingest(&[kept]);
     }
 
     /// One run as CI makes it (see `.github/workflows/ci.yml`): the rich
@@ -177,17 +162,16 @@ impl Project {
     fn run_passes(&mut self, fail: &[(&str, &str)]) -> (String, String) {
         let [rich, poor] = ["--rich", "--poor"]
             .map(|class| self.filter(&["--source", "nextest", "--min-runs", "3", class]));
-        let fail: String = fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect();
+        let fail = fail_lines(fail);
         self.runs += 1;
         let mut kept = Vec::new();
         for (profile, expr) in [("ci-rich", &rich), ("ci-poor", &poor)] {
+            let file = self
+                .dir
+                .path()
+                .join(format!("run{}-{profile}.xml", self.runs));
             // Either pass can be empty, which nextest fails by default.
-            let out = self
-                .cargo_nextest(&["run", "--profile", profile, "--no-tests=pass", "-E", expr])
-                .env("FAIL", &fail)
-                .env_remove("FRESH")
-                .output()
-                .expect("cargo nextest runs (is cargo-nextest installed?)");
+            let out = self.pass(profile, &["--no-tests=pass", "-E", expr], &fail, &file);
             // Green, or failing only a test asked to fail (nextest's exit
             // code 100); never refusing to run, say an empty pass (4).
             let failed_as_asked = !fail.is_empty() && out.status.code() == Some(100);
@@ -197,30 +181,44 @@ impl Project {
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr)
             );
-            let junit = self
-                .root()
-                .join(format!("target/nextest/{profile}/junit.xml"));
-            assert!(
-                junit.exists(),
-                "nextest wrote no JUnit for {expr:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let file = self
-                .dir
-                .path()
-                .join(format!("run{}-{profile}.xml", self.runs));
-            std::fs::rename(&junit, &file).unwrap();
             kept.push(file);
         }
+        self.ingest(&kept);
+        (poor, rich)
+    }
+
+    /// `cargo nextest run --profile <profile> <args>`, failing the tests
+    /// `fail` lists, with its JUnit moved to `kept`.
+    fn pass(&self, profile: &str, args: &[&str], fail: &str, kept: &Path) -> Output {
+        let out = self
+            .cargo_nextest(&["run", "--profile", profile])
+            .args(args)
+            .env("FAIL", fail)
+            .env_remove("FRESH")
+            .output()
+            .expect("cargo nextest runs (is cargo-nextest installed?)");
+        let junit = self
+            .root()
+            .join(format!("target/nextest/{profile}/junit.xml"));
+        assert!(
+            junit.exists(),
+            "nextest wrote no JUnit for {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::rename(&junit, kept).unwrap();
+        out
+    }
+
+    /// Ingest `files` into the store as one run.
+    fn ingest(&self, files: &[PathBuf]) {
         greenshift()
             .arg("ingest")
             .arg("--db")
             .arg(&self.db)
             .args(["--source", "nextest"])
-            .args(&kept)
+            .args(files)
             .assert()
             .success();
-        (poor, rich)
     }
 
     /// The project's current `cargo nextest list --list-type binaries-only
