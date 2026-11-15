@@ -13,7 +13,7 @@
 //! (see [`HistoryState`]) and `rich` and `poor` arrays of such objects.
 //! Names are compared and written raw, as stored.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use crate::select::{Class, Line};
 use crate::tainted::Tainted;
@@ -90,16 +90,17 @@ pub struct Plan<'a> {
 /// poor lines, rich the rest, rich lines' tests first. A test listed twice
 /// is planned once. With no lines (no history) every test is rich.
 pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [InventoryTest]) -> Plan<'a> {
-    let key = |t: &'a InventoryTest| (t.suite.as_raw(), t.name.as_raw());
+    let key = |t: &'a InventoryTest| (&t.suite, &t.name);
     // A test listed twice has one key. The last pass below, not this map,
-    // puts the rest in inventory order.
-    let mut unplanned: BTreeMap<(&str, &str), &'a InventoryTest> =
+    // puts the rest in inventory order. Keyed as the store keys a test:
+    // by its suite and name, as `Tainted`.
+    let mut unplanned: HashMap<(&Tainted, &Tainted), &'a InventoryTest> =
         inventory.iter().map(|test| (key(test), test)).collect();
     let mut take = |class: Class| -> Vec<&'a InventoryTest> {
         lines
             .iter()
             .filter(|line| line.class == class)
-            .filter_map(|line| unplanned.remove(&(line.suite.as_raw(), line.name.as_raw())))
+            .filter_map(|line| unplanned.remove(&(line.suite, line.name)))
             .collect()
     };
     let mut rich = take(Class::Rich);
