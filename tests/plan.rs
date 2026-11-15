@@ -418,6 +418,38 @@ fn the_cover_is_chosen_from_the_inventory_not_cut_down_to_it() {
 }
 
 #[test]
+fn a_run_failing_only_a_test_gone_from_the_inventory_is_not_green() {
+    // B fails in the first run and C in the second; the third fails only
+    // A, which is gone; the fourth is green.
+    let mut h = History::new();
+    h.ingest(&[("s", "A", true), ("s", "B", true), ("s", "C", false)]);
+    h.ingest(&[("s", "A", false), ("s", "B", false), ("s", "C", true)]);
+    h.ingest(&[("s", "A", true), ("s", "B", false), ("s", "C", false)]);
+    h.ingest(&[("s", "A", false), ("s", "B", false), ("s", "C", false)]);
+    let now = &[("s", "B"), ("s", "C")];
+    // Once B passes, one row is left, and only the fourth run is green:
+    // empirical confidence 1/2, under 60%, so C is rich too. Were the
+    // third run green, B alone would reach 2/3 and C would be poor.
+    let out = h
+        .plan(
+            &inventory(now),
+            &[
+                "--min-runs",
+                "1",
+                "--estimator",
+                "empirical",
+                "--confidence",
+                "60",
+            ],
+        )
+        .success();
+    let (rich, poor) = groups(&stdout(&out));
+    assert_eq!(rich, owned(now));
+    assert_eq!(poor, owned(&[]));
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
 fn an_unreached_threshold_is_named_on_stderr() {
     let h = two_pick_history();
     let out = h

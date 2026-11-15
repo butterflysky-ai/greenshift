@@ -467,9 +467,41 @@ fn the_cover_among_eligible_tests_picks_the_witnesses_left() {
     picked.sort_unstable();
     assert_eq!(picked, ["b", "c"]);
     assert_eq!((a.rows, a.green, a.tests.len()), (2, 1, 2));
-    // With no eligible test there is nothing to cover.
+    // With no eligible test there is nothing to cover, and the two runs
+    // that failed are still not green.
     let none = analyse_among(&history, among(&[])).unwrap();
-    assert_eq!((none.rows, none.green, none.cover.len()), (0, 3, 0));
+    assert_eq!((none.rows, none.green, none.cover.len()), (0, 1, 0));
+}
+
+#[test]
+fn a_run_failing_only_tests_left_out_is_not_green() {
+    // a fails alone in the first run; b, the test left, never fails.
+    let store = store_of(&[
+        vec![t("a", F, 10), t("b", P, 10)],
+        vec![t("a", P, 10), t("b", P, 10)],
+    ]);
+    let history = store.history(&[]).unwrap();
+    let a = analyse_among(&history, among(&["b"])).unwrap();
+    // No row, as b cannot catch it, and not green, as it failed.
+    assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 1));
+    // With every test eligible it is a row, as before.
+    let all = analyse(&history).unwrap();
+    assert_eq!((all.rows, all.green, all.tests.len()), (1, 1, 2));
+}
+
+#[test]
+fn every_test_eligible_still_counts_a_run_failing_only_gone_tests_green() {
+    // `old` fails in the first run but is not in the newest full run, so
+    // it is outside the universe; with no test left out, that run is
+    // green, as select has always counted it.
+    let store = store_of(&[
+        with(fillers(10), &[t("old", F, 10)]),
+        with(fillers(10), &[t("b", P, 10)]),
+    ]);
+    let history = store.history(&[]).unwrap();
+    let a = analyse(&history).unwrap();
+    assert_eq!((a.rows, a.green), (0, 2));
+    assert_eq!(analyse_among(&history, |_, _| true), Some(a));
 }
 
 #[test]

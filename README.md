@@ -181,7 +181,8 @@ cargo nextest run -E "$(greenshift nextest-filter --source nextest \
   tests, and a stored test missing from its binary is left out the same
   way; a binaries-only listing, or a binary a full listing skipped,
   keeps every test of the binary. Which runs count as full is still
-  decided on the whole runs.
+  decided on the whole runs, and a run in which only tests left out
+  failed is never counted as green.
   A binaries-only listing ignores `-E`, and a full one keeps binaries it
   filters out (as `skipped`), so neither drops a binary; `-p`,
   `--exclude` and the target-selection flags (`--lib`, `--test` and so
@@ -261,6 +262,7 @@ It prints one line of JSON:
   gone, the inventory tests that also failed in it are rich instead.
   Which runs count as full is still decided on the whole runs, so a run
   cut short never counts as full because the gone tests are left out.
+  A run in which only gone tests failed is never counted as green.
 - **Names.** Suite and name are written as JSON strings of the raw text:
   JSON's own escapes only (`\"`, `\\`, `\t`, `\u001b` and so on), none of
   `select`'s display escaping, so they read back exactly as stored. Every

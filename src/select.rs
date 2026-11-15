@@ -132,7 +132,8 @@ pub struct Analysis {
     pub cover: Vec<Pick>,
     /// Matrix rows: full runs in which a universe test failed.
     pub rows: u64,
-    /// Full runs in which no universe test failed.
+    /// Full runs in which no universe test failed, and no test that
+    /// [`analyse_among`]'s `eligible` left out failed either.
     pub green: u64,
 }
 
@@ -146,9 +147,11 @@ pub fn analyse(history: &History) -> Option<Analysis> {
 /// in the universe: the tests that can run now, so the cover is chosen
 /// from them rather than from tests that are gone. Which runs are full is
 /// still decided on the whole runs, every test in them, so leaving tests
-/// out never makes a run that was cut short count as full. A failing run
-/// in which no eligible test failed is not a matrix row; it counts as
-/// green, as a run failing only tests outside the universe always has.
+/// out never makes a run that was cut short count as full. A run in which
+/// only tests left out failed is not a matrix row, as no test that can
+/// run now caught its failure, and it is not green either: it failed, and
+/// counting it green would overstate the confidence. With every test
+/// eligible there is no such run, so [`analyse`] is unchanged by this.
 pub fn analyse_among(
     history: &History,
     eligible: impl Fn(&Tainted, &Tainted) -> bool,
@@ -181,8 +184,15 @@ pub fn analyse_among(
     let mut green = 0;
     for run in &full {
         let mut failing = Vec::new();
+        // Whether a test `eligible` left out failed in the run.
+        let mut left_out_failed = false;
         for r in &run.results {
+            let failed = matches!(r.outcome, Outcome::Failed | Outcome::Error);
             let Some(&i) = index.get(&r.test_id) else {
+                if failed && !left_out_failed {
+                    let (suite, name) = name_of(&r.test_id);
+                    left_out_failed = !eligible(suite, name);
+                }
                 continue;
             };
             match r.outcome {
@@ -191,10 +201,10 @@ pub fn analyse_among(
                 Outcome::Skipped => {}
             }
         }
-        if failing.is_empty() {
-            green += 1;
-        } else {
+        if !failing.is_empty() {
             matrix.push(failing);
+        } else if !left_out_failed {
+            green += 1;
         }
     }
 
