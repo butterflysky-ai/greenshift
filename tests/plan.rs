@@ -464,14 +464,31 @@ fn assert_store_error(h: &History, why: &str) {
     assert!(err.contains(why), "{why:?} not in {err}");
 }
 
+/// A store under a file: whether it exists cannot be checked, so it is
+/// read, and the read fails.
 #[test]
-fn a_store_that_cannot_be_created_is_an_error_and_every_test_is_rich() {
+fn a_store_under_a_file_is_an_error_and_every_test_is_rich() {
     let mut h = History::new();
     let file = h.dir.path().join("a-file");
     std::fs::write(&file, "").unwrap();
     h.db = file.join("history.sqlite");
     assert_store_error(&h, &format!("{}", file.display()));
     assert!(!h.db.exists());
+}
+
+/// A store known to be missing whose directory cannot be made: its
+/// parent is a symlink to nowhere, so the store reads as missing and the
+/// creation, not the read, fails.
+#[cfg(unix)]
+#[test]
+fn a_missing_store_that_cannot_be_created_is_an_error_and_every_test_is_rich() {
+    let mut h = History::new();
+    let dangling = h.dir.path().join("dangling");
+    std::os::unix::fs::symlink(h.dir.path().join("nowhere/deeper"), &dangling).unwrap();
+    h.db = dangling.join("history.sqlite");
+    assert!(matches!(h.db.try_exists(), Ok(false)));
+    assert_store_error(&h, &format!("could not create {}", dangling.display()));
+    assert!(!h.dir.path().join("nowhere").exists());
 }
 
 #[test]
