@@ -49,6 +49,15 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.143
+      # A branch name can hold a comma or run past the key's 512
+      # characters, either of which actions/cache refuses; the key gets a
+      # cleaned-up form of it.
+      - name: Name the branch for the cache key
+        id: branch
+        run: |
+          name="$(scripts/cache-branch.sh "$BRANCH")"
+          echo "cache key branch: $name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
       # Cache entries cannot be overwritten, so each run saves under a key
       # of its own, and restores the newest entry for its branch, or else
       # main's.
@@ -57,9 +66,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.GREENSHIFT_DB }}
-          key: greenshift-db-${{ env.BRANCH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: greenshift-db-${{ steps.branch.outputs.name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            greenshift-db-${{ env.BRANCH }}-
+            greenshift-db-${{ steps.branch.outputs.name }}-
             greenshift-db-main-
       - name: Build greenshift and list the tests
         run: |
