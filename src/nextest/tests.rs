@@ -1,5 +1,5 @@
 use super::*;
-use crate::junit::Tainted;
+use crate::tainted::Tainted;
 use std::collections::BTreeSet;
 
 #[test]

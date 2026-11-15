@@ -9,9 +9,9 @@ use clap::builder::{NonEmptyStringValueParser, StringValueParser, TypedValuePars
 use clap::error::{ContextKind, ContextValue};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::junit::Tainted;
 use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Thresholds, Wilson};
 use crate::store::{self, CommitId, NewRun, Store};
+use crate::tainted::Tainted;
 use crate::{junit, nextest};
 
 /// Pick which tests to run from what your tests have done before.

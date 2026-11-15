@@ -32,7 +32,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 
-use crate::junit::{Outcome, Tainted, TestCase};
+use crate::junit::{Outcome, TestCase};
+use crate::tainted::Tainted;
 
 /// The default store location, relative to the working directory.
 pub const DEFAULT_PATH: &str = ".greenshift/history.sqlite";
@@ -604,7 +605,7 @@ fn sqlite_err(path: &Tainted) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
         }
         StoreError::Sqlite {
             path: path.clone(),
-            message: crate::junit::escape_file_text(&chain),
+            message: crate::tainted::escape_file_text(&chain),
             sqlite,
         }
     }
