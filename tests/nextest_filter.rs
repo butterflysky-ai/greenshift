@@ -85,9 +85,10 @@ impl Project {
         std::fs::write(root.join("tests/odd.rs"), harness("odd", ODD, true)).unwrap();
         std::fs::write(root.join("tests/plain.rs"), harness("plain", PLAIN, false)).unwrap();
         std::fs::write(root.join("tests/gone.rs"), harness("gone", GONE, false)).unwrap();
+        // greenshift's own nextest config, with CI's two-pass profiles.
         std::fs::write(
             root.join(".config/nextest.toml"),
-            "[profile.default.junit]\npath = \"junit.xml\"\n",
+            include_str!("../.config/nextest.toml"),
         )
         .unwrap();
         let db = dir.path().join("history.sqlite");
@@ -168,19 +169,20 @@ impl Project {
 
     /// One run as CI makes it (see `.github/workflows/ci.yml`): the rich
     /// and then the poor filterset from the history so far, with
-    /// `--min-runs 3`, each run by nextest as a pass of its own, failing
-    /// `fail`, and both passes' JUnit ingested together as one run.
-    /// Returns the two filtersets.
+    /// `--min-runs 3`, each run by nextest as a pass of its own under CI's
+    /// profile for it (`ci-rich`, `ci-poor`), failing `fail`, and both
+    /// passes' JUnit ingested together as one run. Returns the poor and
+    /// the rich filterset, in that order.
     fn run_passes(&mut self, fail: &[(&str, &str)]) -> (String, String) {
-        let picked = ["--rich", "--poor"]
+        let [rich, poor] = ["--rich", "--poor"]
             .map(|class| self.filter(&["--source", "nextest", "--min-runs", "3", class]));
         let fail: String = fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect();
         self.runs += 1;
         let mut kept = Vec::new();
-        for (pass, expr) in picked.iter().enumerate() {
+        for (profile, expr) in [("ci-rich", &rich), ("ci-poor", &poor)] {
             // Either pass can be empty, which nextest fails by default.
             let out = self
-                .cargo_nextest(&["run", "--no-fail-fast", "--no-tests=pass", "-E", expr])
+                .cargo_nextest(&["run", "--profile", profile, "--no-tests=pass", "-E", expr])
                 .env("FAIL", &fail)
                 .env_remove("FRESH")
                 .output()
@@ -194,7 +196,9 @@ impl Project {
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr)
             );
-            let junit = self.root().join("target/nextest/default/junit.xml");
+            let junit = self
+                .root()
+                .join(format!("target/nextest/{profile}/junit.xml"));
             assert!(
                 junit.exists(),
                 "nextest wrote no JUnit for {expr:?}: {}",
@@ -203,7 +207,7 @@ impl Project {
             let file = self
                 .dir
                 .path()
-                .join(format!("run{}-pass{pass}.xml", self.runs));
+                .join(format!("run{}-{profile}.xml", self.runs));
             std::fs::rename(&junit, &file).unwrap();
             kept.push(file);
         }
@@ -215,7 +219,6 @@ impl Project {
             .args(&kept)
             .assert()
             .success();
-        let [rich, poor] = picked;
         (poor, rich)
     }
 
