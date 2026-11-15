@@ -273,6 +273,73 @@ fn the_inventory_can_come_from_stdin() {
     assert_partition(&groups(&stdout(&out)), NOW);
 }
 
+/// Three runs of `kit`: `left` fails the first, `right` the second, and
+/// `still` never fails, so the cover needs two picks.
+fn two_pick_history() -> History {
+    let mut h = History::new();
+    h.ingest(&[
+        ("kit", "left", true),
+        ("kit", "right", false),
+        ("kit", "still", false),
+    ]);
+    h.ingest(&[
+        ("kit", "left", false),
+        ("kit", "right", true),
+        ("kit", "still", false),
+    ]);
+    h.ingest(&[
+        ("kit", "left", false),
+        ("kit", "right", false),
+        ("kit", "still", false),
+    ]);
+    h
+}
+
+const PICKS: &[(&str, &str)] = &[("kit", "still"), ("kit", "right"), ("kit", "left")];
+
+#[test]
+fn coverage_ends_rich_early() {
+    let h = two_pick_history();
+    let whole = groups(&stdout(
+        &h.plan(&inventory(PICKS), &["--min-runs", "3"]).success(),
+    ));
+    // The whole cover is rich, then the rest in inventory order.
+    assert_eq!(whole.0.len(), 2, "{whole:?}");
+    assert!(!whole.0.contains(&("kit".to_owned(), "still".to_owned())));
+    assert_eq!(whole.1, owned(&[("kit", "still")]));
+    // Half the failing runs are caught by the first pick alone.
+    let out = h
+        .plan(&inventory(PICKS), &["--min-runs", "3", "--coverage", "50"])
+        .success();
+    let half = groups(&stdout(&out));
+    assert_eq!(half.0, whole.0[..1], "{half:?}");
+    assert_eq!(half.1.len(), 2, "{half:?}");
+    assert!(half.1.contains(&whole.0[1]), "{half:?}");
+    assert_partition(&half, PICKS);
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn an_unreached_threshold_is_named_on_stderr() {
+    let h = two_pick_history();
+    let out = h
+        .plan(
+            &inventory(PICKS),
+            &["--min-runs", "3", "--confidence", "99.9"],
+        )
+        .success();
+    let plan = groups(&stdout(&out));
+    assert_eq!(plan.0.len(), 2, "{plan:?}");
+    assert_partition(&plan, PICKS);
+    let err = stderr(&out);
+    assert!(
+        err.starts_with("greenshift: confidence 99.9% not reached; the highest is ")
+            && err.ends_with("%\n")
+            && err.lines().count() == 1,
+        "{err}"
+    );
+}
+
 #[test]
 fn a_malformed_inventory_is_an_error() {
     let h = history();
