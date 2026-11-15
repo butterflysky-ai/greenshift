@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use clap::builder::{NonEmptyStringValueParser, TypedValueParser};
-use clap::error::ErrorKind;
+use clap::builder::{NonEmptyStringValueParser, StringValueParser, TypedValueParser};
+use clap::error::{ContextKind, ContextValue};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::junit::Tainted;
 use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Thresholds, Wilson};
-use crate::store::{self, BadCommitId, CommitId, NewRun, Store};
+use crate::store::{self, CommitId, NewRun, Store};
 use crate::{junit, nextest};
 
 /// Pick which tests to run from what your tests have done before.
@@ -143,8 +143,9 @@ impl EstimatorKind {
 }
 
 /// Parses `--commit` as a [`CommitId`]. clap's own error for a rejected
-/// value quotes it raw; this one quotes it escaped, as [`Tainted`] shows
-/// text, so a value holding terminal control bytes prints harmlessly.
+/// value quotes it raw; this one replaces the quoted value with its
+/// escaped form, as [`Tainted`] shows text, so a value holding terminal
+/// control bytes prints harmlessly. The rest of the message is clap's.
 #[derive(Debug, Clone, Copy)]
 struct CommitIdParser;
 
@@ -157,19 +158,17 @@ impl TypedValueParser for CommitIdParser {
         arg: Option<&clap::Arg>,
         value: &std::ffi::OsStr,
     ) -> Result<CommitId, clap::Error> {
-        let text = value.to_string_lossy();
-        text.parse().map_err(|err: BadCommitId| {
-            let arg = arg.map_or_else(|| "--commit".to_owned(), ToString::to_string);
-            let shown = Tainted::from(text.as_ref());
-            clap::Error::raw(
-                ErrorKind::ValueValidation,
-                format!(
-                    "invalid value '{shown}' for '{arg}': {err}\n\n\
-                     For more information, try '--help'.\n"
-                ),
-            )
-            .with_cmd(cmd)
-        })
+        StringValueParser::new()
+            .try_map(|text| text.parse::<CommitId>())
+            .parse_ref(cmd, arg, value)
+            .map_err(|mut err| {
+                let shown = Tainted::from(value.to_string_lossy().as_ref());
+                err.insert(
+                    ContextKind::InvalidValue,
+                    ContextValue::String(shown.to_string()),
+                );
+                err
+            })
     }
 }
 
@@ -197,8 +196,7 @@ pub fn run() -> anyhow::Result<ExitCode> {
 pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
     let mut cases = Vec::new();
     for file in &args.files {
-        let report =
-            junit::parse_file(file).with_context(|| Tainted::from(file.as_path()).to_string())?;
+        let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
         cases.extend(report.cases);
     }
     let mut store = Store::open(&args.db)?;

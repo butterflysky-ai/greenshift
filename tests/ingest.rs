@@ -375,6 +375,21 @@ fn a_bad_commit_is_a_usage_error_that_says_what_a_commit_is() {
 }
 
 #[test]
+fn a_bad_commit_prints_exactly_one_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    ingest(&db, &[fixture("nextest.xml")], &["--commit", "HEAD"])
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::eq(
+            "error: invalid value 'HEAD' for '--commit <SHA>': a commit is 7 to 64 hex digits\n\
+             \n\
+             For more information, try '--help'.\n",
+        ));
+}
+
+#[test]
 fn a_bad_commit_is_shown_escaped() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("history.sqlite");
