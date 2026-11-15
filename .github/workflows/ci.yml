@@ -17,6 +17,18 @@ jobs:
   check:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
+    # greenshift dogfoods itself: it orders this job's tests from the test
+    # history of earlier runs, kept in the actions cache. Pushes to main
+    # save the history; run them one at a time, so each starts from the
+    # history the one before saved and no run's results are lost. Every
+    # other run gets a group of its own.
+    concurrency:
+      group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'greenshift-db-main' || format('check-{0}', github.run_id) }}
+      cancel-in-progress: false
+    env:
+      GREENSHIFT_DB: .greenshift/history.sqlite
+      # The pull request's branch, or the pushed one.
+      BRANCH: ${{ github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -31,22 +43,71 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.143
-      - name: cargo nextest run
-        run: cargo nextest run --locked
+      # Cache entries cannot be overwritten, so each run saves under a key
+      # of its own, and restores the newest entry for its branch, or else
+      # main's.
+      - name: Restore test history
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.GREENSHIFT_DB }}
+          key: greenshift-db-${{ env.BRANCH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            greenshift-db-${{ env.BRANCH }}-
+            greenshift-db-main-
+      - name: Build greenshift and list the tests
+        run: |
+          cargo build --locked
+          mkdir -p target/greenshift
+          cargo nextest list --locked --list-type binaries-only \
+            --message-format json > target/greenshift/inventory.json
+      - name: Split the tests into poor and rich
+        run: |
+          for class in poor rich; do
+            target/debug/greenshift nextest-filter --db "$GREENSHIFT_DB" \
+              --source nextest --min-runs 3 \
+              --inventory target/greenshift/inventory.json --$class \
+              > "target/greenshift/$class.expr"
+            echo "$class: $(cat "target/greenshift/$class.expr")"
+          done
+      - name: Check every test is in exactly one pass
+        id: partition
+        run: scripts/check-partition.sh target/greenshift/poor.expr target/greenshift/rich.expr
+      # Both passes run, the second even when the first fails; the job
+      # fails if either does. Either can select no test (the poor pass
+      # while the history is young), hence --no-tests=pass.
+      - name: cargo nextest run (poor)
+        run: |
+          cargo nextest run --locked --profile ci-poor --no-tests=pass \
+            -E "$(cat target/greenshift/poor.expr)"
+      - name: cargo nextest run (rich)
+        if: ${{ !cancelled() && steps.partition.outcome == 'success' }}
+        run: |
+          cargo nextest run --locked --profile ci-rich --no-tests=pass \
+            -E "$(cat target/greenshift/rich.expr)"
+      # Both passes' JUnit, as one run, failures included.
+      - name: Record the passes in the test history
+        if: always()
+        run: |
+          files=()
+          for profile in ci-poor ci-rich; do
+            junit="target/nextest/$profile/junit.xml"
+            if [ -f "$junit" ]; then files+=("$junit"); fi
+          done
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no JUnit to record"
+            exit 0
+          fi
+          target/debug/greenshift ingest --db "$GREENSHIFT_DB" \
+            --commit "$GITHUB_SHA" --source nextest "${files[@]}"
+      # Pull requests read the history but never write it.
+      - name: Save test history
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.GREENSHIFT_DB }}
+          key: greenshift-db-${{ env.BRANCH }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: cargo test --doc
         run: cargo test --locked --doc
-      - name: greenshift ingest and nextest-filter
-        run: |
-          cargo run --locked -q -- ingest target/nextest/default/junit.xml \
-            --commit "$GITHUB_SHA" --source nextest
-          cargo nextest list --locked --list-type binaries-only \
-            --message-format json > target/nextest-inventory.json
-          for class in rich poor; do
-            expr="$(cargo run --locked -q -- nextest-filter --source nextest --min-runs 1 \
-              --inventory target/nextest-inventory.json --$class)"
-            echo "$class: $expr"
-            cargo nextest list --locked -E "$expr" > /dev/null
-          done
 
   release-musl:
     name: static release build (x86_64-unknown-linux-musl)
