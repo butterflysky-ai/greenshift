@@ -176,9 +176,9 @@ pub fn analyse(history: &History) -> Option<Analysis> {
         }
     }
 
-    // Result counts and the latest durations, newest first, over every run.
-    // A skip is not a run of the test, so it adds neither a count nor a
-    // duration.
+    // Result counts and the latest durations, newest first, over every run,
+    // partial ones included: each result is a real run of its test. A skip
+    // is not a run of the test, so it adds neither a count nor a duration.
     let mut results = vec![0u64; ids.len()];
     let mut latest: Vec<Vec<u64>> = vec![Vec::new(); ids.len()];
     for run in history.runs.iter().rev() {
@@ -227,12 +227,13 @@ pub fn analyse(history: &History) -> Option<Analysis> {
     })
 }
 
-/// The full runs among `runs`, oldest first. The first run is full; after
+/// The full runs among `runs`, oldest first. A run recorded as partial is
+/// never full, whatever its size. Of the rest, the first is full; after
 /// that a run is full when it has at least [`FULL_SHARE`] of the largest
 /// result count among the [`FULL_WINDOW`] full runs before it.
 fn full_runs(runs: &[StoredRun]) -> Vec<&StoredRun> {
     let mut full: Vec<&StoredRun> = Vec::new();
-    for run in runs {
+    for run in runs.iter().filter(|run| !run.partial) {
         let count = run.results.len() as u64;
         let largest = full
             .iter()
