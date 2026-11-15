@@ -64,6 +64,7 @@ jobs:
           mkdir -p target/greenshift
           cargo nextest list --locked --list-type binaries-only \
             --message-format json > target/greenshift/inventory.json
+      # Keep --min-runs in step with run_passes in tests/nextest_filter.rs.
       - name: Split the tests into poor and rich
         run: |
           for class in poor rich; do

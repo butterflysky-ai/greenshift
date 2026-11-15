@@ -172,7 +172,8 @@ impl Project {
     /// `--min-runs 3`, each run by nextest as a pass of its own under CI's
     /// profile for it (`ci-rich`, `ci-poor`), failing `fail`, and both
     /// passes' JUnit ingested together as one run. Returns the poor and
-    /// the rich filterset, in that order.
+    /// the rich filterset, in that order. Keep `--min-runs` in step with
+    /// the workflow's.
     fn run_passes(&mut self, fail: &[(&str, &str)]) -> (String, String) {
         let [rich, poor] = ["--rich", "--poor"]
             .map(|class| self.filter(&["--source", "nextest", "--min-runs", "3", class]));
