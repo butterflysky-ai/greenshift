@@ -204,9 +204,8 @@ impl Project {
                 .join(format!("run{}-{profile}.xml", self.runs));
             // Either pass can be empty, which nextest fails by default.
             // One test at a time, so a profile that stopped at the first
-            // failure would leave the tests after it out of the run. Only
-            // the poor pass has a failure here, so this checks ci-poor's
-            // fail-fast, not ci-rich's.
+            // failure would leave the tests after it out of the pass, and
+            // its JUnit short of the pass's selection.
             let out = self.pass(
                 profile,
                 &["--no-tests=pass", "--test-threads", "1", "-E", expr],
@@ -221,6 +220,11 @@ impl Project {
                 "nextest exited {:?} for {expr:?}: {}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                junit_tests(&file),
+                self.selected(expr, false),
+                "the {profile} pass ran every test {expr:?} selects"
             );
             kept.push(file);
         }
@@ -332,9 +336,19 @@ impl Project {
     /// The tests `cargo nextest list -E expr` selects, as `(binary, name)`,
     /// with [`FRESH_TEST`] in the inventory.
     fn list(&self, expr: &str) -> BTreeSet<(String, String)> {
-        let out = self
-            .cargo_nextest(&["list", "--message-format", "oneline", "-E", expr])
-            .env("FRESH", "1")
+        self.selected(expr, true)
+    }
+
+    /// The tests `cargo nextest list -E expr` selects, as `(binary, name)`,
+    /// with [`FRESH_TEST`] in the inventory when `fresh` says so.
+    fn selected(&self, expr: &str, fresh: bool) -> BTreeSet<(String, String)> {
+        let mut cmd = self.cargo_nextest(&["list", "--message-format", "oneline", "-E", expr]);
+        if fresh {
+            cmd.env("FRESH", "1");
+        } else {
+            cmd.env_remove("FRESH");
+        }
+        let out = cmd
             .output()
             .expect("cargo nextest runs (is cargo-nextest installed?)");
         assert!(
@@ -353,6 +367,24 @@ impl Project {
             })
             .collect()
     }
+}
+
+/// The tests in the JUnit file `path`, as `(binary, name)`.
+fn junit_tests(path: &Path) -> BTreeSet<(String, String)> {
+    let prefix = format!("{PACKAGE}::");
+    greenshift::junit::parse_file(path)
+        .unwrap()
+        .cases
+        .iter()
+        .map(|case| {
+            let binary = case
+                .suite
+                .as_raw()
+                .strip_prefix(&prefix)
+                .expect("a test binary");
+            (binary.to_owned(), case.name.as_raw().to_owned())
+        })
+        .collect()
 }
 
 fn greenshift() -> Command {
@@ -574,35 +606,39 @@ fn a_failure_in_one_two_pass_run_is_rich_in_the_next() {
         tests("odd", &[FRESH_TEST]),
         tests("plain", PLAIN),
     ]);
+    let ran = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
     // With fewer than 3 runs on record every test is new, so the poor pass
-    // is empty and every test runs in the rich one.
-    for _ in 0..3 {
+    // is empty and every test runs in the rich one. The first run fails
+    // the test nextest runs first there (one at a time, by binary and
+    // then name), so a rich pass that stopped at it would be cut short.
+    let first = ("odd", " leading and trailing ");
+    let owned = |(binary, name): (&str, &str)| (binary.to_owned(), name.to_owned());
+    assert_eq!(ran.first(), Some(&owned(first)), "runs first");
+    for fail in [&[first][..], &[], &[]] {
         let passes = Passes {
             poor: "none()".to_owned(),
             rich: "all()".to_owned(),
         };
-        assert_eq!(p.run_passes(&[]), passes);
+        assert_eq!(p.run_passes(fail), passes);
     }
 
-    // Three green runs: every test on record is poor. One of them fails
-    // in this run's poor pass. Tests run after it there (one at a time, by
-    // name), so a poor pass that stopped at it would be cut short.
+    // Three runs, one failing `first`: it is rich, and every other test on
+    // record is poor. One of those fails in this run's poor pass, with
+    // tests run after it there, so a poor pass that stopped at it would be
+    // cut short too.
     let failing = ("odd", "uni::ünï ✓");
     let passes = p.run_passes(&[failing]);
-    let mut poor = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
+    let mut poor = ran.clone();
+    poor.remove(&owned(first));
+    let mut rich = set(&[tests("odd", &[FRESH_TEST]), vec![owned(first)]]);
     assert_eq!(p.list(&passes.poor), poor, "{passes:?}");
-    assert_eq!(
-        p.list(&passes.rich),
-        set(&[tests("odd", &[FRESH_TEST])]),
-        "{passes:?}"
-    );
+    assert_eq!(p.list(&passes.rich), rich, "{passes:?}");
 
     // The next run reads that failure back: the test that failed is rich
     // now, and the two passes still split every test between them.
     let passes = p.run_passes(&[]);
-    let failing = (failing.0.to_owned(), failing.1.to_owned());
-    poor.remove(&failing);
-    let rich = set(&[tests("odd", &[FRESH_TEST]), vec![failing]]);
+    poor.remove(&owned(failing));
+    rich.insert(owned(failing));
     assert_eq!(p.list(&passes.poor), poor, "{passes:?}");
     assert_eq!(p.list(&passes.rich), rich, "{passes:?}");
     assert!(poor.is_disjoint(&rich));
@@ -612,7 +648,6 @@ fn a_failure_in_one_two_pass_run_is_rich_in_the_next() {
     // store as one run holding the results of both, not a run per pass.
     let runs = p.stored_runs();
     assert_eq!(runs.len(), 5, "a run per run_passes: {runs:?}");
-    let ran = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
     assert_eq!(runs[4], ran, "the last run holds both passes' results");
 }
 
