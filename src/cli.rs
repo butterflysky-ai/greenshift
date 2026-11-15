@@ -349,14 +349,14 @@ pub fn plan(args: &PlanArgs) -> anyhow::Result<ExitCode> {
     }
 }
 
-/// The history `plan` reads: none from a store it has just created,
-/// because the store was missing.
+/// The history `plan` reads. A missing store is created, and its history
+/// read through the same connection: none, unless another process wrote
+/// runs to it after the check found it missing.
 fn plan_history(args: &SelectArgs) -> anyhow::Result<store::History> {
     // Only a store known to be missing is created; any other trouble
     // finding it is left to the read below to name.
     if matches!(args.db.try_exists(), Ok(false)) {
-        Store::open(&args.db)?;
-        return Ok(Default::default());
+        return Ok(Store::open(&args.db)?.history(&args.source)?);
     }
     read_history(args)
 }
