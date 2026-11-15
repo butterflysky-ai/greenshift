@@ -176,9 +176,10 @@ cargo nextest run -E "$(greenshift nextest-filter --source nextest \
   out: nextest refuses a whole filterset in which a `binary_id(=...)`
   matches no binary, as one does once a binary is renamed or removed.
   They are left out before the cover is picked, so a failure only a gone
-  test would have been picked for is caught by the tests that are left,
-  and those are rich. A full listing also names each listed binary's
-  tests, and a stored test missing from its binary is left out the same
+  test would have been picked for gets a pick of its own from the tests
+  left that also failed in it: one of them, not every one. A full
+  listing also names each listed binary's tests, and a stored test
+  missing from its binary is left out the same
   way; a binaries-only listing, or a binary a full listing skipped,
   keeps every test of the binary. Which runs count as full is still
   decided on the whole runs, and a run in which only tests left out
@@ -259,7 +260,8 @@ It prints one line of JSON:
   those with fewer than `--min-runs` results (`select`'s *new* tests), are
   rich. Stored tests that are not in the inventory are left out, and
   before the cover is picked: when a failing run's only rich witness is
-  gone, the inventory tests that also failed in it are rich instead.
+  gone, the cover picks one of the inventory tests that also failed in
+  it instead, not every one of them.
   Which runs count as full is still decided on the whole runs, so a run
   cut short never counts as full because the gone tests are left out.
   A run in which only gone tests failed is never counted as green.

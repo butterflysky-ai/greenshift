@@ -474,6 +474,19 @@ fn the_cover_among_eligible_tests_picks_the_witnesses_left() {
 }
 
 #[test]
+fn a_gone_witness_is_replaced_by_one_test_that_failed_with_it() {
+    // a, b and c fail together: with a gone, one of b and c covers the
+    // run, and the other is not picked.
+    let store = store_of(&[
+        vec![t("a", F, 10), t("b", F, 10), t("c", F, 10)],
+        vec![t("a", P, 10), t("b", P, 10), t("c", P, 10)],
+    ]);
+    let history = store.history(&[]).unwrap();
+    let a = analyse_among(&history, among(&["b", "c"])).unwrap();
+    assert_eq!(picks(&a), ["b"]);
+}
+
+#[test]
 fn a_run_failing_only_tests_left_out_is_not_green() {
     // a fails alone in the first run; b, the test left, never fails.
     let store = store_of(&[

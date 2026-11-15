@@ -7,8 +7,8 @@
 //! every other inventory test, so tests new to the store, or seen too few
 //! times to be poor, run rich. The lines are chosen from the inventory's
 //! tests alone: stored tests not in it are left out before the cover is
-//! picked, so a failure they caught is caught by the inventory tests left,
-//! and those are rich.
+//! picked, so a failure they caught is caught by a pick from the
+//! inventory tests that also failed with them (one, not every one).
 //!
 //! The inventory is JSON lines, one `{"suite": "...", "name": "..."}`
 //! object per test; the plan is one JSON object with a `history` state
