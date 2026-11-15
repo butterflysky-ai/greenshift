@@ -180,6 +180,12 @@ impl HistoryState {
     }
 }
 
+impl std::fmt::Display for HistoryState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Plan<'_> {
     /// `{"history":"ok","rich":[{"suite":...,"name":...},...],"poor":[...]}`
     /// on one line, members in that order: `history` comes first, as it
@@ -201,8 +207,7 @@ impl Plan<'_> {
             format!("[{}]", tests.join(","))
         };
         format!(
-            r#"{{"history":"{}","rich":{},"poor":{}}}"#,
-            history.as_str(),
+            r#"{{"history":"{history}","rich":{},"poor":{}}}"#,
             group(&self.rich),
             group(&self.poor)
         )

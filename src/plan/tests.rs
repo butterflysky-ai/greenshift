@@ -285,6 +285,12 @@ fn json_names_the_history_state_first() {
 }
 
 #[test]
+fn a_history_state_displays_as_the_plan_writes_it() {
+    assert_eq!(HistoryState::Ok.to_string(), "ok");
+    assert_eq!(HistoryState::Error.to_string(), "error");
+}
+
+#[test]
 fn a_test_is_its_suite_and_name_not_its_name_alone() {
     // A poor name in another suite is a different test, new to the
     // store, so rich.
