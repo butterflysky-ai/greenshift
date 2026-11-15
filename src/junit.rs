@@ -326,7 +326,8 @@ pub(crate) fn escape_file_text(text: &str) -> String {
 pub struct Tainted(String);
 
 impl Tainted {
-    /// The text exactly as read from the file, control bytes and all.
+    /// The text as given, control bytes and all: unchanged for text read
+    /// from an input file, and for a path its lossy UTF-8 form.
     /// Never print it: format the `Tainted` itself instead.
     pub fn as_raw(&self) -> &str {
         &self.0
