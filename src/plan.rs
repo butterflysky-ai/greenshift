@@ -97,10 +97,27 @@ pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [TestId]) -> Plan<'a> {
     Plan { rich, poor }
 }
 
+/// `text` as a JSON string that reads back as exactly `text`, with every
+/// control character escaped: serde_json escapes C0 itself, and DEL and
+/// C1, which it would leave raw, become `\uXXXX` here, as
+/// [`crate::nextest::escape`] escapes them for a filterset.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    for c in serde_json::Value::from(text).to_string().chars() {
+        if c.is_control() {
+            out.push_str(&format!(r"\u{:04x}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 impl Plan<'_> {
     /// `{"rich":[{"suite":...,"name":...},...],"poor":[...]}` on one line,
-    /// members in that order. Strings are JSON-escaped, control characters
-    /// included, so the plan is one line.
+    /// members in that order. Strings are JSON-escaped, every control
+    /// character included, so the plan is one line and no control
+    /// character reaches a terminal raw.
     pub fn to_json(&self) -> String {
         let group = |tests: &[&TestId]| {
             let tests: Vec<String> = tests
@@ -108,8 +125,8 @@ impl Plan<'_> {
                 .map(|t| {
                     format!(
                         r#"{{"suite":{},"name":{}}}"#,
-                        serde_json::Value::from(t.suite.as_str()),
-                        serde_json::Value::from(t.name.as_str())
+                        json_string(&t.suite),
+                        json_string(&t.name)
                     )
                 })
                 .collect();

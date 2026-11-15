@@ -209,6 +209,32 @@ fn names_are_matched_and_written_raw() {
 }
 
 #[test]
+fn every_control_character_is_escaped_and_reads_back() {
+    // DEL and C1 (CSI, NEL) are control characters that JSON may leave
+    // raw; the plan escapes them all, as nextest's filterset does.
+    let odd = [("s", "del\u{7f}"), ("s\u{9b}31m", "csi\u{9b}nel\u{85}x")];
+    let inventory: Vec<TestId> = odd.iter().map(|&(s, n)| id(s, n)).collect();
+    let plan = plan(&[], &inventory);
+    let json = plan.to_json();
+    assert!(!json.chars().any(char::is_control), "{json:?}");
+    assert!(json.contains(r"del\u007f"), "{json}");
+    assert!(json.contains(r"csi\u009bnel\u0085x"), "{json}");
+    let read: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let rich: Vec<(String, String)> = read["rich"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            (
+                t["suite"].as_str().unwrap().to_owned(),
+                t["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(rich, pairs(&odd));
+}
+
+#[test]
 fn json_has_rich_then_poor_on_one_line() {
     let stored = Stored::new(&[(Class::Poor, "s", "p")]);
     let inventory = [id("s", "p"), id("", "r")];

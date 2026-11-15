@@ -243,8 +243,10 @@ It prints one line of JSON:
   rich. Stored tests that are not in the inventory are left out.
 - **Names.** Suite and name are written as JSON strings of the raw text:
   JSON's own escapes only (`\"`, `\\`, `\t`, `\u001b` and so on), none of
-  `select`'s display escaping, so they read back exactly as stored.
-  Commas, parentheses, slashes and non-ASCII text are written as they are.
+  `select`'s display escaping, so they read back exactly as stored. Every
+  control character is escaped, DEL and C1 (`\u007f`, `\u009b`) too.
+  Commas, parentheses, slashes and other non-ASCII text are written as
+  they are.
 
 With no history (where `select` exits 2) there is no poor test, so every
 inventory test is rich; stderr still says `no history: run the full
