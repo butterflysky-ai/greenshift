@@ -559,7 +559,9 @@ mod tests {
         let mut args = nextest_filter_args(&[]).unwrap();
         args.inventory = path.clone();
         let err = nextest_filter(&args).unwrap_err();
-        let context = err.downcast_ref::<InventoryContext>().expect("{err:?}");
+        let context = err
+            .downcast_ref::<InventoryContext>()
+            .unwrap_or_else(|| panic!("not an inventory error: {err:?}"));
         assert_eq!(context.0.as_raw(), path.to_string_lossy());
         let shown = format!("{err:#}");
         assert!(shown.contains(r"\u{1b}[31mevil.json"), "{shown:?}");
