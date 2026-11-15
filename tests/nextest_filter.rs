@@ -172,7 +172,9 @@ impl Project {
                 .join(format!("run{}-{profile}.xml", self.runs));
             // Either pass can be empty, which nextest fails by default.
             // One test at a time, so a profile that stopped at the first
-            // failure would leave the tests after it out of the run.
+            // failure would leave the tests after it out of the run. Only
+            // the poor pass has a failure here, so this checks ci-poor's
+            // fail-fast, not ci-rich's.
             let out = self.pass(
                 profile,
                 &["--no-tests=pass", "--test-threads", "1", "-E", expr],
@@ -523,7 +525,8 @@ fn a_failure_in_one_two_pass_run_is_rich_in_the_next() {
     }
 
     // Three green runs: every test on record is poor. One of them fails
-    // in this run's poor pass.
+    // in this run's poor pass. Tests run after it there (one at a time, by
+    // name), so a poor pass that stopped at it would be cut short.
     let failing = ("odd", "uni::ünï ✓");
     let (poor_expr, rich_expr) = p.run_passes(&[failing]);
     let mut poor = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
