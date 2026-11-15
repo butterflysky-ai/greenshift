@@ -31,6 +31,9 @@ jobs:
       BRANCH: ${{ github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+      # yq is on GitHub's Ubuntu runners.
+      - name: Check pull requests cannot save the test history
+        run: scripts/check-cache-guard.sh
       - name: Install Rust
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
