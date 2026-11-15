@@ -55,6 +55,12 @@ pub struct IngestArgs {
         value_parser = NonEmptyStringValueParser::new()
     )]
     pub source: String,
+
+    /// The files hold only part of the suite (one pass of several, say,
+    /// when another wrote no JUnit). Such a run never counts as full, but
+    /// its results still count towards each test's results.
+    #[arg(long)]
+    pub partial: bool,
 }
 
 #[derive(Debug, Args)]
@@ -242,13 +248,14 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
             commit: args.commit.as_ref(),
             source: &args.source,
             files: &args.files,
-            partial: false,
+            partial: args.partial,
         },
         &cases,
     )?;
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     println!(
-        "greenshift: recorded run {} with {} test{} from {} file{} into {}",
+        "greenshift: recorded {}run {} with {} test{} from {} file{} into {}",
+        if args.partial { "partial " } else { "" },
         recorded.run_id,
         recorded.results,
         plural(recorded.results),
@@ -369,6 +376,7 @@ mod tests {
         assert_eq!(args.db, PathBuf::from(".greenshift/history.sqlite"));
         assert_eq!(args.commit, None);
         assert_eq!(args.source, "junit");
+        assert!(!args.partial);
     }
 
     #[test]
@@ -382,6 +390,7 @@ mod tests {
             "abc1234",
             "--source",
             "nextest",
+            "--partial",
             "a.xml",
         ])
         .unwrap();
@@ -391,6 +400,7 @@ mod tests {
         assert_eq!(args.db, PathBuf::from("h.sqlite"));
         assert_eq!(args.commit.as_ref().map(CommitId::as_str), Some("abc1234"));
         assert_eq!(args.source, "nextest");
+        assert!(args.partial);
     }
 
     #[test]

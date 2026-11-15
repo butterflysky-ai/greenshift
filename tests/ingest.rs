@@ -418,3 +418,27 @@ fn a_commit_is_stored_in_lowercase() {
         .unwrap();
     assert_eq!(commit, "0123abcdef");
 }
+
+fn partial_flags(conn: &Connection) -> Vec<bool> {
+    conn.prepare("SELECT partial FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn partial_marks_the_run_as_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let files = [fixture("nextest.xml")];
+    ingest(&db, &files, &[])
+        .success()
+        .stdout(predicate::str::contains("recorded run 1 with"));
+    ingest(&db, &files, &["--partial"])
+        .success()
+        .stdout(predicate::str::contains("recorded partial run 2 with"));
+    let conn = Connection::open(&db).unwrap();
+    assert_eq!(partial_flags(&conn), [false, true]);
+}

@@ -11,6 +11,7 @@ filterset (`greenshift nextest-filter`).
 
 ```
 greenshift ingest <JUNIT_XML>... [--db PATH] [--commit SHA] [--source NAME]
+                  [--partial]
 ```
 
 Every file given in one invocation is recorded as one run. For example, with
@@ -35,6 +36,10 @@ greenshift ingest target/nextest/default/junit.xml \
   lower case; anything else, such as `HEAD` or a tag, is a usage error
   (exit 2). Runs recorded before this check keep whatever they were given.
   `--source` names the producer or CI job (default `junit`).
+- `--partial` records the run as holding only part of the suite: one pass
+  of several when another wrote no JUnit, say. `select` never counts a
+  partial run as full, whatever its size; its results still count towards
+  `--min-runs`.
 - greenshift's messages show what was given on the command line (paths,
   and in usage errors a rejected value or an unexpected argument or
   subcommand) with control characters and backslashes escaped as in
@@ -74,10 +79,11 @@ greenshift select [--db PATH] [--source NAME]... [--min-runs N]
 latest full run into *rich* tests, which together have caught every failure
 on record, and *poor* tests, which can run after them:
 
-- **Full runs.** Runs are taken oldest first. The first is full; after that
+- **Full runs.** Runs are taken oldest first. A run ingested with
+  `--partial` is never full. Of the rest, the first is full; after that
   a run is full when it has at least 90% as many results as the largest of
-  the three full runs before it. A partial run (say, of only the selected
-  tests) is not full. With `--source`, given once or more, only runs from
+  the three full runs before it, so a short run (say, of only the selected
+  tests) is not full either. With `--source`, given once or more, only runs from
   those sources are read; by default all are.
 - **Universe.** The tests of the newest full run.
 - **Rows.** Every full run in which a universe test failed (`failed` and
