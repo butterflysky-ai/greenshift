@@ -51,6 +51,7 @@ jobs:
       # of its own, and restores the newest entry for its branch, or else
       # main's.
       - name: Restore test history
+        id: restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.GREENSHIFT_DB }}
@@ -113,7 +114,8 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.GREENSHIFT_DB }}
-          key: greenshift-db-${{ env.BRANCH }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # The key the restore step was given, so the two cannot drift.
+          key: ${{ steps.restore.outputs.cache-primary-key }}
       - name: cargo test --doc
         run: cargo test --locked --doc
 
