@@ -35,12 +35,11 @@ greenshift ingest target/nextest/default/junit.xml \
   lower case; anything else, such as `HEAD` or a tag, is a usage error
   (exit 2). Runs recorded before this check keep whatever they were given.
   `--source` names the producer or CI job (default `junit`).
-- greenshift's own messages show paths from the command line, and a
-  rejected `--commit`, with control characters and backslashes escaped as
-  in Rust's `{:?}`, so a file name cannot send terminal escape sequences or
-  break a line. clap's other usage errors (an unexpected argument, such as
-  a file name starting with `-`, or a rejected value for another option)
-  still quote what was given as it is.
+- greenshift's messages show what was given on the command line (paths,
+  and in usage errors a rejected value or an unexpected argument or
+  subcommand) with control characters and backslashes escaped as in
+  Rust's `{:?}`, so a file name cannot send terminal escape sequences or
+  break a line.
 - A test is identified by suite and name. The suite is the testcase's
   `classname`, or the enclosing `<testsuite>` name when there is none; it is
   empty when neither is given.

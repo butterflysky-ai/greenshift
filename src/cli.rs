@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use clap::builder::{NonEmptyStringValueParser, StringValueParser, TypedValueParser};
+use clap::builder::{NonEmptyStringValueParser, StyledStr};
 use clap::error::{ContextKind, ContextValue};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -44,7 +44,7 @@ pub struct IngestArgs {
 
     /// Commit the tests ran against: 7 to 64 hex digits, as
     /// `git rev-parse HEAD` prints it. Stored in lower case.
-    #[arg(long, value_name = "SHA", value_parser = CommitIdParser)]
+    #[arg(long, value_name = "SHA")]
     pub commit: Option<CommitId>,
 
     /// Where the results came from, e.g. the test runner or CI job.
@@ -142,36 +142,6 @@ impl EstimatorKind {
     }
 }
 
-/// Parses `--commit` as a [`CommitId`]. clap's own error for a rejected
-/// value quotes it raw; this one replaces the quoted value with its
-/// escaped form, as [`Tainted`] shows text, so a value holding terminal
-/// control bytes prints harmlessly. The rest of the message is clap's.
-#[derive(Debug, Clone, Copy)]
-struct CommitIdParser;
-
-impl TypedValueParser for CommitIdParser {
-    type Value = CommitId;
-
-    fn parse_ref(
-        &self,
-        cmd: &clap::Command,
-        arg: Option<&clap::Arg>,
-        value: &std::ffi::OsStr,
-    ) -> Result<CommitId, clap::Error> {
-        StringValueParser::new()
-            .try_map(|text| text.parse::<CommitId>())
-            .parse_ref(cmd, arg, value)
-            .map_err(|mut err| {
-                let shown = Tainted::from(value.to_string_lossy().as_ref());
-                err.insert(
-                    ContextKind::InvalidValue,
-                    ContextValue::String(shown.to_string()),
-                );
-                err
-            })
-    }
-}
-
 fn percentage(text: &str) -> Result<f64, String> {
     match text.parse::<f64>() {
         Ok(n) if (0.0..=100.0).contains(&n) => Ok(n),
@@ -182,9 +152,76 @@ fn percentage(text: &str) -> Result<f64, String> {
 /// `select`'s exit status when there is no full run to select from.
 pub const NO_HISTORY: u8 = 2;
 
-/// Parse `std::env::args` and run the requested command.
+/// Parse a command line, `args[0]` being the program name.
+///
+/// clap's usage errors quote what was given on the command line as it was
+/// given: a rejected value, an unknown argument or subcommand. Those
+/// quotes are escaped here, as [`Tainted`] shows text, so a terminal
+/// escape sequence or newline in argv prints harmlessly. The rest of the
+/// error, styling included, is clap's.
+pub fn parse<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    Cli::try_parse_from(args).map_err(escape_argv)
+}
+
+/// The clap error, with the parts it quotes from argv escaped.
+fn escape_argv(mut err: clap::Error) -> clap::Error {
+    let mut quoted = Vec::new();
+    for kind in [
+        ContextKind::InvalidArg,
+        ContextKind::InvalidValue,
+        ContextKind::InvalidSubcommand,
+    ] {
+        if let Some(ContextValue::String(raw)) = err.get(kind) {
+            let shown = Tainted::from(raw.as_str()).to_string();
+            if shown != *raw {
+                quoted.push((raw.clone(), shown.clone()));
+                err.insert(kind, ContextValue::String(shown));
+            }
+        }
+    }
+    if quoted.is_empty() {
+        return err;
+    }
+    // clap's tips ("to pass '--x' as a value, use '-- --x'") quote argv
+    // too, inside styled text.
+    if let Some(ContextValue::StyledStrs(tips)) = err.get(ContextKind::Suggested) {
+        let tips: Option<Vec<StyledStr>> =
+            tips.iter().map(|tip| escape_tip(tip, &quoted)).collect();
+        match tips {
+            Some(tips) => err.insert(ContextKind::Suggested, ContextValue::StyledStrs(tips)),
+            None => err.remove(ContextKind::Suggested),
+        };
+    }
+    err
+}
+
+/// The tip with each quote from argv replaced by its escaped form,
+/// keeping clap's styling, or `None` if a quote's occurrences in the
+/// styled text overlap, so that which are argv cannot be told.
+fn escape_tip(tip: &StyledStr, quoted: &[(String, String)]) -> Option<StyledStr> {
+    let mut text = tip.ansi().to_string();
+    for (raw, shown) in quoted {
+        let starts: Vec<usize> = text
+            .char_indices()
+            .map(|(at, _)| at)
+            .filter(|&at| text[at..].starts_with(raw.as_str()))
+            .collect();
+        if starts.windows(2).any(|pair| pair[1] - pair[0] < raw.len()) {
+            return None;
+        }
+        text = text.replace(raw.as_str(), shown);
+    }
+    Some(StyledStr::from(text))
+}
+
+/// Parse `std::env::args_os` and run the requested command.
 pub fn run() -> anyhow::Result<ExitCode> {
-    match Cli::parse().command {
+    let cli = parse(std::env::args_os()).unwrap_or_else(|err| err.exit());
+    match cli.command {
         Command::Ingest(args) => ingest(&args).map(|()| ExitCode::SUCCESS),
         Command::Select(args) => select(&args),
         Command::NextestFilter(args) => nextest_filter(&args),
@@ -464,6 +501,31 @@ mod tests {
         );
         assert!(nextest_filter_args(&["--rich", "--poor"]).is_err());
         assert!(nextest_filter_args(&["--coverage", "101"]).is_err());
+    }
+
+    #[test]
+    fn a_tip_has_each_quote_from_argv_escaped() {
+        let quoted = [("\u{1b}x".to_owned(), r"\u{1b}x".to_owned())];
+        let tip = StyledStr::from("pass '\u{1b}x', use '-- \u{1b}x'".to_owned());
+        let tip = escape_tip(&tip, &quoted).unwrap();
+        assert_eq!(tip.to_string(), r"pass '\u{1b}x', use '-- \u{1b}x'");
+    }
+
+    #[test]
+    fn a_tip_whose_quotes_overlap_is_dropped() {
+        // "aXa" occurs at 0 and 2: which one is argv cannot be told.
+        let quoted = [("a\u{1b}a".to_owned(), r"a\u{1b}a".to_owned())];
+        let tip = StyledStr::from("a\u{1b}a\u{1b}a".to_owned());
+        assert!(escape_tip(&tip, &quoted).is_none());
+    }
+
+    #[test]
+    fn parse_escapes_a_rejected_value_once() {
+        let err = parse(["greenshift", "ingest", "--commit", "\u{1b}[31m", "a.xml"]).unwrap_err();
+        assert_eq!(
+            err.get(ContextKind::InvalidValue),
+            Some(&ContextValue::String(r"\u{1b}[31m".to_owned()))
+        );
     }
 
     #[test]

@@ -25,9 +25,7 @@ fn help_describes_the_tool() {
 
 /// A name holding a terminal escape and a newline, and how greenshift
 /// shows it.
-#[cfg(unix)]
 const EVIL: &str = "\u{1b}[31mred\nline";
-#[cfg(unix)]
 const EVIL_SHOWN: &str = r"\u{1b}[31mred\nline";
 
 #[cfg(unix)]
@@ -220,4 +218,73 @@ fn a_path_that_is_not_utf8_is_shown_with_replacement_characters() {
         stderr.contains("bad\u{fffd}name.xml: could not read file"),
         "{stderr:?}"
     );
+}
+
+/// clap's usage errors quote a rejected argument or value from argv; each
+/// is shown escaped, whatever the flag, and the error is still clap's.
+#[test]
+fn a_rejected_argv_value_is_shown_escaped_in_usage_errors() {
+    let unknown = format!("--{EVIL}");
+    let cases: [(&[&str], String); 8] = [
+        (
+            &["select", "--estimator", EVIL],
+            format!("error: invalid value '{EVIL_SHOWN}' for '--estimator <ESTIMATOR>'"),
+        ),
+        (
+            &["select", "--coverage", EVIL],
+            format!("error: invalid value '{EVIL_SHOWN}' for '--coverage <N>'"),
+        ),
+        (
+            &["nextest-filter", "--inventory", "-", "--min-runs", EVIL],
+            format!("error: invalid value '{EVIL_SHOWN}' for '--min-runs <N>'"),
+        ),
+        (
+            &["ingest", "--commit", EVIL, "a.xml"],
+            format!("error: invalid value '{EVIL_SHOWN}' for '--commit <SHA>'"),
+        ),
+        (
+            &[EVIL],
+            format!("error: unrecognized subcommand '{EVIL_SHOWN}'"),
+        ),
+        (
+            &["select", EVIL],
+            format!("error: unexpected argument '{EVIL_SHOWN}' found"),
+        ),
+        (
+            &["ingest", "a.xml", &unknown],
+            format!("error: unexpected argument '--{EVIL_SHOWN}' found"),
+        ),
+        // clap's tip quotes the argument too.
+        (
+            &["ingest", "a.xml", &unknown],
+            format!("tip: to pass '--{EVIL_SHOWN}' as a value, use '-- --{EVIL_SHOWN}'"),
+        ),
+    ];
+    for (args, shown) in &cases {
+        let out = greenshift()
+            .args(*args)
+            .env_remove("CLICOLOR_FORCE")
+            .assert()
+            .failure()
+            .code(2);
+        let text = String::from_utf8_lossy(&out.get_output().stderr);
+        assert!(text.contains(shown), "{args:?}: {text:?}");
+        assert!(!text.contains('\u{1b}'), "{args:?}: {text:?}");
+        assert!(!text.contains("red\nline"), "{args:?}: {text:?}");
+    }
+    // In colour, clap's own styling stays and only the value is escaped.
+    for (args, _) in &cases {
+        let out = greenshift()
+            .args(*args)
+            .env("CLICOLOR_FORCE", "1")
+            .env_remove("NO_COLOR")
+            .assert()
+            .failure()
+            .code(2);
+        let text = String::from_utf8_lossy(&out.get_output().stderr);
+        assert!(text.contains('\u{1b}'), "{args:?}: not styled: {text:?}");
+        assert!(text.contains(EVIL_SHOWN), "{args:?}: {text:?}");
+        assert!(!text.contains(EVIL), "{args:?}: {text:?}");
+        assert!(!text.contains("red\nline"), "{args:?}: {text:?}");
+    }
 }
