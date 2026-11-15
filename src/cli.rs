@@ -529,6 +529,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_drops_a_tip_whose_argv_quotes_overlap() {
+        // clap's tip reads "to pass '{arg}' as a value, use '-- {arg}'",
+        // with styling after each quote. This argument ends with the text
+        // between its two quotes, so its occurrences in the tip overlap.
+        let arg = "--\u{1b}[0m' as a value, use '\u{1b}[32m-- --";
+        let err = parse(["greenshift", "ingest", "a.xml", arg]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(err.get(ContextKind::Suggested).is_none(), "{err:?}");
+        let shown = err.render().ansi().to_string();
+        assert!(!shown.contains(arg), "{shown:?}");
+    }
+
+    #[test]
     fn select_refuses_bad_options() {
         assert!(select_args(&["--source", ""]).is_err());
         assert!(select_args(&["--min-runs", "-1"]).is_err());

@@ -1,7 +1,8 @@
 //! Text from outside the program that may hold terminal control bytes.
 //!
-//! Test and suite names and other text read from input files, and paths
-//! given on the command line, are kept as [`Tainted`], which prints
+//! Test and suite names and other text read from input files, SQLite's
+//! messages about the store, and paths and rejected values given on the
+//! command line are shown through [`Tainted`], which prints
 //! escaped, so a terminal escape sequence or newline in them cannot reach
 //! the user's terminal raw.
 
@@ -21,8 +22,8 @@ fn escape_file_text(text: &str) -> String {
     out
 }
 
-/// Text read from an input file, or a path given on the command line,
-/// which may hold terminal control bytes.
+/// Text from outside the program, such as text read from an input file or
+/// a path given on the command line, which may hold terminal control bytes.
 ///
 /// `Display` writes it escaped: control and invisible characters and
 /// backslash as `{:?}` would show them (an ESC
