@@ -585,3 +585,12 @@ fn a_store_with_runs_is_only_read() {
         "the store was written"
     );
 }
+
+#[test]
+fn a_bad_inventory_creates_no_store() {
+    let mut h = History::new();
+    h.db = h.dir.path().join("new/history.sqlite");
+    let out = h.plan("not json\n", &[]).failure().code(1);
+    assert_eq!(stdout(&out), "");
+    assert!(!h.dir.path().join("new").exists(), "the store was created");
+}
