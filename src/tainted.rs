@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// Escape text quoted from a file as `{:?}` would, except that quotes are
 /// left alone, so it can be shown in an error message.
-pub(crate) fn escape_file_text(text: &str) -> String {
+fn escape_file_text(text: &str) -> String {
     let mut out = String::new();
     for c in text.chars() {
         match c {

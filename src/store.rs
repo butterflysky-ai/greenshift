@@ -96,12 +96,13 @@ pub enum StoreError {
         source: std::io::Error,
     },
     // SQLite's messages can quote text from the store file itself (a
-    // malformed schema, say), so the whole cause chain is escaped into
-    // `message` rather than chained as a source and printed raw.
+    // malformed schema, say), so the whole cause chain is kept in
+    // `message` as `Tainted`, escaped when displayed, rather than chained
+    // as a source and printed raw.
     #[error("history store {path}: {message}")]
     Sqlite {
         path: Tainted,
-        message: String,
+        message: Tainted,
         sqlite: rusqlite::Error,
     },
     #[error(
@@ -605,7 +606,7 @@ fn sqlite_err(path: &Tainted) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
         }
         StoreError::Sqlite {
             path: path.clone(),
-            message: crate::tainted::escape_file_text(&chain),
+            message: Tainted::from(chain),
             sqlite,
         }
     }

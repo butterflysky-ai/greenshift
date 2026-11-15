@@ -852,3 +852,29 @@ fn a_commit_id_is_kept_in_lower_case() {
     assert_eq!(id.to_string(), "0123abcdef");
     assert_eq!(id, "0123abcdef".parse().unwrap());
 }
+
+#[test]
+fn a_sqlite_error_keeps_its_message_raw_and_displays_it_escaped_once() {
+    // A store whose schema text holds a terminal escape and a backslash:
+    // SQLite's "malformed database schema" message quotes it from the file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        r"CREATE TABLE t(x);
+         PRAGMA writable_schema = ON;
+         UPDATE sqlite_schema SET name = 't' || char(27) || '[31mRED\',
+             sql = 'CREATE TABLE t(x) ' || char(27) || '[31mRED\';",
+    )
+    .unwrap();
+    drop(conn);
+    let err = Store::open(&path).unwrap_err();
+    let StoreError::Sqlite { message, .. } = &err else {
+        panic!("not a SQLite error: {err:?}");
+    };
+    assert!(message.as_raw().contains("\u{1b}[31mRED\\"), "{message:?}");
+    let shown = err.to_string();
+    assert!(shown.contains(r"\u{1b}[31mRED\\"), "{shown:?}");
+    assert!(!shown.contains(r"\\u{1b}"), "escaped twice: {shown:?}");
+    assert!(!shown.contains('\u{1b}'), "{shown:?}");
+}
