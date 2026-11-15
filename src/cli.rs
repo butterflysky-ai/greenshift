@@ -197,7 +197,8 @@ pub fn run() -> anyhow::Result<ExitCode> {
 pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
     let mut cases = Vec::new();
     for file in &args.files {
-        let report = junit::parse_file(file).with_context(|| format!("{}", file.display()))?;
+        let report =
+            junit::parse_file(file).with_context(|| Tainted::from(file.as_path()).to_string())?;
         cases.extend(report.cases);
     }
     let mut store = Store::open(&args.db)?;
@@ -217,7 +218,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         plural(recorded.results),
         args.files.len(),
         plural(args.files.len()),
-        args.db.display()
+        Tainted::from(args.db.as_path())
     );
     Ok(())
 }
@@ -243,7 +244,7 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
 /// it prints `all()` or `none()` and exits 0. The inventory is read first,
 /// so a bad one fails before the store is read.
 pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
-    let shown = args.inventory.display();
+    let shown = Tainted::from(args.inventory.as_path());
     let json = if args.inventory.as_os_str() == "-" {
         std::io::read_to_string(std::io::stdin().lock()).context("inventory on stdin")?
     } else {

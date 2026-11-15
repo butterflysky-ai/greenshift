@@ -238,10 +238,10 @@ impl Store {
     /// directory, and migrate it to [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         refuse_memory_path(path)?;
-        let shown = path.display().to_string();
+        let shown = Tainted::from(path).to_string();
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|source| StoreError::CreateDir {
-                path: dir.display().to_string(),
+                path: Tainted::from(dir).to_string(),
                 source,
             })?;
         }
@@ -266,7 +266,7 @@ impl Store {
         if matches!(path.try_exists(), Ok(false)) {
             return Ok(None);
         }
-        let shown = path.display().to_string();
+        let shown = Tainted::from(path).to_string();
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn =
             Connection::open_with_flags(as_plain_file(path), flags).map_err(sqlite_err(&shown))?;
