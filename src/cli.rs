@@ -252,6 +252,12 @@ pub fn run() -> anyhow::Result<ExitCode> {
     }
 }
 
+/// Name `err` on stderr as greenshift names every error, whether it ends
+/// the run (from `main`) or is planned past (by [`plan()`]).
+pub fn show_error(err: &anyhow::Error) {
+    eprintln!("greenshift: error: {err:#}");
+}
+
 /// Parse every file first, so a bad file leaves the store untouched, then
 /// record them all in one transaction.
 pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
@@ -337,7 +343,7 @@ pub fn plan(args: &PlanArgs) -> anyhow::Result<ExitCode> {
             write(plan::HistoryState::Ok, lines)
         }),
         Err(err) => {
-            eprintln!("greenshift: error: {err:#}");
+            show_error(&err);
             written(write(plan::HistoryState::Error, None))
         }
     }
