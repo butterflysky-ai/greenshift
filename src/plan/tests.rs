@@ -212,6 +212,22 @@ fn an_empty_inventory_plans_nothing() {
     );
 }
 
+/// The `key` group of the plan `json`, read back as `(suite, name)`s.
+fn read_group(json: &str, key: &str) -> Vec<(String, String)> {
+    let plan: serde_json::Value = serde_json::from_str(json).unwrap();
+    plan[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("no {key} array: {json}"))
+        .iter()
+        .map(|t| {
+            (
+                t["suite"].as_str().unwrap().to_owned(),
+                t["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn names_are_matched_and_written_raw() {
     let odd = [
@@ -228,24 +244,9 @@ fn names_are_matched_and_written_raw() {
     let plan = plan(&lines, &inventory);
     assert!(plan.rich.is_empty());
     assert_eq!(ids(&plan.poor), pairs(&odd));
-    let json: serde_json::Value = serde_json::from_str(&plan.to_json(HistoryState::Ok)).unwrap();
-    let poor: Vec<(String, String)> = json["poor"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| {
-            (
-                t["suite"].as_str().unwrap().to_owned(),
-                t["name"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
-    assert_eq!(poor, pairs(&odd));
-    assert!(
-        !plan.to_json(HistoryState::Ok).contains('\u{1b}'),
-        "{}",
-        plan.to_json(HistoryState::Ok)
-    );
+    let json = plan.to_json(HistoryState::Ok);
+    assert_eq!(read_group(&json, "poor"), pairs(&odd));
+    assert!(!json.contains('\u{1b}'), "{json}");
 }
 
 #[test]
@@ -259,19 +260,7 @@ fn every_control_character_is_escaped_and_reads_back() {
     assert!(!json.chars().any(char::is_control), "{json:?}");
     assert!(json.contains(r"del\u007f"), "{json}");
     assert!(json.contains(r"csi\u009bnel\u0085x"), "{json}");
-    let read: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let rich: Vec<(String, String)> = read["rich"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| {
-            (
-                t["suite"].as_str().unwrap().to_owned(),
-                t["name"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
-    assert_eq!(rich, pairs(&odd));
+    assert_eq!(read_group(&json, "rich"), pairs(&odd));
 }
 
 #[test]
