@@ -319,8 +319,8 @@ impl Store {
 
     /// A migrated store that lives only in memory.
     pub fn open_in_memory() -> Result<Store, StoreError> {
-        let conn = Connection::open_in_memory().map_err(sqlite_err(&Tainted::from(":memory:")))?;
-        Store::init(conn, Tainted::from(":memory:"))
+        let conn = Connection::open_in_memory().map_err(sqlite_err(&Tainted::raw(":memory:")))?;
+        Store::init(conn, Tainted::raw(":memory:"))
     }
 
     fn init(conn: Connection, path: Tainted) -> Result<Store, StoreError> {
@@ -533,7 +533,7 @@ impl Store {
                 stmt.query_map([], |r| {
                     let suite: String = r.get(1)?;
                     let name: String = r.get(2)?;
-                    Ok((r.get(0)?, (suite.into(), name.into())))
+                    Ok((r.get(0)?, (Tainted::raw(suite), Tainted::raw(name))))
                 })?
                 .collect()
             })
@@ -606,7 +606,7 @@ fn sqlite_err(path: &Tainted) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
         }
         StoreError::Sqlite {
             path: path.clone(),
-            message: Tainted::from(chain),
+            message: Tainted::raw(chain),
             sqlite,
         }
     }

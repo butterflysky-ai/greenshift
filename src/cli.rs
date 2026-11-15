@@ -176,7 +176,7 @@ fn escape_argv(mut err: clap::Error) -> clap::Error {
         ContextKind::InvalidSubcommand,
     ] {
         if let Some(ContextValue::String(raw)) = err.get(kind) {
-            let shown = Tainted::from(raw.as_str()).to_string();
+            let shown = Tainted::raw(raw.as_str()).to_string();
             if shown != *raw {
                 quoted.push((raw.clone(), shown.clone()));
                 err.insert(kind, ContextValue::String(shown));

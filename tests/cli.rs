@@ -35,11 +35,16 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-/// The output holds `shown` and neither a raw ESC nor `EVIL` itself.
+/// Escaped twice: the backslash of an escaped ESC escaped again.
+const EVIL_TWICE: &str = r"\\u{1b}";
+
+/// The output holds `shown`, escaped exactly once, and neither a raw ESC
+/// nor `EVIL` itself.
 #[cfg(unix)]
 fn shows_escaped(output: &[u8], shown: &str) {
     let text = String::from_utf8_lossy(output);
     assert!(text.contains(shown), "{text:?}");
+    assert!(!text.contains(EVIL_TWICE), "escaped twice: {text:?}");
     assert!(!text.contains('\u{1b}'), "{text:?}");
     assert!(!text.contains(EVIL), "{text:?}");
 }
@@ -269,6 +274,10 @@ fn a_rejected_argv_value_is_shown_escaped_in_usage_errors() {
             .code(2);
         let text = String::from_utf8_lossy(&out.get_output().stderr);
         assert!(text.contains(shown), "{args:?}: {text:?}");
+        assert!(
+            !text.contains(EVIL_TWICE),
+            "{args:?}: escaped twice: {text:?}"
+        );
         assert!(!text.contains('\u{1b}'), "{args:?}: {text:?}");
         assert!(!text.contains("red\nline"), "{args:?}: {text:?}");
     }
@@ -284,6 +293,10 @@ fn a_rejected_argv_value_is_shown_escaped_in_usage_errors() {
         let text = String::from_utf8_lossy(&out.get_output().stderr);
         assert!(text.contains('\u{1b}'), "{args:?}: not styled: {text:?}");
         assert!(text.contains(EVIL_SHOWN), "{args:?}: {text:?}");
+        assert!(
+            !text.contains(EVIL_TWICE),
+            "{args:?}: escaped twice: {text:?}"
+        );
         assert!(!text.contains(EVIL), "{args:?}: {text:?}");
         assert!(!text.contains("red\nline"), "{args:?}: {text:?}");
     }

@@ -81,8 +81,8 @@ use Outcome::{Error as E, Failed as F, Passed as P, Skipped as S};
 
 fn case(suite: &str, name: &str, outcome: Outcome, ms: Option<i64>) -> TestCase {
     TestCase {
-        suite: suite.into(),
-        name: name.into(),
+        suite: Tainted::raw(suite),
+        name: Tainted::raw(name),
         outcome,
         duration_ms: ms,
     }

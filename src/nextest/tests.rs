@@ -104,10 +104,10 @@ fn line<'a>(class: Class, suite: &'a Tainted, name: &'a Tainted) -> Line<'a> {
 #[test]
 fn filter_rich_is_everything_but_poor() {
     let (b, r, p, q) = (
-        Tainted::from("bin"),
-        Tainted::from("rich_one"),
-        Tainted::from("poor_one"),
-        Tainted::from("poor_two"),
+        Tainted::raw("bin"),
+        Tainted::raw("rich_one"),
+        Tainted::raw("poor_one"),
+        Tainted::raw("poor_two"),
     );
     let lines = [
         line(Class::Rich, &b, &r),
@@ -126,7 +126,7 @@ fn filter_rich_is_everything_but_poor() {
 
 #[test]
 fn filter_with_no_poor_line() {
-    let (b, r) = (Tainted::from("bin"), Tainted::from("rich_one"));
+    let (b, r) = (Tainted::raw("bin"), Tainted::raw("rich_one"));
     let lines = [line(Class::Rich, &b, &r)];
     assert_eq!(filter(&lines, Class::Rich, &bins(&["bin"])), "all()");
     assert_eq!(filter(&lines, Class::Poor, &bins(&["bin"])), "none()");
@@ -139,12 +139,12 @@ fn filter_leaves_out_binaries_not_in_the_inventory() {
     // nextest refuses a whole filterset in which a binary_id(=...) matches
     // no binary.
     let (b, gone, none, p, q, r) = (
-        Tainted::from("bin"),
-        Tainted::from("gone"),
-        Tainted::from(""),
-        Tainted::from("poor_one"),
-        Tainted::from("poor_two"),
-        Tainted::from("rich_one"),
+        Tainted::raw("bin"),
+        Tainted::raw("gone"),
+        Tainted::raw(""),
+        Tainted::raw("poor_one"),
+        Tainted::raw("poor_two"),
+        Tainted::raw("rich_one"),
     );
     let lines = [
         line(Class::Rich, &gone, &r),

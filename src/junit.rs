@@ -192,9 +192,9 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                 if !seen_root {
                     seen_root = true;
                     if tag != b"testsuites" && tag != b"testsuite" {
-                        return Err(JunitError::WrongRoot(
-                            String::from_utf8_lossy(tag).into_owned().into(),
-                        ));
+                        return Err(JunitError::WrongRoot(Tainted::raw(
+                            String::from_utf8_lossy(tag),
+                        )));
                     }
                 }
                 // The depth this element sits at, whether or not it has content.
@@ -280,7 +280,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
 fn xml_err(position: u64, source: quick_xml::Error) -> JunitError {
     JunitError::Xml {
         position,
-        message: source.to_string().into(),
+        message: Tainted::raw(source.to_string()),
     }
 }
 
@@ -357,22 +357,22 @@ fn attr(e: &BytesStart<'_>, key: &[u8], position: u64) -> Result<Option<Tainted>
             };
             JunitError::Xml {
                 position,
-                message: message.into(),
+                message: Tainted::raw(message),
             }
         })?;
         if a.key.local_name().as_ref() == key {
             return match a.unescape_value() {
-                Ok(v) => Ok(Some(v.into_owned().into())),
+                Ok(v) => Ok(Some(Tainted::raw(v))),
                 Err(quick_xml::Error::Escape(EscapeError::UnrecognizedEntity(_, name))) => {
                     Err(JunitError::UnknownEntity {
                         position,
-                        name: name.into(),
+                        name: Tainted::raw(name),
                     })
                 }
                 Err(quick_xml::Error::Escape(EscapeError::UnterminatedEntity(_))) => {
                     Err(JunitError::Xml {
                         position,
-                        message: "cannot find ';' after '&'".into(),
+                        message: Tainted::raw("cannot find ';' after '&'"),
                     })
                 }
                 Err(s) => Err(xml_err(position, s)),
@@ -393,7 +393,7 @@ fn check_ref(r: &quick_xml::events::BytesRef<'_>, position: u64) -> Result<(), J
         Some(_) => Ok(()),
         None => Err(JunitError::UnknownEntity {
             position,
-            name: name.into_owned().into(),
+            name: Tainted::raw(name),
         }),
     }
 }
