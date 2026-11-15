@@ -939,6 +939,29 @@ fn an_unknown_outcome_in_the_store_is_shown_escaped_exactly_once() {
     assert!(!shown.contains('\u{1b}'), "{shown:?}");
 }
 
+#[test]
+fn an_unknown_outcome_in_the_store_names_its_cause_once() {
+    // rusqlite's message for a conversion failure already includes the
+    // cause, and `source()` returns that cause again.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_run(&RUN, &[tc("s", "t", Outcome::Passed, Some(1))])
+        .unwrap();
+    store
+        .conn
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE results SET outcome = 'X';",
+        )
+        .unwrap();
+    let shown = store.history(&[]).unwrap_err().to_string();
+    assert_eq!(
+        shown.matches(r#"unknown outcome "X""#).count(),
+        1,
+        "{shown:?}"
+    );
+}
+
 /// A store at schema version 1, as greenshift wrote it before runs could
 /// be partial, holding one run of one passing test.
 fn version_1_store(path: &Path) {
