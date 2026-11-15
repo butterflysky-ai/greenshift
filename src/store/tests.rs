@@ -826,7 +826,7 @@ fn a_commit_id_is_7_to_64_hex_digits() {
 #[test]
 fn a_commit_id_refuses_too_few_or_too_many_digits() {
     for bad in ["", "0", "0123ab", &"a".repeat(65)] {
-        assert_eq!(bad.parse::<CommitId>(), Err(BadCommitId), "{bad:?}");
+        assert_eq!(bad.parse::<CommitId>(), Err(CommitIdError), "{bad:?}");
     }
 }
 
@@ -841,7 +841,7 @@ fn a_commit_id_refuses_what_is_not_hex() {
         "0x123abcd",
         "０１２３４５６",
     ] {
-        assert_eq!(bad.parse::<CommitId>(), Err(BadCommitId), "{bad:?}");
+        assert_eq!(bad.parse::<CommitId>(), Err(CommitIdError), "{bad:?}");
     }
 }
 

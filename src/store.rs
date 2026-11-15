@@ -147,7 +147,7 @@ pub struct CommitId(String);
 /// Why text is not a [`CommitId`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("a commit is {min} to {max} hex digits", min = CommitId::MIN_LEN, max = CommitId::MAX_LEN)]
-pub struct BadCommitId;
+pub struct CommitIdError;
 
 impl CommitId {
     /// The fewest digits taken: git's default abbreviation.
@@ -162,14 +162,14 @@ impl CommitId {
 }
 
 impl std::str::FromStr for CommitId {
-    type Err = BadCommitId;
+    type Err = CommitIdError;
 
-    fn from_str(text: &str) -> Result<CommitId, BadCommitId> {
+    fn from_str(text: &str) -> Result<CommitId, CommitIdError> {
         let len_ok = (CommitId::MIN_LEN..=CommitId::MAX_LEN).contains(&text.len());
         if len_ok && text.bytes().all(|b| b.is_ascii_hexdigit()) {
             Ok(CommitId(text.to_ascii_lowercase()))
         } else {
-            Err(BadCommitId)
+            Err(CommitIdError)
         }
     }
 }
