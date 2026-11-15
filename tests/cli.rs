@@ -117,6 +117,51 @@ fn a_db_path_from_argv_is_shown_escaped_in_store_errors() {
     }
 }
 
+/// A SQLite file that `select` (read only) and `ingest` (read-write) both
+/// refuse, in each way that names the store: another program's database,
+/// one from a newer greenshift, and one with a negative schema version.
+#[cfg(unix)]
+#[test]
+fn a_db_path_from_argv_is_shown_escaped_when_the_store_is_refused() {
+    use greenshift::store::{APPLICATION_ID, SCHEMA_VERSION};
+    let cases = [
+        (0, 0, "is not a greenshift history store".to_owned()),
+        (
+            APPLICATION_ID,
+            SCHEMA_VERSION + 1,
+            format!("has schema version {}, newer", SCHEMA_VERSION + 1),
+        ),
+        (
+            APPLICATION_ID,
+            -1,
+            "has schema version -1, which no greenshift writes".to_owned(),
+        ),
+    ];
+    for (application_id, user_version, refusal) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join(format!("{EVIL}.sqlite"));
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("CREATE TABLE theirs (x)", []).unwrap();
+        conn.pragma_update(None, "application_id", application_id)
+            .unwrap();
+        conn.pragma_update(None, "user_version", user_version)
+            .unwrap();
+        drop(conn);
+        let shown = format!("{}.sqlite {refusal}", dir.path().join(EVIL_SHOWN).display());
+        let mut select = greenshift();
+        select.args(["select", "--db"]).arg(&db);
+        let mut ingest = greenshift();
+        ingest
+            .args(["ingest", "--db"])
+            .arg(&db)
+            .arg(fixture("nextest.xml"));
+        for mut cmd in [select, ingest] {
+            let out = cmd.assert().failure().code(1);
+            shows_escaped(&out.get_output().stderr, &shown);
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn an_inventory_path_from_argv_is_shown_escaped() {
@@ -130,6 +175,26 @@ fn an_inventory_path_from_argv_is_shown_escaped() {
     shows_escaped(
         &out.get_output().stderr,
         &format!("inventory {}", dir.path().join(EVIL_SHOWN).display()),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_inventory_that_is_not_a_listing_is_shown_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(EVIL), "not json").unwrap();
+    let out = greenshift()
+        .args(["nextest-filter", "--inventory"])
+        .arg(dir.path().join(EVIL))
+        .assert()
+        .failure()
+        .code(1);
+    shows_escaped(
+        &out.get_output().stderr,
+        &format!(
+            "inventory {}: not cargo nextest list JSON",
+            dir.path().join(EVIL_SHOWN).display()
+        ),
     );
 }
 
