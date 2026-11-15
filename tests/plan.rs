@@ -264,6 +264,15 @@ fn a_missing_store_is_created_and_every_test_is_rich() {
     assert_eq!(plan.0, owned(NOW));
     assert!(plan.1.is_empty());
     assert_eq!(stderr(&out), "no history: run the full suite\n");
+    // The store now exists, marked as greenshift's.
+    let conn =
+        rusqlite::Connection::open_with_flags(&h.db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("the store was created");
+    let application_id: i32 = conn
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .unwrap();
+    assert_eq!(application_id, greenshift::store::APPLICATION_ID);
+    drop(conn);
     // A greenshift store with no runs: select reads it as no history.
     greenshift()
         .arg("select")
