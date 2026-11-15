@@ -915,3 +915,24 @@ fn every_store_error_escapes_its_path_and_message_exactly_once() {
         assert!(!text.contains('\u{1b}'), "{text:?}");
     }
 }
+
+#[test]
+fn an_unknown_outcome_in_the_store_is_shown_escaped_exactly_once() {
+    // The outcome comes from the store file. It goes into the error raw
+    // and is escaped once, when the error is displayed.
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_run(&RUN, &[tc("s", "t", Outcome::Passed, Some(1))])
+        .unwrap();
+    store
+        .conn
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE results SET outcome = char(27) || '[31mevil';",
+        )
+        .unwrap();
+    let shown = store.history(&[]).unwrap_err().to_string();
+    assert!(shown.contains(r#""\u{1b}[31mevil""#), "{shown:?}");
+    assert!(!shown.contains(r"\\u{1b}"), "escaped twice: {shown:?}");
+    assert!(!shown.contains('\u{1b}'), "{shown:?}");
+}

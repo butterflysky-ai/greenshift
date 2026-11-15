@@ -508,11 +508,13 @@ impl Store {
             .and_then(|mut stmt| {
                 stmt.query_map(params_from_iter(sources), |r| {
                     let outcome: String = r.get(2)?;
+                    // Raw, not `{:?}`: the message is kept as `Tainted`,
+                    // which escapes it when shown.
                     let outcome = stored_outcome(&outcome).ok_or_else(|| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
                             rusqlite::types::Type::Text,
-                            format!("unknown outcome {outcome:?}").into(),
+                            format!("unknown outcome \"{outcome}\"").into(),
                         )
                     })?;
                     Ok((

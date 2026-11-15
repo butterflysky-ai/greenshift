@@ -279,13 +279,13 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
 /// it prints `all()` or `none()` and exits 0. The inventory is read first,
 /// so a bad one fails before the store is read.
 pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
-    let shown = Tainted::from(args.inventory.as_path());
+    let context = || InventoryContext(Tainted::from(args.inventory.as_path()));
     let json = if args.inventory.as_os_str() == "-" {
         std::io::read_to_string(std::io::stdin().lock()).context("inventory on stdin")?
     } else {
-        std::fs::read_to_string(&args.inventory).with_context(|| format!("inventory {shown}"))?
+        std::fs::read_to_string(&args.inventory).with_context(context)?
     };
-    let binaries = nextest::binary_ids(&json).with_context(|| format!("inventory {shown}"))?;
+    let binaries = nextest::binary_ids(&json).with_context(context)?;
     with_lines(&args.select, |lines| {
         let mut out = std::io::stdout().lock();
         let lines = lines.unwrap_or_default();
@@ -293,6 +293,17 @@ pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
             .and_then(|()| out.flush())
             .map(|()| ExitCode::SUCCESS)
     })
+}
+
+/// The error context naming the inventory file: the path is kept raw and
+/// escaped only when the error is shown.
+#[derive(Debug)]
+struct InventoryContext(Tainted);
+
+impl std::fmt::Display for InventoryContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "inventory {}", self.0)
+    }
 }
 
 /// Compute `select`'s lines from the store and hand them to `write`, which
@@ -539,6 +550,21 @@ mod tests {
         assert!(err.get(ContextKind::Suggested).is_none(), "{err:?}");
         let shown = err.render().ansi().to_string();
         assert!(!shown.contains(arg), "{shown:?}");
+    }
+
+    #[test]
+    fn an_inventory_error_keeps_the_path_raw_and_shows_it_escaped_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("\u{1b}[31mevil.json");
+        let mut args = nextest_filter_args(&[]).unwrap();
+        args.inventory = path.clone();
+        let err = nextest_filter(&args).unwrap_err();
+        let context = err.downcast_ref::<InventoryContext>().expect("{err:?}");
+        assert_eq!(context.0.as_raw(), path.to_string_lossy());
+        let shown = format!("{err:#}");
+        assert!(shown.contains(r"\u{1b}[31mevil.json"), "{shown:?}");
+        assert!(!shown.contains(r"\\u{1b}"), "escaped twice: {shown:?}");
+        assert!(!shown.contains('\u{1b}'), "{shown:?}");
     }
 
     #[test]
