@@ -166,6 +166,50 @@ impl Project {
             .success();
     }
 
+    /// One run as CI makes it (see `.github/workflows/ci.yml`): the poor
+    /// and then the rich filterset from the history so far, with
+    /// `--min-runs 3`, each run by nextest as a pass of its own, failing
+    /// `fail`, and both passes' JUnit ingested together as one run.
+    /// Returns the two filtersets.
+    fn run_passes(&mut self, fail: &[(&str, &str)]) -> (String, String) {
+        let picked = ["--poor", "--rich"]
+            .map(|class| self.filter(&["--source", "nextest", "--min-runs", "3", class]));
+        let fail: String = fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect();
+        self.runs += 1;
+        let mut kept = Vec::new();
+        for (pass, expr) in picked.iter().enumerate() {
+            // Either pass can be empty, which nextest fails by default.
+            let out = self
+                .cargo_nextest(&["run", "--no-fail-fast", "--no-tests=pass", "-E", expr])
+                .env("FAIL", &fail)
+                .env_remove("FRESH")
+                .output()
+                .expect("cargo nextest runs (is cargo-nextest installed?)");
+            let junit = self.root().join("target/nextest/default/junit.xml");
+            assert!(
+                junit.exists(),
+                "nextest wrote no JUnit for {expr:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let file = self
+                .dir
+                .path()
+                .join(format!("run{}-pass{pass}.xml", self.runs));
+            std::fs::rename(&junit, &file).unwrap();
+            kept.push(file);
+        }
+        greenshift()
+            .arg("ingest")
+            .arg("--db")
+            .arg(&self.db)
+            .args(["--source", "nextest"])
+            .args(&kept)
+            .assert()
+            .success();
+        let [poor, rich] = picked;
+        (poor, rich)
+    }
+
     /// The project's current `cargo nextest list --list-type binaries-only
     /// --message-format json`, in a file.
     fn inventory(&self) -> PathBuf {
@@ -444,4 +488,42 @@ fn a_fresh_project_runs_everything() {
     p.run(&[]);
     assert_eq!(p.filter(&["--source", "elsewhere", "--rich"]), "all()");
     assert_eq!(p.filter(&["--source", "elsewhere", "--poor"]), "none()");
+}
+
+#[test]
+fn a_failure_in_one_two_pass_run_is_rich_in_the_next() {
+    let mut p = Project::new();
+    let everything = set(&[
+        tests("odd", ODD),
+        tests("odd", &[FRESH_TEST]),
+        tests("plain", PLAIN),
+    ]);
+    // With fewer than 3 runs on record every test is new, so the poor pass
+    // is empty and every test runs in the rich one.
+    for _ in 0..3 {
+        assert_eq!(p.run_passes(&[]), ("none()".to_owned(), "all()".to_owned()));
+    }
+
+    // Three green runs: every test on record is poor. One of them fails
+    // in this run's poor pass.
+    let failing = ("odd", "uni::ünï ✓");
+    let (poor_expr, rich_expr) = p.run_passes(&[failing]);
+    let mut poor = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
+    assert_eq!(p.list(&poor_expr), poor, "{poor_expr}");
+    assert_eq!(
+        p.list(&rich_expr),
+        set(&[tests("odd", &[FRESH_TEST])]),
+        "{rich_expr}"
+    );
+
+    // The next run reads that failure back: the test that failed is rich
+    // now, and the two passes still split every test between them.
+    let (poor_expr, rich_expr) = p.run_passes(&[]);
+    let failing = (failing.0.to_owned(), failing.1.to_owned());
+    poor.remove(&failing);
+    let rich = set(&[tests("odd", &[FRESH_TEST]), vec![failing]]);
+    assert_eq!(p.list(&poor_expr), poor, "{poor_expr}");
+    assert_eq!(p.list(&rich_expr), rich, "{rich_expr}");
+    assert!(poor.is_disjoint(&rich));
+    assert_eq!(&poor | &rich, everything);
 }
