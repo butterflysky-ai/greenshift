@@ -1,5 +1,6 @@
 //! Command-line interface.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -293,7 +294,8 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
 /// Print the selection. Reads the store only; with no full run from the
 /// chosen sources (or no store at all), says so and exits [`NO_HISTORY`].
 pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
-    with_lines(args, |lines| {
+    let every_test = |_: &Tainted, _: &Tainted| true;
+    with_lines(args, every_test, |lines| {
         let Some(lines) = lines else {
             return Ok(ExitCode::from(NO_HISTORY));
         };
@@ -306,23 +308,28 @@ pub fn select(args: &SelectArgs) -> anyhow::Result<ExitCode> {
     })
 }
 
-/// Print the selection as one nextest filterset, from the same lines as
-/// [`select()`]. With no history there are no lines, so every test is rich:
-/// it prints `all()` or `none()` and exits 0. The inventory is read first,
-/// so a bad one fails before the store is read.
+/// Print the selection as one nextest filterset, from lines made as
+/// [`select()`] makes them but chosen from the inventory's tests only
+/// ([`nextest::Listing::has`]), so rich is never a test that cannot run.
+/// With no history there are no lines, so every test is rich: it prints
+/// `all()` or `none()` and exits 0. The inventory is read first, so a bad
+/// one fails before the store is read.
 pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
-    let binaries = read_inventory(&args.inventory, nextest::binary_ids)?;
-    with_lines(&args.select, |lines| {
+    let listing = read_inventory(&args.inventory, nextest::listing)?;
+    let eligible = |suite: &Tainted, name: &Tainted| listing.has(suite.as_raw(), name.as_raw());
+    with_lines(&args.select, eligible, |lines| {
         let mut out = std::io::stdout().lock();
         let lines = lines.unwrap_or_default();
-        writeln!(out, "{}", nextest::filter(lines, args.class(), &binaries))
+        let filter = nextest::filter(lines, args.class(), &listing.binaries);
+        writeln!(out, "{filter}")
             .and_then(|()| out.flush())
             .map(|()| ExitCode::SUCCESS)
     })
 }
 
-/// Print the plan: the inventory split into rich and poor, from the same
-/// lines as [`select()`], as one line of JSON. A missing store is created
+/// Print the plan: the inventory split into rich and poor, from lines made
+/// as [`select()`] makes them but chosen from the inventory's tests only,
+/// by suite and name, as one line of JSON. A missing store is created
 /// empty, through [`Store::open`]; an existing one is only read. With no
 /// history there are no lines, so every test is rich. A store that cannot
 /// be created or read is no history too: the plan's `history` is `error`,
@@ -331,6 +338,9 @@ pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
 /// one fails, with nothing printed, before the store is touched.
 pub fn plan(args: &PlanArgs) -> anyhow::Result<ExitCode> {
     let tests = read_inventory(&args.inventory, plan::parse_inventory)?;
+    let known: HashSet<(&Tainted, &Tainted)> =
+        tests.iter().map(|test| (&test.suite, &test.name)).collect();
+    let eligible = |suite: &Tainted, name: &Tainted| known.contains(&(suite, name));
     let write = |history: plan::HistoryState, lines: Option<&[Line<'_>]>| {
         let mut out = std::io::stdout().lock();
         let lines = lines.unwrap_or_default();
@@ -339,7 +349,7 @@ pub fn plan(args: &PlanArgs) -> anyhow::Result<ExitCode> {
             .map(|()| ExitCode::SUCCESS)
     };
     match plan_history(&args.select) {
-        Ok(history) => with_history(&history, &args.select, |lines| {
+        Ok(history) => with_history(&history, &args.select, eligible, |lines| {
             write(plan::HistoryState::Ok, lines)
         }),
         Err(err) => {
@@ -393,12 +403,14 @@ impl std::fmt::Display for InventoryContext {
 /// Compute `select`'s lines from the store and hand them to `write`, which
 /// decides the exit status, then name any threshold not reached on stderr.
 /// With no full run from the chosen sources (or no store at all), says so
-/// on stderr and hands `write` `None`.
+/// on stderr and hands `write` `None`. The lines are chosen from the
+/// tests `eligible` keeps, by suite and name; see [`select::analyse_among`].
 fn with_lines(
     args: &SelectArgs,
+    eligible: impl Fn(&Tainted, &Tainted) -> bool,
     write: impl FnOnce(Option<&[Line<'_>]>) -> std::io::Result<ExitCode>,
 ) -> anyhow::Result<ExitCode> {
-    with_history(&read_history(args)?, args, write)
+    with_history(&read_history(args)?, args, eligible, write)
 }
 
 /// The history of the chosen sources in the store, read only: none if
@@ -414,9 +426,10 @@ fn read_history(args: &SelectArgs) -> anyhow::Result<store::History> {
 fn with_history(
     history: &store::History,
     args: &SelectArgs,
+    eligible: impl Fn(&Tainted, &Tainted) -> bool,
     write: impl FnOnce(Option<&[Line<'_>]>) -> std::io::Result<ExitCode>,
 ) -> anyhow::Result<ExitCode> {
-    let Some(analysis) = select::analyse(history) else {
+    let Some(analysis) = select::analyse_among(history, eligible) else {
         eprintln!("no history: run the full suite");
         return written(write(None));
     };

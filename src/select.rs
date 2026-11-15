@@ -139,13 +139,35 @@ pub struct Analysis {
 /// Analyse `history`, which holds only the runs from the chosen sources.
 /// `None` when it has no full run.
 pub fn analyse(history: &History) -> Option<Analysis> {
+    analyse_among(history, |_, _| true)
+}
+
+/// [`analyse`], with only the tests `eligible` keeps, by suite and name,
+/// in the universe: the tests that can run now, so the cover is chosen
+/// from them rather than from tests that are gone. Which runs are full is
+/// still decided on the whole runs, every test in them, so leaving tests
+/// out never makes a run that was cut short count as full. A failing run
+/// in which no eligible test failed is not a matrix row; it counts as
+/// green, as a run failing only tests outside the universe always has.
+pub fn analyse_among(
+    history: &History,
+    eligible: impl Fn(&Tainted, &Tainted) -> bool,
+) -> Option<Analysis> {
     let full = full_runs(&history.runs);
     let newest = full.last()?;
 
     // The universe, by suite and name; `index` maps a test id into it.
-    let mut ids: Vec<i64> = newest.results.iter().map(|r| r.test_id).collect();
     let no_name = (Tainted::default(), Tainted::default());
     let name_of = |id: &i64| history.tests.get(id).unwrap_or(&no_name);
+    let mut ids: Vec<i64> = newest
+        .results
+        .iter()
+        .map(|r| r.test_id)
+        .filter(|id| {
+            let (suite, name) = name_of(id);
+            eligible(suite, name)
+        })
+        .collect();
     let raw = |id: &i64| {
         let (suite, name) = name_of(id);
         (suite.as_raw(), name.as_raw())

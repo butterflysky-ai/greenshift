@@ -5,8 +5,10 @@
 //! tests, to run after. Every inventory test is in exactly one of them.
 //! Poor is exactly the inventory tests on `select`'s poor lines; rich is
 //! every other inventory test, so tests new to the store, or seen too few
-//! times to be poor, run rich. Stored tests not in the inventory are left
-//! out.
+//! times to be poor, run rich. The lines are chosen from the inventory's
+//! tests alone: stored tests not in it are left out before the cover is
+//! picked, so a failure they caught is caught by the inventory tests left,
+//! and those are rich.
 //!
 //! The inventory is JSON lines, one `{"suite": "...", "name": "..."}`
 //! object per test; the plan is one JSON object with a `history` state

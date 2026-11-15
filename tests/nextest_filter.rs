@@ -496,6 +496,93 @@ fn a_binary_gone_from_the_inventory_is_left_out() {
 }
 
 #[test]
+fn the_cover_is_chosen_from_the_inventory_not_cut_down_to_it() {
+    let mut p = Project::new();
+    p.with_gone(true);
+    // gone::flaky fails in both failing runs, so over the whole store it
+    // alone is the cover; plain::passes and plain::fast each fail with it
+    // once.
+    p.run(&[("gone", "gone::flaky"), ("odd", "plain::passes")]);
+    p.run(&[("gone", "gone::flaky"), ("plain", "plain::fast")]);
+    p.run(&[]);
+    p.with_gone(false);
+
+    // With the gone binary out of the inventory, plain::passes is the
+    // witness left for the first run and plain::fast for the second: both
+    // rich, so neither is poor.
+    let witnesses = set(&[
+        tests("odd", &["plain::passes"]),
+        tests("plain", &["plain::fast"]),
+    ]);
+    let rich_expr = p.filter(&["--source", "nextest", "--min-runs", "1", "--rich"]);
+    let mut rich = witnesses.clone();
+    rich.extend(tests("odd", &[FRESH_TEST]));
+    assert_eq!(p.list(&rich_expr), rich, "{rich_expr}");
+
+    let poor_expr = p.filter(&["--source", "nextest", "--min-runs", "1", "--poor"]);
+    let mut poor = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
+    poor.retain(|test| !witnesses.contains(test));
+    assert_eq!(p.list(&poor_expr), poor, "{poor_expr}");
+}
+
+/// A JUnit report of suite `s`'s `tests` as `(name, failed)`.
+fn junit_of(tests: &[(&str, bool)]) -> String {
+    let cases: String = tests
+        .iter()
+        .map(|&(name, failed)| {
+            let failure = if failed { "<failure/>" } else { "" };
+            format!("<testcase classname=\"s\" name=\"{name}\" time=\"0.005\">{failure}</testcase>")
+        })
+        .collect();
+    format!("<testsuites><testsuite name=\"run\">{cases}</testsuite></testsuites>")
+}
+
+#[test]
+fn a_full_listing_leaves_out_tests_gone_from_a_binary_it_lists() {
+    // As in the_cover_is_chosen_from_the_inventory_not_cut_down_to_it, but
+    // A is gone from binary s itself, which a full listing shows.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let runs: [&[(&str, bool)]; 3] = [
+        &[("A", true), ("B", true), ("C", false)],
+        &[("A", true), ("B", false), ("C", true)],
+        &[("A", false), ("B", false), ("C", false)],
+    ];
+    for (i, run) in runs.iter().enumerate() {
+        let file = dir.path().join(format!("run{i}.xml"));
+        std::fs::write(&file, junit_of(run)).unwrap();
+        greenshift()
+            .arg("ingest")
+            .arg("--db")
+            .arg(&db)
+            .arg(&file)
+            .assert()
+            .success();
+    }
+    let inventory = dir.path().join("inventory.json");
+    std::fs::write(
+        &inventory,
+        r#"{"rust-suites":{"s":{"binary-id":"s","status":"listed","testcases":{"B":{},"C":{}}}}}"#,
+    )
+    .unwrap();
+    let filter = |class: &str| {
+        let out = greenshift()
+            .arg("nextest-filter")
+            .arg("--db")
+            .arg(&db)
+            .arg("--inventory")
+            .arg(&inventory)
+            .args(["--min-runs", "1", class])
+            .assert()
+            .success();
+        String::from_utf8(out.get_output().stdout.clone()).unwrap()
+    };
+    // B and C are both rich: rich is every test, and none is poor.
+    assert_eq!(filter("--rich"), "all()\n");
+    assert_eq!(filter("--poor"), "none()\n");
+}
+
+#[test]
 fn the_inventory_can_come_from_stdin() {
     let mut p = Project::new();
     p.run(&[]);

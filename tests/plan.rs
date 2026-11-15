@@ -382,6 +382,42 @@ fn coverage_ends_rich_early() {
 }
 
 #[test]
+fn the_cover_is_chosen_from_the_inventory_not_cut_down_to_it() {
+    // A fails with B in the first run and with C in the second, so over
+    // the whole store A alone is the cover, and B and C are poor.
+    let mut h = History::new();
+    h.ingest(&[("s", "A", true), ("s", "B", true), ("s", "C", false)]);
+    h.ingest(&[("s", "A", true), ("s", "B", false), ("s", "C", true)]);
+    h.ingest(&[("s", "A", false), ("s", "B", false), ("s", "C", false)]);
+    let select = greenshift()
+        .arg("select")
+        .arg("--db")
+        .arg(&h.db)
+        .args(["--min-runs", "1"])
+        .assert()
+        .success();
+    let lines = stdout(&select);
+    let classes: Vec<(&str, &str)> = lines
+        .lines()
+        .map(|line| {
+            (
+                line.split('\t').next().unwrap(),
+                line.rsplit('\t').next().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(classes, [("rich", "A"), ("poor", "B"), ("poor", "C")]);
+    // With A gone, B is the witness left for the first run and C for the
+    // second: both rich, none poor.
+    let now = &[("s", "B"), ("s", "C")];
+    let out = h.plan(&inventory(now), &["--min-runs", "1"]).success();
+    let (rich, poor) = groups(&stdout(&out));
+    let rich: BTreeSet<(String, String)> = rich.into_iter().collect();
+    assert_eq!(rich, owned(now).into_iter().collect());
+    assert_eq!(poor, owned(&[]));
+}
+
+#[test]
 fn an_unreached_threshold_is_named_on_stderr() {
     let h = two_pick_history();
     let out = h

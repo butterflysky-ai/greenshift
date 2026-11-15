@@ -155,9 +155,9 @@ greenshift nextest-filter --inventory FILE [--rich | --poor]
                           [--estimator wilson|empirical|smoothed]
 ```
 
-`nextest-filter` takes `select`'s options, works out the same lines, and
-prints one [filterset](https://nexte.st/docs/filtersets/) for
-`cargo nextest run -E`. `--inventory` is the current
+`nextest-filter` takes `select`'s options, works out `select`'s lines
+from the inventory's tests (see **Inventory** below), and prints one
+[filterset](https://nexte.st/docs/filtersets/) for `cargo nextest run -E`. `--inventory` is the current
 `cargo nextest list --message-format json` output, full or
 `--list-type binaries-only`, as a file or `-` for stdin:
 
@@ -175,6 +175,13 @@ cargo nextest run -E "$(greenshift nextest-filter --source nextest \
 - **Inventory.** Tests whose binary id is not in the inventory are left
   out: nextest refuses a whole filterset in which a `binary_id(=...)`
   matches no binary, as one does once a binary is renamed or removed.
+  They are left out before the cover is picked, so a failure only a gone
+  test would have been picked for is caught by the tests that are left,
+  and those are rich. A full listing also names each listed binary's
+  tests, and a stored test missing from its binary is left out the same
+  way; a binaries-only listing, or a binary a full listing skipped,
+  keeps every test of the binary. Which runs count as full is still
+  decided on the whole runs.
   A binaries-only listing ignores `-E`, and a full one keeps binaries it
   filters out (as `skipped`), so neither drops a binary; `-p`,
   `--exclude` and the target-selection flags (`--lib`, `--test` and so
@@ -215,8 +222,9 @@ greenshift plan --inventory FILE [--db PATH] [--source NAME]...
 ```
 
 `plan` is `nextest-filter` for any test runner. It takes `select`'s
-options, works out the same lines, and splits the tests that exist now
-into a rich group, to run first, and a poor group, to run after.
+options, works out `select`'s lines from the inventory's tests alone,
+and splits the tests that exist now into a rich group, to run first, and
+a poor group, to run after.
 `--inventory` lists those tests, one JSON object per line, as a file or
 `-` for stdin:
 
@@ -248,7 +256,11 @@ It prints one line of JSON:
   every other inventory test: first `select`'s rich tests in pick order,
   then the rest in inventory order. So tests the store has never seen, and
   those with fewer than `--min-runs` results (`select`'s *new* tests), are
-  rich. Stored tests that are not in the inventory are left out.
+  rich. Stored tests that are not in the inventory are left out, and
+  before the cover is picked: when a failing run's only rich witness is
+  gone, the inventory tests that also failed in it are rich instead.
+  Which runs count as full is still decided on the whole runs, so a run
+  cut short never counts as full because the gone tests are left out.
 - **Names.** Suite and name are written as JSON strings of the raw text:
   JSON's own escapes only (`\"`, `\\`, `\t`, `\u001b` and so on), none of
   `select`'s display escaping, so they read back exactly as stored. Every

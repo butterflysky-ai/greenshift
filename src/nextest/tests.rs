@@ -200,3 +200,41 @@ fn binary_ids_refuses_anything_else() {
         assert!(binary_ids(bad).is_err(), "{bad:?}");
     }
 }
+
+#[test]
+fn a_full_listing_names_its_binaries_tests() {
+    let listing = listing(FULL_LIST).unwrap();
+    assert_eq!(listing.binaries, bins(&["greenshift", "greenshift::cli"]));
+    assert!(listing.has("greenshift", "cli::tests::ingest_options"));
+    assert!(!listing.has("greenshift", "cli::tests::gone"));
+    // A listed binary with no tests has none to keep.
+    assert!(!listing.has("greenshift::cli", "anything"));
+    assert!(!listing.has("gone", "cli::tests::ingest_options"));
+    // A test with no suite matches by name in any binary.
+    assert!(listing.has("", "anything"));
+}
+
+#[test]
+fn a_binaries_only_listing_keeps_every_test_of_its_binaries() {
+    let listing = listing(BINARIES_ONLY).unwrap();
+    assert!(listing.tests.is_empty());
+    assert!(listing.has("greenshift", "any::name"));
+    assert!(!listing.has("gone", "any::name"));
+}
+
+#[test]
+fn listing_refuses_testcases_that_are_not_an_object() {
+    let bad = r#"{"rust-suites":{"x":{"binary-id":"x","status":"listed","testcases":[]}}}"#;
+    assert!(listing(bad).is_err());
+}
+
+#[test]
+fn a_binary_a_full_listing_skipped_keeps_every_test() {
+    // nextest lists a binary its -E filters out as skipped, with no
+    // testcases: its tests are unknown, not gone.
+    let listing =
+        listing(r#"{"rust-suites":{"x":{"binary-id":"x","status":"skipped","testcases":{}}}}"#)
+            .unwrap();
+    assert!(listing.has("x", "any::name"));
+    assert!(!listing.has("y", "any::name"));
+}
