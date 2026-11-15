@@ -73,6 +73,13 @@ fn fail_lines(fail: &[(&str, &str)]) -> String {
     fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect()
 }
 
+/// The two filtersets of one [`Project::run_passes`] run.
+#[derive(Debug, PartialEq)]
+struct Passes {
+    poor: String,
+    rich: String,
+}
+
 struct Project {
     dir: tempfile::TempDir,
     db: PathBuf,
@@ -156,10 +163,9 @@ impl Project {
     /// and then the poor filterset from the history so far, with
     /// `--min-runs 3`, each run by nextest as a pass of its own under CI's
     /// profile for it (`ci-rich`, `ci-poor`), failing `fail`, and both
-    /// passes' JUnit ingested together as one run. Returns the poor and
-    /// the rich filterset, in that order. Keep `--min-runs` in step with
-    /// the workflow's.
-    fn run_passes(&mut self, fail: &[(&str, &str)]) -> (String, String) {
+    /// passes' JUnit ingested together as one run. Returns both
+    /// filtersets. Keep `--min-runs` in step with the workflow's.
+    fn run_passes(&mut self, fail: &[(&str, &str)]) -> Passes {
         let [rich, poor] = ["--rich", "--poor"]
             .map(|class| self.filter(&["--source", "nextest", "--min-runs", "3", class]));
         let fail = fail_lines(fail);
@@ -193,7 +199,7 @@ impl Project {
             kept.push(file);
         }
         self.ingest(&kept);
-        (poor, rich)
+        Passes { poor, rich }
     }
 
     /// `cargo nextest run --profile <profile> <args>`, failing the tests
@@ -521,30 +527,34 @@ fn a_failure_in_one_two_pass_run_is_rich_in_the_next() {
     // With fewer than 3 runs on record every test is new, so the poor pass
     // is empty and every test runs in the rich one.
     for _ in 0..3 {
-        assert_eq!(p.run_passes(&[]), ("none()".to_owned(), "all()".to_owned()));
+        let passes = Passes {
+            poor: "none()".to_owned(),
+            rich: "all()".to_owned(),
+        };
+        assert_eq!(p.run_passes(&[]), passes);
     }
 
     // Three green runs: every test on record is poor. One of them fails
     // in this run's poor pass. Tests run after it there (one at a time, by
     // name), so a poor pass that stopped at it would be cut short.
     let failing = ("odd", "uni::ünï ✓");
-    let (poor_expr, rich_expr) = p.run_passes(&[failing]);
+    let passes = p.run_passes(&[failing]);
     let mut poor = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
-    assert_eq!(p.list(&poor_expr), poor, "{poor_expr}");
+    assert_eq!(p.list(&passes.poor), poor, "{passes:?}");
     assert_eq!(
-        p.list(&rich_expr),
+        p.list(&passes.rich),
         set(&[tests("odd", &[FRESH_TEST])]),
-        "{rich_expr}"
+        "{passes:?}"
     );
 
     // The next run reads that failure back: the test that failed is rich
     // now, and the two passes still split every test between them.
-    let (poor_expr, rich_expr) = p.run_passes(&[]);
+    let passes = p.run_passes(&[]);
     let failing = (failing.0.to_owned(), failing.1.to_owned());
     poor.remove(&failing);
     let rich = set(&[tests("odd", &[FRESH_TEST]), vec![failing]]);
-    assert_eq!(p.list(&poor_expr), poor, "{poor_expr}");
-    assert_eq!(p.list(&rich_expr), rich, "{rich_expr}");
+    assert_eq!(p.list(&passes.poor), poor, "{passes:?}");
+    assert_eq!(p.list(&passes.rich), rich, "{passes:?}");
     assert!(poor.is_disjoint(&rich));
     assert_eq!(&poor | &rich, everything);
 }
