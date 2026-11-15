@@ -515,3 +515,58 @@ fn a_poor_name_in_another_suite_is_new_and_rich() {
     assert_eq!(plan.1, owned(&[("kit", TAB)]));
     assert_partition(&plan, &now);
 }
+
+/// One text and two that differ from it only in one whitespace or
+/// invisible character: a space, a tab and a zero-width space.
+const SPACED: [&str; 3] = ["a b", "a\tb", "a\u{200b}b"];
+
+/// History of the test `stored`, three runs, failing in the first when
+/// `fails`, then the plan of `now` and its raw output.
+fn plan_near_twins(stored: (&str, &str), fails: bool, now: &[(&str, &str)]) -> (Groups, String) {
+    let mut h = History::new();
+    for run in 0..3 {
+        h.ingest(&[
+            (stored.0, stored.1, fails && run == 0),
+            ("kit", "steady", false),
+        ]);
+    }
+    let out = stdout(&h.plan(&inventory(now), &["--min-runs", "3"]).success());
+    let plan = groups(&out);
+    assert_partition(&plan, now);
+    (plan, out)
+}
+
+/// Identity is the exact suite and name: tests that differ only in one
+/// whitespace or invisible character are different tests, so only the
+/// stored one follows its history and the others are new, so rich.
+fn assert_near_twins_are_distinct(test: impl Fn(&'static str) -> (&'static str, &'static str)) {
+    let [space, tab, zero_width] = SPACED.map(&test);
+    // The stored test last, so a rich pick shows by coming first.
+    let now = [tab, zero_width, space];
+    // Failing once, the stored test is select's rich pick: first.
+    let (plan, out) = plan_near_twins(space, true, &now);
+    assert_eq!(plan.0, owned(&[space, tab, zero_width]), "{out}");
+    assert!(plan.1.is_empty(), "{out}");
+    // Always passing, it is poor; the others are still rich.
+    let (plan, out) = plan_near_twins(space, false, &now);
+    assert_eq!(plan.0, owned(&[tab, zero_width]), "{out}");
+    assert_eq!(plan.1, owned(&[space]), "{out}");
+    // The JSON keeps them apart, the tab and U+200B as JSON escapes.
+    for raw in ["a b", r"a\tb", concat!(r"a\u", "200b", "b")] {
+        assert_eq!(
+            out.matches(&format!("\"{raw}\"")).count(),
+            1,
+            "{raw}: {out}"
+        );
+    }
+}
+
+#[test]
+fn names_that_differ_only_in_whitespace_are_different_tests() {
+    assert_near_twins_are_distinct(|name| ("kit", name));
+}
+
+#[test]
+fn suites_that_differ_only_in_whitespace_are_different_tests() {
+    assert_near_twins_are_distinct(|suite| (suite, "case"));
+}
