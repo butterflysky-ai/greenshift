@@ -26,6 +26,12 @@
 //! - `tests`: one row per test identity (`suite`, `name`), shared by every
 //!   run, so the strings are stored once.
 //! - `results`: one row per test per run: outcome and duration.
+//!
+//! Schema version 2 adds `runs.partial`: 1 for a run known to hold only
+//! part of the suite (`ingest --partial`), 0 otherwise. Runs written at
+//! version 1 take the default, 0, as every run then was recorded as whole.
+//! A version 1 store opened read-only is read as if migrated: its runs
+//! are not partial.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,6 +86,11 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT, WITHOUT ROWID;
 
     CREATE INDEX results_by_test ON results (test_id);
+    "#,
+    // 2: runs marked as holding only part of the suite.
+    r#"
+    ALTER TABLE runs ADD COLUMN partial INTEGER NOT NULL DEFAULT 0
+        CHECK (partial IN (0, 1));
     "#,
 ];
 
@@ -191,6 +202,9 @@ pub struct NewRun<'a> {
     pub source: &'a str,
     /// The JUnit files the results came from, in the order given.
     pub files: &'a [PathBuf],
+    /// The run holds only part of the suite (one of several passes, say),
+    /// so it never counts as a full run, whatever its size.
+    pub partial: bool,
 }
 
 /// What [`Store::record_run`] wrote.
@@ -215,6 +229,8 @@ pub struct StoredResult {
 pub struct StoredRun {
     pub id: i64,
     pub source: String,
+    /// Recorded as holding only part of the suite; see [`NewRun::partial`].
+    pub partial: bool,
     /// The run's results, by test id.
     pub results: Vec<StoredResult>,
 }
@@ -233,6 +249,9 @@ pub struct History {
 pub struct Store {
     conn: Connection,
     path: Tainted,
+    /// The schema version the store is at: [`SCHEMA_VERSION`], unless it
+    /// was opened read-only at an older one.
+    version: i64,
 }
 
 impl Store {
@@ -308,13 +327,17 @@ impl Store {
             });
         }
         // Migration 1 stamps the application_id and the version in one
-        // transaction, so a marked store at version 0 holds nothing. With a
-        // single schema version there is no older one to read.
+        // transaction, so a marked store at version 0 holds nothing. An
+        // older version is read as it is; see [`Store::history`].
         if found == 0 {
             return Ok(None);
         }
         drop(sqlite);
-        Ok(Some(Store { conn, path: shown }))
+        Ok(Some(Store {
+            conn,
+            path: shown,
+            version: found,
+        }))
     }
 
     /// A migrated store that lives only in memory.
@@ -324,7 +347,11 @@ impl Store {
     }
 
     fn init(conn: Connection, path: Tainted) -> Result<Store, StoreError> {
-        let mut store = Store { conn, path };
+        let mut store = Store {
+            conn,
+            path,
+            version: SCHEMA_VERSION,
+        };
         store
             .conn
             .busy_timeout(std::time::Duration::from_secs(5))
@@ -419,8 +446,8 @@ impl Store {
         let sqlite = sqlite_err(path);
         let tx = self.conn.transaction().map_err(&sqlite)?;
         tx.execute(
-            "INSERT INTO runs (commit_sha, source) VALUES (?1, ?2)",
-            params![run.commit.map(CommitId::as_str), run.source],
+            "INSERT INTO runs (commit_sha, source, partial) VALUES (?1, ?2, ?3)",
+            params![run.commit.map(CommitId::as_str), run.source, run.partial],
         )
         .map_err(&sqlite)?;
         let run_id = tx.last_insert_rowid();
@@ -484,15 +511,19 @@ impl Store {
                 vec!["?"; sources.len()].join(", ")
             )
         };
+        // A version 1 store, opened read-only, has no `partial` column:
+        // its runs were all recorded as whole.
+        let partial = if self.version >= 2 { "u.partial" } else { "0" };
         let mut runs: Vec<StoredRun> = tx
             .prepare(&format!(
-                "SELECT u.id, u.source FROM runs u {filter} ORDER BY u.id"
+                "SELECT u.id, u.source, {partial} FROM runs u {filter} ORDER BY u.id"
             ))
             .and_then(|mut stmt| {
                 stmt.query_map(params_from_iter(sources), |r| {
                     Ok(StoredRun {
                         id: r.get(0)?,
                         source: r.get(1)?,
+                        partial: r.get(2)?,
                         results: Vec::new(),
                     })
                 })?

@@ -1,2 +1,12 @@
 [profile.default.junit]
 path = "junit.xml"
+
+# CI runs the tests in two passes (see .github/workflows/ci.yml), one
+# profile each, so each pass's JUnit is kept in its own
+# target/nextest/<profile>/junit.xml. A pass runs every test it selects,
+# failing or not, so the history records a result for each.
+[profile.ci-poor]
+fail-fast = false
+
+[profile.ci-rich]
+fail-fast = false

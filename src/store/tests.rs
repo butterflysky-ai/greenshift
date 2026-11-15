@@ -15,6 +15,7 @@ const RUN: NewRun<'static> = NewRun {
     commit: None,
     source: "nextest",
     files: &[],
+    partial: false,
 };
 
 /// The paths recorded for a run, in order, as stored.
@@ -72,7 +73,7 @@ fn row(suite: &str, name: &str, outcome: &str, ms: Option<i64>) -> Row {
 fn fresh_store_is_at_the_current_schema_version() {
     let store = Store::open_in_memory().unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 1);
+    assert_eq!(SCHEMA_VERSION, 2);
 }
 
 #[test]
@@ -90,7 +91,7 @@ fn schema_has_runs_tests_and_results() {
             &store,
             "SELECT name FROM pragma_table_info('runs') ORDER BY cid"
         ),
-        ["id", "commit_sha", "source", "ingested_at"]
+        ["id", "commit_sha", "source", "ingested_at", "partial"]
     );
     assert_eq!(
         strings(
@@ -593,6 +594,7 @@ fn run_from(source: &'static str) -> NewRun<'static> {
         commit: None,
         source,
         files: &[],
+        partial: false,
     }
 }
 
@@ -935,4 +937,108 @@ fn an_unknown_outcome_in_the_store_is_shown_escaped_exactly_once() {
     assert!(shown.contains(r#""\u{1b}[31mevil""#), "{shown:?}");
     assert!(!shown.contains(r"\\u{1b}"), "escaped twice: {shown:?}");
     assert!(!shown.contains('\u{1b}'), "{shown:?}");
+}
+
+/// A store at schema version 1, as greenshift wrote it before runs could
+/// be partial, holding one run of one passing test.
+fn version_1_store(path: &Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(MIGRATIONS[0]).unwrap();
+    conn.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    conn.execute_batch(
+        "INSERT INTO runs (id, commit_sha, source) VALUES (1, 'abc1234', 'nextest');
+         INSERT INTO tests (id, suite, name) VALUES (1, 's', 't');
+         INSERT INTO results (run_id, test_id, outcome, duration_ms)
+         VALUES (1, 1, 'passed', 5);",
+    )
+    .unwrap();
+}
+
+fn user_version(path: &Path) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_version_1_store_is_migrated_and_its_runs_are_not_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    version_1_store(&path);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    let history = store.history(&[]).unwrap();
+    assert_eq!(
+        named(&history),
+        [(
+            1,
+            "nextest".to_string(),
+            vec![row("s", "t", "passed", Some(5))]
+        )]
+    );
+    assert!(!history.runs[0].partial);
+    // New runs are written alongside the old one.
+    let partial = NewRun {
+        partial: true,
+        ..RUN
+    };
+    store.record_run(&partial, &[]).unwrap();
+    let flags: Vec<bool> = store
+        .history(&[])
+        .unwrap()
+        .runs
+        .iter()
+        .map(|r| r.partial)
+        .collect();
+    assert_eq!(flags, [false, true]);
+}
+
+#[test]
+fn a_read_only_open_reads_a_version_1_store_as_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    version_1_store(&path);
+    let store = Store::open_read_only(&path).unwrap().unwrap();
+    assert_eq!(store.schema_version().unwrap(), 1);
+    let history = store.history(&[]).unwrap();
+    assert_eq!(
+        named(&history),
+        [(
+            1,
+            "nextest".to_string(),
+            vec![row("s", "t", "passed", Some(5))]
+        )]
+    );
+    assert!(!history.runs[0].partial);
+    drop(store);
+    assert_eq!(user_version(&path), 1);
+}
+
+#[test]
+fn history_reads_back_whether_each_run_is_partial() {
+    let mut store = Store::open_in_memory().unwrap();
+    for partial in [false, true, false] {
+        store.record_run(&NewRun { partial, ..RUN }, &[]).unwrap();
+    }
+    let flags: Vec<bool> = store
+        .history(&[])
+        .unwrap()
+        .runs
+        .iter()
+        .map(|r| r.partial)
+        .collect();
+    assert_eq!(flags, [false, true, false]);
+}
+
+#[test]
+fn runs_partial_holds_only_0_or_1() {
+    let store = Store::open_in_memory().unwrap();
+    let err = store
+        .conn
+        .execute("INSERT INTO runs (source, partial) VALUES ('x', 2)", [])
+        .unwrap_err();
+    assert!(err.to_string().contains("CHECK"), "{err}");
 }

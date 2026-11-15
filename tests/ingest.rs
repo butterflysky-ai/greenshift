@@ -57,17 +57,19 @@ fn both_producers_in_one_invocation_make_one_run() {
     assert_eq!(count(&conn, "tests"), 13);
     assert_eq!(count(&conn, "results"), 13);
 
-    let (commit, source, version): (Option<String>, String, i64) = conn
+    let (commit, source, partial, version): (Option<String>, String, bool, i64) = conn
         .query_row(
-            "SELECT commit_sha, source, (SELECT user_version FROM pragma_user_version)
+            "SELECT commit_sha, source, partial,
+                    (SELECT user_version FROM pragma_user_version)
              FROM runs",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .unwrap();
     assert_eq!(commit.as_deref(), Some("0123abcd"));
     assert_eq!(source, "ci");
-    assert_eq!(version, 1);
+    assert!(!partial);
+    assert_eq!(version, 2);
     let recorded: Vec<Vec<u8>> = conn
         .prepare("SELECT path FROM run_files ORDER BY position")
         .unwrap()
@@ -415,4 +417,28 @@ fn a_commit_is_stored_in_lowercase() {
         .query_row("SELECT commit_sha FROM runs", [], |r| r.get(0))
         .unwrap();
     assert_eq!(commit, "0123abcdef");
+}
+
+fn partial_flags(conn: &Connection) -> Vec<bool> {
+    conn.prepare("SELECT partial FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn partial_marks_the_run_as_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let files = [fixture("nextest.xml")];
+    ingest(&db, &files, &[])
+        .success()
+        .stdout(predicate::str::contains("recorded run 1 with"));
+    ingest(&db, &files, &["--partial"])
+        .success()
+        .stdout(predicate::str::contains("recorded partial run 2 with"));
+    let conn = Connection::open(&db).unwrap();
+    assert_eq!(partial_flags(&conn), [false, true]);
 }

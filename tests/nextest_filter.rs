@@ -8,9 +8,10 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command as Process;
+use std::process::{Command as Process, Output};
 
 use assert_cmd::Command;
+use greenshift::store::Store;
 
 const PACKAGE: &str = "odd-names";
 
@@ -68,6 +69,18 @@ fn main() {{
     )
 }
 
+/// `fail`'s `(binary, name)`s as the harness reads `FAIL`.
+fn fail_lines(fail: &[(&str, &str)]) -> String {
+    fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect()
+}
+
+/// The two filtersets of one [`Project::run_passes`] run.
+#[derive(Debug, PartialEq)]
+struct Passes {
+    poor: String,
+    rich: String,
+}
+
 struct Project {
     dir: tempfile::TempDir,
     db: PathBuf,
@@ -85,9 +98,10 @@ impl Project {
         std::fs::write(root.join("tests/odd.rs"), harness("odd", ODD, true)).unwrap();
         std::fs::write(root.join("tests/plain.rs"), harness("plain", PLAIN, false)).unwrap();
         std::fs::write(root.join("tests/gone.rs"), harness("gone", GONE, false)).unwrap();
+        // greenshift's own nextest config, with CI's two-pass profiles.
         std::fs::write(
             root.join(".config/nextest.toml"),
-            "[profile.default.junit]\npath = \"junit.xml\"\n",
+            include_str!("../.config/nextest.toml"),
         )
         .unwrap();
         let db = dir.path().join("history.sqlite");
@@ -124,7 +138,15 @@ impl Project {
     /// cargo run this test is part of.
     fn cargo_nextest(&self, args: &[&str]) -> Process {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut cmd = Process::new(cargo);
+        let mut cmd = self.isolated(cargo);
+        cmd.arg("nextest").args(args);
+        cmd
+    }
+
+    /// `program` in the project, without the environment of the nextest or
+    /// cargo run this test is part of.
+    fn isolated(&self, program: impl AsRef<std::ffi::OsStr>) -> Process {
+        let mut cmd = Process::new(program);
         for (key, _) in std::env::vars_os() {
             let key = key.to_string_lossy().into_owned();
             let inherited =
@@ -133,37 +155,139 @@ impl Project {
                 cmd.env_remove(&key);
             }
         }
-        cmd.current_dir(self.root()).arg("nextest").args(args);
+        cmd.current_dir(self.root());
         cmd
+    }
+
+    /// `scripts/check-partition.sh` in the project, on the `poor` and
+    /// `rich` filtersets.
+    fn check_partition(&self, poor: &str, rich: &str) -> Output {
+        let [poor_file, rich_file] = [("poor", poor), ("rich", rich)].map(|(class, expr)| {
+            let file = self.dir.path().join(format!("{class}.expr"));
+            std::fs::write(&file, expr).unwrap();
+            file
+        });
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-partition.sh");
+        self.isolated("bash")
+            .arg(script)
+            .arg(poor_file)
+            .arg(rich_file)
+            .output()
+            .expect("bash runs")
     }
 
     /// Run every test with nextest, failing `fail` (`(binary, name)`), and
     /// ingest its JUnit as one run.
     fn run(&mut self, fail: &[(&str, &str)]) {
-        let fail: String = fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect();
+        self.runs += 1;
+        let kept = self.dir.path().join(format!("run{}.xml", self.runs));
+        self.pass("default", &["--no-fail-fast"], &fail_lines(fail), &kept);
+        self.ingest(&[kept]);
+    }
+
+    /// One run as CI makes it (see `.github/workflows/ci.yml`): the rich
+    /// and then the poor filterset from the history so far, with
+    /// `--min-runs 3`, each run by nextest as a pass of its own under CI's
+    /// profile for it (`ci-rich`, `ci-poor`), failing `fail`, and both
+    /// passes' JUnit ingested together as one run. Returns both
+    /// filtersets. Keep `--min-runs` in step with the workflow's.
+    fn run_passes(&mut self, fail: &[(&str, &str)]) -> Passes {
+        let [rich, poor] = ["--rich", "--poor"]
+            .map(|class| self.filter(&["--source", "nextest", "--min-runs", "3", class]));
+        let fail = fail_lines(fail);
+        self.runs += 1;
+        let mut kept = Vec::new();
+        for (profile, expr) in [("ci-rich", &rich), ("ci-poor", &poor)] {
+            let file = self
+                .dir
+                .path()
+                .join(format!("run{}-{profile}.xml", self.runs));
+            // Either pass can be empty, which nextest fails by default.
+            // One test at a time, so a profile that stopped at the first
+            // failure would leave the tests after it out of the pass, and
+            // its JUnit short of the pass's selection.
+            let out = self.pass(
+                profile,
+                &["--no-tests=pass", "--test-threads", "1", "-E", expr],
+                &fail,
+                &file,
+            );
+            // Green, or failing only a test asked to fail (nextest's exit
+            // code 100); never refusing to run, say an empty pass (4).
+            let failed_as_asked = !fail.is_empty() && out.status.code() == Some(100);
+            assert!(
+                out.status.success() || failed_as_asked,
+                "nextest exited {:?} for {expr:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                junit_tests(&file),
+                self.selected(expr, false),
+                "the {profile} pass ran every test {expr:?} selects"
+            );
+            kept.push(file);
+        }
+        self.ingest(&kept);
+        Passes { poor, rich }
+    }
+
+    /// `cargo nextest run --profile <profile> <args>`, failing the tests
+    /// `fail` lists, with its JUnit moved to `kept`.
+    fn pass(&self, profile: &str, args: &[&str], fail: &str, kept: &Path) -> Output {
         let out = self
-            .cargo_nextest(&["run", "--no-fail-fast"])
-            .env("FAIL", &fail)
+            .cargo_nextest(&["run", "--profile", profile])
+            .args(args)
+            .env("FAIL", fail)
             .env_remove("FRESH")
             .output()
             .expect("cargo nextest runs (is cargo-nextest installed?)");
-        let junit = self.root().join("target/nextest/default/junit.xml");
+        let junit = self
+            .root()
+            .join(format!("target/nextest/{profile}/junit.xml"));
         assert!(
             junit.exists(),
-            "nextest wrote no JUnit: {}",
+            "nextest wrote no JUnit for {args:?}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        self.runs += 1;
-        let kept = self.dir.path().join(format!("run{}.xml", self.runs));
-        std::fs::rename(&junit, &kept).unwrap();
+        std::fs::rename(&junit, kept).unwrap();
+        out
+    }
+
+    /// Ingest `files` into the store as one run.
+    fn ingest(&self, files: &[PathBuf]) {
         greenshift()
             .arg("ingest")
             .arg("--db")
             .arg(&self.db)
             .args(["--source", "nextest"])
-            .arg(&kept)
+            .args(files)
             .assert()
             .success();
+    }
+
+    /// Every run in the store, oldest first, as the `(binary, name)` of
+    /// each of its results.
+    fn stored_runs(&self) -> Vec<BTreeSet<(String, String)>> {
+        let store = Store::open_read_only(&self.db)
+            .unwrap()
+            .expect("a store to read");
+        let history = store.history(&[]).unwrap();
+        let prefix = format!("{PACKAGE}::");
+        history
+            .runs
+            .iter()
+            .map(|run| {
+                run.results
+                    .iter()
+                    .map(|result| {
+                        let (suite, name) = &history.tests[&result.test_id];
+                        let binary = suite.as_raw().strip_prefix(&prefix).expect("a test binary");
+                        (binary.to_owned(), name.as_raw().to_owned())
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// The project's current `cargo nextest list --list-type binaries-only
@@ -212,9 +336,19 @@ impl Project {
     /// The tests `cargo nextest list -E expr` selects, as `(binary, name)`,
     /// with [`FRESH_TEST`] in the inventory.
     fn list(&self, expr: &str) -> BTreeSet<(String, String)> {
-        let out = self
-            .cargo_nextest(&["list", "--message-format", "oneline", "-E", expr])
-            .env("FRESH", "1")
+        self.selected(expr, true)
+    }
+
+    /// The tests `cargo nextest list -E expr` selects, as `(binary, name)`,
+    /// with [`FRESH_TEST`] in the inventory when `fresh` says so.
+    fn selected(&self, expr: &str, fresh: bool) -> BTreeSet<(String, String)> {
+        let mut cmd = self.cargo_nextest(&["list", "--message-format", "oneline", "-E", expr]);
+        if fresh {
+            cmd.env("FRESH", "1");
+        } else {
+            cmd.env_remove("FRESH");
+        }
+        let out = cmd
             .output()
             .expect("cargo nextest runs (is cargo-nextest installed?)");
         assert!(
@@ -233,6 +367,24 @@ impl Project {
             })
             .collect()
     }
+}
+
+/// The tests in the JUnit file `path`, as `(binary, name)`.
+fn junit_tests(path: &Path) -> BTreeSet<(String, String)> {
+    let prefix = format!("{PACKAGE}::");
+    greenshift::junit::parse_file(path)
+        .unwrap()
+        .cases
+        .iter()
+        .map(|case| {
+            let binary = case
+                .suite
+                .as_raw()
+                .strip_prefix(&prefix)
+                .expect("a test binary");
+            (binary.to_owned(), case.name.as_raw().to_owned())
+        })
+        .collect()
 }
 
 fn greenshift() -> Command {
@@ -444,4 +596,112 @@ fn a_fresh_project_runs_everything() {
     p.run(&[]);
     assert_eq!(p.filter(&["--source", "elsewhere", "--rich"]), "all()");
     assert_eq!(p.filter(&["--source", "elsewhere", "--poor"]), "none()");
+}
+
+#[test]
+fn a_failure_in_one_two_pass_run_is_rich_in_the_next() {
+    let mut p = Project::new();
+    let everything = set(&[
+        tests("odd", ODD),
+        tests("odd", &[FRESH_TEST]),
+        tests("plain", PLAIN),
+    ]);
+    let ran = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
+    // With fewer than 3 runs on record every test is new, so the poor pass
+    // is empty and every test runs in the rich one. The first run fails
+    // the test nextest runs first there (one at a time, by binary and
+    // then name), so a rich pass that stopped at it would be cut short.
+    let first = ("odd", " leading and trailing ");
+    let owned = |(binary, name): (&str, &str)| (binary.to_owned(), name.to_owned());
+    assert_eq!(ran.first(), Some(&owned(first)), "runs first");
+    for fail in [&[first][..], &[], &[]] {
+        let passes = Passes {
+            poor: "none()".to_owned(),
+            rich: "all()".to_owned(),
+        };
+        assert_eq!(p.run_passes(fail), passes);
+    }
+
+    // Three runs, one failing `first`: it is rich, and every other test on
+    // record is poor. One of those fails in this run's poor pass, with
+    // tests run after it there, so a poor pass that stopped at it would be
+    // cut short too.
+    let failing = ("odd", "uni::ünï ✓");
+    let passes = p.run_passes(&[failing]);
+    let mut poor = ran.clone();
+    poor.remove(&owned(first));
+    let mut rich = set(&[tests("odd", &[FRESH_TEST]), vec![owned(first)]]);
+    assert_eq!(p.list(&passes.poor), poor, "{passes:?}");
+    assert_eq!(p.list(&passes.rich), rich, "{passes:?}");
+
+    // The next run reads that failure back: the test that failed is rich
+    // now, and the two passes still split every test between them.
+    let passes = p.run_passes(&[]);
+    poor.remove(&owned(failing));
+    rich.insert(owned(failing));
+    assert_eq!(p.list(&passes.poor), poor, "{passes:?}");
+    assert_eq!(p.list(&passes.rich), rich, "{passes:?}");
+    assert!(poor.is_disjoint(&rich));
+    assert_eq!(&poor | &rich, everything);
+
+    // Both of that run's passes ran tests, and their JUnit went into the
+    // store as one run holding the results of both, not a run per pass.
+    let runs = p.stored_runs();
+    assert_eq!(runs.len(), 5, "a run per run_passes: {runs:?}");
+    assert_eq!(runs[4], ran, "the last run holds both passes' results");
+}
+
+#[test]
+fn check_partition_names_tests_in_both_passes_or_neither() {
+    let p = Project::new();
+    // A listing writes Cargo.lock, which the script's --locked needs.
+    p.inventory();
+    let check = |poor: &str, rich: &str| {
+        let out = p.check_partition(poor, rich);
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        (out.status.code(), stdout, stderr)
+    };
+    let counts = |poor: usize, rich: usize| format!("tests: 10 in all, {poor} poor, {rich} rich\n");
+
+    let (code, stdout, stderr) = check("binary(plain)", "not binary(plain)");
+    assert_eq!(
+        (code, stdout.as_str()),
+        (Some(0), &*counts(2, 8)),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("error"), "{stderr}");
+
+    let (code, stdout, stderr) = check("binary(plain)", "all()");
+    assert_eq!(
+        (code, stdout.as_str()),
+        (Some(1), &*counts(2, 10)),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("neither"), "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "error: tests in both passes:\n\
+             odd-names::plain plain::fast\n\
+             odd-names::plain shared::same\n"
+        ),
+        "{stderr}"
+    );
+
+    let (code, stdout, stderr) = check("none()", "binary(odd) and not test(=shared::same)");
+    assert_eq!(
+        (code, stdout.as_str()),
+        (Some(1), &*counts(0, 7)),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("both"), "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "error: tests in neither pass:\n\
+             odd-names::odd shared::same\n\
+             odd-names::plain plain::fast\n\
+             odd-names::plain shared::same\n"
+        ),
+        "{stderr}"
+    );
 }

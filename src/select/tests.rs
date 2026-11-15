@@ -107,12 +107,17 @@ fn with(mut cases: Vec<TestCase>, more: &[TestCase]) -> Vec<TestCase> {
 }
 
 fn record(store: &mut Store, source: &str, cases: &[TestCase]) {
+    record_as(store, source, false, cases);
+}
+
+fn record_as(store: &mut Store, source: &str, partial: bool, cases: &[TestCase]) {
     store
         .record_run(
             &NewRun {
                 commit: None,
                 source,
                 files: &[],
+                partial,
             },
             cases,
         )
@@ -411,6 +416,58 @@ fn a_short_run_is_not_full() {
     assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 11));
     // Its results still count towards min-runs: a has 2, the fillers 1.
     assert!(out(&store, 2).iter().all(|l| l.ends_with("\ts\ta")));
+}
+
+#[test]
+fn a_partial_poor_only_run_is_not_full() {
+    // A whole run, then the poor pass of a two-pass run whose rich pass
+    // wrote no JUnit: 11 of 11 results, full by size, but marked partial.
+    let mut store = store_of(&[with(fillers(10), &[t("a", P, 10)])]);
+    record_as(
+        &mut store,
+        "ci",
+        true,
+        &with(fillers(10), &[t("poor_only", F, 10)]),
+    );
+    let lines = out(&store, 0);
+    assert_eq!(rich(&lines), Vec::<&str>::new());
+    assert!(!lines.iter().any(|l| l.contains("poor_only")), "{lines:?}");
+    let a = analysis(&store, &[]).unwrap();
+    assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 11));
+}
+
+#[test]
+fn a_partial_run_alone_is_no_full_run() {
+    let mut store = Store::open_in_memory().unwrap();
+    record_as(&mut store, "ci", true, &fillers(10));
+    assert_eq!(analysis(&store, &[]), None);
+}
+
+#[test]
+fn a_partial_run_still_counts_towards_min_runs() {
+    let mut store = store_of(&[with(fillers(10), &[t("a", P, 10)])]);
+    record_as(&mut store, "ci", true, &[t("a", P, 10)]);
+    let a = analysis(&store, &[]).unwrap();
+    let results = |name: &str| {
+        a.tests
+            .iter()
+            .find(|t| t.name.as_raw() == name)
+            .unwrap()
+            .results
+    };
+    assert_eq!((results("a"), results("f00")), (2, 1));
+    // Its passes are not passes in full runs.
+    let a_info = a.tests.iter().find(|t| t.name.as_raw() == "a").unwrap();
+    assert_eq!(a_info.passes, 1);
+}
+
+#[test]
+fn a_large_partial_run_is_not_among_the_runs_compared_with() {
+    // Were run 2 compared with, run 3's 10 would be under 90% of its 20.
+    let mut store = store_of(&[fillers(10)]);
+    record_as(&mut store, "ci", true, &fillers(20));
+    record(&mut store, "ci", &with(fillers(9), &[t("a", F, 10)]));
+    assert_eq!(rich(&out(&store, 0)), ["a"]);
 }
 
 #[test]

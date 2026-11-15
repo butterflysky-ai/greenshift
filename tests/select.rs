@@ -41,6 +41,10 @@ impl History {
     }
 
     fn ingest(&mut self, xml: &str, source: &str) {
+        self.ingest_with(xml, source, &[]);
+    }
+
+    fn ingest_with(&mut self, xml: &str, source: &str, extra: &[&str]) {
         self.runs += 1;
         let file = self.dir.path().join(format!("run{}.xml", self.runs));
         std::fs::write(&file, xml).unwrap();
@@ -49,6 +53,7 @@ impl History {
             .arg("--db")
             .arg(&self.db)
             .args(["--source", source])
+            .args(extra)
             .arg(&file)
             .assert()
             .success();
@@ -326,5 +331,23 @@ fn a_file_that_is_not_a_store_is_an_error() {
         stderr(&out).contains("not a greenshift history store") && !stderr(&out).contains("write"),
         "{}",
         stderr(&out)
+    );
+}
+
+#[test]
+fn a_run_ingested_as_partial_is_not_full() {
+    let nextest = fixture("nextest.xml");
+    let green = without(&without(&nextest, "failure"), "error");
+    let mut h = History::new();
+    h.ingest(&green, "nextest");
+    // Every test, two failing, but recorded as one pass of several.
+    h.ingest_with(&nextest, "nextest", &["--partial"]);
+    let out = h.select(&["--min-runs", "1"]).success();
+    let out = stdout(&out);
+    assert!(!out.contains("rich\t"), "{out}");
+    // Both runs count towards min-runs.
+    assert_eq!(
+        h.select(&["--min-runs", "2"]).success().get_output().stdout,
+        out.as_bytes()
     );
 }
