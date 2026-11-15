@@ -228,9 +228,16 @@ into a rich group, to run first, and a poor group, to run after.
 It prints one line of JSON:
 
 ```
-{"rich":[{"suite":"…","name":"…"},…],"poor":[{"suite":"…","name":"…"},…]}
+{"history":"ok","rich":[{"suite":"…","name":"…"},…],"poor":[{"suite":"…","name":"…"},…]}
 ```
 
+- **History.** `history` comes first, as it says how to read the groups.
+  It is `ok` when the store was read, with or without runs, or was
+  missing and has just been created empty (with its directory, as
+  `ingest` would). It is `error` when the store could not be used: it
+  was missing and could not be created, or it exists but cannot be read,
+  is corrupt, or is not a greenshift store. An existing store is only
+  read, never migrated or written.
 - **Tests.** A test is its `suite` and `name`, both required strings
   (the suite may be empty), compared exactly with the store's suite and
   name as ingested. Other members are ignored, blank lines are skipped,
@@ -250,17 +257,21 @@ It prints one line of JSON:
 
 With no history (where `select` exits 2) there is no poor test, so every
 inventory test is rich; stderr still says `no history: run the full
-suite`. An empty inventory prints `{"rich":[],"poor":[]}`.
+suite`. With `history` `error` every inventory test is rich too, and
+stderr names the error instead, so a store greenshift cannot use slows
+the tests down but never stops them. An empty inventory prints
+`{"history":"ok","rich":[],"poor":[]}`.
 
 Exit status:
 
-- 0: the plan was printed, with or without history. stderr names any
+- 0: the plan was printed, with or without history, and whether
+  `history` is `ok` or `error`. stderr names any store error, and any
   `--coverage` or `--confidence` threshold never reached, as for
   `select`.
-- 1: an error, and nothing is printed to stdout: an inventory that
-  cannot be read, or a line of it that is not a JSON object with string
-  `suite` and `name` (stderr names the line), or a `--db` file that is
-  not a greenshift store.
+- 1: the inventory could not be used, and nothing is printed to stdout:
+  it cannot be read, or a line of it is not a JSON object with string
+  `suite` and `name` (stderr names the line). No line is skipped, as a
+  skipped test would be in neither group.
 - 2: a usage error, such as no `--inventory`.
 
 ## Building

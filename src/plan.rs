@@ -9,8 +9,9 @@
 //! out.
 //!
 //! The inventory is JSON lines, one `{"suite": "...", "name": "..."}`
-//! object per test; the plan is one JSON object with `rich` and `poor`
-//! arrays of such objects. Names are compared and written raw, as stored.
+//! object per test; the plan is one JSON object with a `history` state
+//! (see [`HistoryState`]) and `rich` and `poor` arrays of such objects.
+//! Names are compared and written raw, as stored.
 
 use std::collections::BTreeMap;
 
@@ -126,12 +127,34 @@ fn json_string(text: &str) -> String {
     out
 }
 
+/// Whether the plan could use the history store: the plan's `history`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryState {
+    /// The store was read (with or without runs) or was just created
+    /// empty.
+    Ok,
+    /// The store could not be created, read or used, so the plan was made
+    /// with no history: every test is rich.
+    Error,
+}
+
+impl HistoryState {
+    /// The state as the plan writes it: `ok` or `error`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HistoryState::Ok => "ok",
+            HistoryState::Error => "error",
+        }
+    }
+}
+
 impl Plan<'_> {
-    /// `{"rich":[{"suite":...,"name":...},...],"poor":[...]}` on one line,
-    /// members in that order. Strings are JSON-escaped, every control
+    /// `{"history":"ok","rich":[{"suite":...,"name":...},...],"poor":[...]}`
+    /// on one line, members in that order: `history` comes first, as it
+    /// says how to read the groups. Strings are JSON-escaped, every control
     /// character included, so the plan is one line and no control
     /// character reaches a terminal raw.
-    pub fn to_json(&self) -> String {
+    pub fn to_json(&self, history: HistoryState) -> String {
         let group = |tests: &[&TestId]| {
             let tests: Vec<String> = tests
                 .iter()
@@ -146,7 +169,8 @@ impl Plan<'_> {
             format!("[{}]", tests.join(","))
         };
         format!(
-            r#"{{"rich":{},"poor":{}}}"#,
+            r#"{{"history":"{}","rich":{},"poor":{}}}"#,
+            history.as_str(),
             group(&self.rich),
             group(&self.poor)
         )

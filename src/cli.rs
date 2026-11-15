@@ -119,6 +119,9 @@ pub struct NextestFilterArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(mut_arg("db", |db| {
+    db.help("History store to read (created empty if missing, else never written)")
+}))]
 pub struct PlanArgs {
     #[command(flatten)]
     pub select: SelectArgs,
@@ -313,18 +316,43 @@ pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// Print the plan: the inventory split into rich and poor, from the same
-/// lines as [`select()`], as one line of JSON. With no history there are
-/// no lines, so every test is rich and it exits 0. The inventory is read
-/// first, so a bad one fails before the store is read.
+/// lines as [`select()`], as one line of JSON. A missing store is created
+/// empty, through [`Store::open`]; an existing one is only read. With no
+/// history there are no lines, so every test is rich. A store that cannot
+/// be created or read is no history too: the plan's `history` is `error`,
+/// stderr names the error, and it still exits 0, so a broken store never
+/// stops the tests from running. The inventory is read first, so a bad
+/// one fails, with nothing printed, before the store is touched.
 pub fn plan(args: &PlanArgs) -> anyhow::Result<ExitCode> {
     let tests = read_inventory(&args.inventory, plan::parse_inventory)?;
-    with_lines(&args.select, |lines| {
+    let write = |history: plan::HistoryState, lines: Option<&[Line<'_>]>| {
         let mut out = std::io::stdout().lock();
         let lines = lines.unwrap_or_default();
-        writeln!(out, "{}", plan::plan(lines, &tests).to_json())
+        writeln!(out, "{}", plan::plan(lines, &tests).to_json(history))
             .and_then(|()| out.flush())
             .map(|()| ExitCode::SUCCESS)
-    })
+    };
+    match plan_history(&args.select) {
+        Ok(history) => with_history(&history, &args.select, |lines| {
+            write(plan::HistoryState::Ok, lines)
+        }),
+        Err(err) => {
+            eprintln!("greenshift: error: {err:#}");
+            written(write(plan::HistoryState::Error, None))
+        }
+    }
+}
+
+/// The history `plan` reads: none from a store it has just created,
+/// because the store was missing.
+fn plan_history(args: &SelectArgs) -> anyhow::Result<store::History> {
+    // Only a store known to be missing is created; any other trouble
+    // finding it is left to the read below to name.
+    if matches!(args.db.try_exists(), Ok(false)) {
+        Store::open(&args.db)?;
+        return Ok(Default::default());
+    }
+    read_history(args)
 }
 
 /// Read the inventory at `path` (`-` for stdin) and `parse` it, with any
@@ -364,11 +392,25 @@ fn with_lines(
     args: &SelectArgs,
     write: impl FnOnce(Option<&[Line<'_>]>) -> std::io::Result<ExitCode>,
 ) -> anyhow::Result<ExitCode> {
-    let history = match Store::open_read_only(&args.db)? {
+    with_history(&read_history(args)?, args, write)
+}
+
+/// The history of the chosen sources in the store, read only: none if
+/// there is no store.
+fn read_history(args: &SelectArgs) -> anyhow::Result<store::History> {
+    Ok(match Store::open_read_only(&args.db)? {
         Some(store) => store.history(&args.source)?,
         None => Default::default(),
-    };
-    let Some(analysis) = select::analyse(&history) else {
+    })
+}
+
+/// [`with_lines`] from `history`, already read.
+fn with_history(
+    history: &store::History,
+    args: &SelectArgs,
+    write: impl FnOnce(Option<&[Line<'_>]>) -> std::io::Result<ExitCode>,
+) -> anyhow::Result<ExitCode> {
+    let Some(analysis) = select::analyse(history) else {
         eprintln!("no history: run the full suite");
         return written(write(None));
     };

@@ -205,7 +205,10 @@ fn an_empty_inventory_plans_nothing() {
     let lines = stored.lines();
     let plan = plan(&lines, &[]);
     assert!(plan.rich.is_empty() && plan.poor.is_empty());
-    assert_eq!(plan.to_json(), r#"{"rich":[],"poor":[]}"#);
+    assert_eq!(
+        plan.to_json(HistoryState::Ok),
+        r#"{"history":"ok","rich":[],"poor":[]}"#
+    );
 }
 
 #[test]
@@ -224,7 +227,7 @@ fn names_are_matched_and_written_raw() {
     let plan = plan(&lines, &inventory);
     assert!(plan.rich.is_empty());
     assert_eq!(ids(&plan.poor), pairs(&odd));
-    let json: serde_json::Value = serde_json::from_str(&plan.to_json()).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&plan.to_json(HistoryState::Ok)).unwrap();
     let poor: Vec<(String, String)> = json["poor"]
         .as_array()
         .unwrap()
@@ -237,7 +240,11 @@ fn names_are_matched_and_written_raw() {
         })
         .collect();
     assert_eq!(poor, pairs(&odd));
-    assert!(!plan.to_json().contains('\u{1b}'), "{}", plan.to_json());
+    assert!(
+        !plan.to_json(HistoryState::Ok).contains('\u{1b}'),
+        "{}",
+        plan.to_json(HistoryState::Ok)
+    );
 }
 
 #[test]
@@ -247,7 +254,7 @@ fn every_control_character_is_escaped_and_reads_back() {
     let odd = [("s", "del\u{7f}"), ("s\u{9b}31m", "csi\u{9b}nel\u{85}x")];
     let inventory: Vec<TestId> = odd.iter().map(|&(s, n)| id(s, n)).collect();
     let plan = plan(&[], &inventory);
-    let json = plan.to_json();
+    let json = plan.to_json(HistoryState::Ok);
     assert!(!json.chars().any(char::is_control), "{json:?}");
     assert!(json.contains(r"del\u007f"), "{json}");
     assert!(json.contains(r"csi\u009bnel\u0085x"), "{json}");
@@ -272,7 +279,17 @@ fn json_has_rich_then_poor_on_one_line() {
     let inventory = [id("s", "p"), id("", "r")];
     let lines = stored.lines();
     assert_eq!(
-        plan(&lines, &inventory).to_json(),
-        r#"{"rich":[{"suite":"","name":"r"}],"poor":[{"suite":"s","name":"p"}]}"#
+        plan(&lines, &inventory).to_json(HistoryState::Ok),
+        r#"{"history":"ok","rich":[{"suite":"","name":"r"}],"poor":[{"suite":"s","name":"p"}]}"#
+    );
+}
+
+#[test]
+fn json_names_the_history_state_first() {
+    let inventory = [id("s", "r")];
+    let plan = plan(&[], &inventory);
+    assert_eq!(
+        plan.to_json(HistoryState::Error),
+        r#"{"history":"error","rich":[{"suite":"s","name":"r"}],"poor":[]}"#
     );
 }

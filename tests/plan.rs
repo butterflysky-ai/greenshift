@@ -142,9 +142,14 @@ fn stderr(assert: &assert_cmd::assert::Assert) -> String {
 
 type Groups = (Vec<(String, String)>, Vec<(String, String)>);
 
-/// The rich and poor groups of a plan, as `(suite, name)`s.
-fn groups(out: &str) -> Groups {
+/// The history state of a plan, and its rich and poor groups as
+/// `(suite, name)`s.
+fn read_plan(out: &str) -> (String, Groups) {
     assert!(out.ends_with('\n') && out.lines().count() == 1, "{out:?}");
+    assert!(
+        out.starts_with(r#"{"history":"#),
+        "history is not first: {out}"
+    );
     let plan: serde_json::Value = serde_json::from_str(out).unwrap();
     let group = |key: &str| {
         plan[key]
@@ -159,8 +164,19 @@ fn groups(out: &str) -> Groups {
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(plan.as_object().unwrap().len(), 2, "{out}");
-    (group("rich"), group("poor"))
+    assert_eq!(plan.as_object().unwrap().len(), 3, "{out}");
+    let history = plan["history"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no history string: {out}"))
+        .to_owned();
+    (history, (group("rich"), group("poor")))
+}
+
+/// The rich and poor groups of a plan whose history is `ok`.
+fn groups(out: &str) -> Groups {
+    let (history, groups) = read_plan(out);
+    assert_eq!(history, "ok", "{out}");
+    groups
 }
 
 fn owned(tests: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -240,14 +256,45 @@ fn under_observed_tests_are_rich() {
 }
 
 #[test]
-fn with_no_history_every_test_is_rich() {
-    let h = History::new();
+fn a_missing_store_is_created_and_every_test_is_rich() {
+    let mut h = History::new();
+    h.db = h.dir.path().join("new/dir/history.sqlite");
     let out = h.plan(&inventory(NOW), &[]).success();
     let plan = groups(&stdout(&out));
     assert_eq!(plan.0, owned(NOW));
     assert!(plan.1.is_empty());
     assert_eq!(stderr(&out), "no history: run the full suite\n");
-    assert!(!h.db.exists(), "plan created a store");
+    // A greenshift store with no runs: select reads it as no history.
+    greenshift()
+        .arg("select")
+        .arg("--db")
+        .arg(&h.db)
+        .assert()
+        .code(2);
+    h.ingest(&[("kit", "late", false)]);
+}
+
+#[test]
+fn a_store_with_no_runs_is_ok_and_every_test_is_rich() {
+    let h = History::new();
+    // Created empty by the first plan; an empty file is no history too.
+    h.plan(&inventory(NOW), &[]).success();
+    let empty_file = h.dir.path().join("empty.sqlite");
+    std::fs::write(&empty_file, "").unwrap();
+    for db in [&h.db, &empty_file] {
+        let out = greenshift()
+            .arg("plan")
+            .arg("--db")
+            .arg(db)
+            .arg("--inventory")
+            .arg(h.write_inventory(&inventory(NOW)))
+            .assert()
+            .success();
+        let plan = groups(&stdout(&out));
+        assert_eq!(plan.0, owned(NOW), "{db:?}");
+        assert!(plan.1.is_empty(), "{db:?}");
+        assert_eq!(stderr(&out), "no history: run the full suite\n");
+    }
 }
 
 #[test]
@@ -255,7 +302,10 @@ fn an_empty_inventory_plans_nothing() {
     let h = history();
     for text in ["", "\n\n"] {
         let out = h.plan(text, &["--min-runs", "3"]).success();
-        assert_eq!(stdout(&out), "{\"rich\":[],\"poor\":[]}\n");
+        assert_eq!(
+            stdout(&out),
+            "{\"history\":\"ok\",\"rich\":[],\"poor\":[]}\n"
+        );
     }
 }
 
@@ -394,10 +444,62 @@ fn the_inventory_is_required() {
     assert_eq!(stdout(&out), "");
 }
 
+/// A plan of [`NOW`] on a store `h` cannot use: history `error`, every
+/// test rich, exit 0, and one line on stderr naming the error, which
+/// says `why`.
+fn assert_store_error(h: &History, why: &str) {
+    let out = h.plan(&inventory(NOW), &["--min-runs", "1"]).success();
+    let (history, plan) = read_plan(&stdout(&out));
+    assert_eq!(history, "error");
+    assert_eq!(plan.0, owned(NOW));
+    assert!(plan.1.is_empty(), "{plan:?}");
+    let err = stderr(&out);
+    assert!(
+        err.starts_with("greenshift: error: ") && err.ends_with('\n') && err.lines().count() == 1,
+        "{err}"
+    );
+    assert!(err.contains(why), "{why:?} not in {err}");
+}
+
 #[test]
-fn a_bad_store_is_an_error() {
+fn a_store_that_cannot_be_created_is_an_error_and_every_test_is_rich() {
+    let mut h = History::new();
+    let file = h.dir.path().join("a-file");
+    std::fs::write(&file, "").unwrap();
+    h.db = file.join("history.sqlite");
+    assert_store_error(&h, &format!("{}", file.display()));
+    assert!(!h.db.exists());
+}
+
+#[test]
+fn a_bad_store_is_an_error_and_every_test_is_rich() {
+    use greenshift::store::{APPLICATION_ID, SCHEMA_VERSION};
     let h = History::new();
     std::fs::write(&h.db, "not sqlite").unwrap();
-    let out = h.plan(&inventory(NOW), &[]).failure().code(1);
-    assert_eq!(stdout(&out), "");
+    assert_store_error(&h, "file is not a database");
+    for (application_id, user_version, why) in [
+        (0, 0, "is not a greenshift history store".to_owned()),
+        (
+            APPLICATION_ID,
+            SCHEMA_VERSION + 1,
+            format!("has schema version {}, newer", SCHEMA_VERSION + 1),
+        ),
+    ] {
+        let h = History::new();
+        let conn = rusqlite::Connection::open(&h.db).unwrap();
+        conn.execute("CREATE TABLE theirs (x)", []).unwrap();
+        conn.pragma_update(None, "application_id", application_id)
+            .unwrap();
+        conn.pragma_update(None, "user_version", user_version)
+            .unwrap();
+        drop(conn);
+        assert_store_error(&h, &why);
+    }
+}
+
+#[test]
+fn a_store_that_is_a_directory_is_an_error_and_every_test_is_rich() {
+    let h = History::new();
+    std::fs::create_dir(&h.db).unwrap();
+    assert_store_error(&h, &format!("{}", h.db.display()));
 }
