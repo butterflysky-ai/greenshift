@@ -138,7 +138,15 @@ impl Project {
     /// cargo run this test is part of.
     fn cargo_nextest(&self, args: &[&str]) -> Process {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut cmd = Process::new(cargo);
+        let mut cmd = self.isolated(cargo);
+        cmd.arg("nextest").args(args);
+        cmd
+    }
+
+    /// `program` in the project, without the environment of the nextest or
+    /// cargo run this test is part of.
+    fn isolated(&self, program: impl AsRef<std::ffi::OsStr>) -> Process {
+        let mut cmd = Process::new(program);
         for (key, _) in std::env::vars_os() {
             let key = key.to_string_lossy().into_owned();
             let inherited =
@@ -147,8 +155,25 @@ impl Project {
                 cmd.env_remove(&key);
             }
         }
-        cmd.current_dir(self.root()).arg("nextest").args(args);
+        cmd.current_dir(self.root());
         cmd
+    }
+
+    /// `scripts/check-partition.sh` in the project, on the `poor` and
+    /// `rich` filtersets.
+    fn check_partition(&self, poor: &str, rich: &str) -> Output {
+        let [poor_file, rich_file] = [("poor", poor), ("rich", rich)].map(|(class, expr)| {
+            let file = self.dir.path().join(format!("{class}.expr"));
+            std::fs::write(&file, expr).unwrap();
+            file
+        });
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-partition.sh");
+        self.isolated("bash")
+            .arg(script)
+            .arg(poor_file)
+            .arg(rich_file)
+            .output()
+            .expect("bash runs")
     }
 
     /// Run every test with nextest, failing `fail` (`(binary, name)`), and
@@ -589,4 +614,59 @@ fn a_failure_in_one_two_pass_run_is_rich_in_the_next() {
     assert_eq!(runs.len(), 5, "a run per run_passes: {runs:?}");
     let ran = set(&[tests("odd", ODD), tests("plain", PLAIN)]);
     assert_eq!(runs[4], ran, "the last run holds both passes' results");
+}
+
+#[test]
+fn check_partition_names_tests_in_both_passes_or_neither() {
+    let p = Project::new();
+    // A listing writes Cargo.lock, which the script's --locked needs.
+    p.inventory();
+    let check = |poor: &str, rich: &str| {
+        let out = p.check_partition(poor, rich);
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        (out.status.code(), stdout, stderr)
+    };
+    let counts = |poor: usize, rich: usize| format!("tests: 10 in all, {poor} poor, {rich} rich\n");
+
+    let (code, stdout, stderr) = check("binary(plain)", "not binary(plain)");
+    assert_eq!(
+        (code, stdout.as_str()),
+        (Some(0), &*counts(2, 8)),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("error"), "{stderr}");
+
+    let (code, stdout, stderr) = check("binary(plain)", "all()");
+    assert_eq!(
+        (code, stdout.as_str()),
+        (Some(1), &*counts(2, 10)),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("neither"), "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "error: tests in both passes:\n\
+             odd-names::plain plain::fast\n\
+             odd-names::plain shared::same\n"
+        ),
+        "{stderr}"
+    );
+
+    let (code, stdout, stderr) = check("none()", "binary(odd) and not test(=shared::same)");
+    assert_eq!(
+        (code, stdout.as_str()),
+        (Some(1), &*counts(0, 7)),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("both"), "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "error: tests in neither pass:\n\
+             odd-names::odd shared::same\n\
+             odd-names::plain plain::fast\n\
+             odd-names::plain shared::same\n"
+        ),
+        "{stderr}"
+    );
 }
