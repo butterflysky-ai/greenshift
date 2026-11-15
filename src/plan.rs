@@ -32,7 +32,7 @@ use crate::tainted::Tainted;
 /// let tests = greenshift::plan::parse_inventory(r#"{"suite":"s","name":"n"}"#).unwrap();
 /// let name: &str = &tests[0].name;
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct InventoryTest {
     pub suite: Tainted,
     pub name: Tainted,
@@ -77,7 +77,7 @@ pub fn parse_inventory(text: &str) -> Result<Vec<InventoryTest>, InventoryError>
 }
 
 /// The inventory split into rich and poor.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Plan<'a> {
     /// `select`'s rich tests in pick order, then every other non-poor
     /// inventory test in inventory order.
