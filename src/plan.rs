@@ -127,19 +127,34 @@ pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [InventoryTest]) -> Plan<'a> 
 }
 
 /// `text` as a JSON string that reads back as exactly `text`, with every
-/// control character escaped: serde_json escapes C0 itself, and DEL and
-/// C1, which it would leave raw, become `\uXXXX` here, as
-/// [`crate::nextest::escape`] escapes them for a filterset.
+/// control and invisible character escaped: serde_json escapes C0
+/// itself, and DEL, C1 and every [`invisible`] character, which it would
+/// leave raw, become `\uXXXX` here (a surrogate pair beyond the BMP), as
+/// [`crate::nextest::escape`] escapes control characters for a filterset.
 fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     for c in serde_json::Value::from(text).to_string().chars() {
-        if c.is_control() {
-            let _ = write!(out, r"\u{:04x}", u32::from(c));
+        if c.is_control() || invisible(c) {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                let _ = write!(out, r"\u{unit:04x}");
+            }
         } else {
             out.push(c);
         }
     }
     out
+}
+
+/// Whether `c` does not print, by the tables `str::escape_debug` uses
+/// (as [`Tainted`]'s display does): it escapes `c` as `\u{…}` in text:
+/// a format character (Unicode Cf: bidi controls, U+200B, U+FEFF and
+/// so on), a line or paragraph separator (U+2028, U+2029), a space other
+/// than U+0020, a private-use or unassigned code point, or a control.
+fn invisible(c: char) -> bool {
+    // `str::escape_debug` escapes a combining mark only first in the
+    // text, so `c` follows another character.
+    let text: String = ['a', c].into_iter().collect();
+    text.escape_debug().skip(1).take(2).eq(['\\', 'u'])
 }
 
 /// Whether the plan could use the history store: the plan's `history`.
@@ -167,8 +182,8 @@ impl Plan<'_> {
     /// `{"history":"ok","rich":[{"suite":...,"name":...},...],"poor":[...]}`
     /// on one line, members in that order: `history` comes first, as it
     /// says how to read the groups. Strings are JSON-escaped, every control
-    /// character included, so the plan is one line and no control
-    /// character reaches a terminal raw.
+    /// and invisible character included, so the plan is one line and no
+    /// such character reaches a terminal raw.
     pub fn to_json(&self, history: HistoryState) -> String {
         let group = |tests: &[&InventoryTest]| {
             let tests: Vec<String> = tests

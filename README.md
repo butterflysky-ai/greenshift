@@ -251,9 +251,13 @@ It prints one line of JSON:
 - **Names.** Suite and name are written as JSON strings of the raw text:
   JSON's own escapes only (`\"`, `\\`, `\t`, `\u001b` and so on), none of
   `select`'s display escaping, so they read back exactly as stored. Every
-  control character is escaped, DEL and C1 (`\u007f`, `\u009b`) too.
-  Commas, parentheses, slashes and other non-ASCII text are written as
-  they are.
+  control character is escaped, DEL and C1 (`\u007f`, `\u009b`) too, and
+  so is every character that does not print: format characters such as
+  bidi controls (`\u202e`) and zero-width spaces (`\u200b`), the line
+  and paragraph separators (`\u2028`, `\u2029`), spaces other than
+  U+0020 (`\u00a0`), and private-use and unassigned code points, beyond
+  U+FFFF as a surrogate pair. Commas, parentheses, slashes and other
+  non-ASCII text are written as they are.
 
 With no history (where `select` exits 2) there is no poor test, so every
 inventory test is rich; stderr still says `no history: run the full

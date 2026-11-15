@@ -305,3 +305,33 @@ fn a_json_error_names_its_line_once_and_its_column() {
         "not a greenshift inventory: line 3: expected value at column 11"
     );
 }
+
+#[test]
+fn every_invisible_character_is_escaped_and_reads_back() {
+    // Line and paragraph separators, bidi and other format characters,
+    // one beyond the BMP (a surrogate pair in JSON): all invisible, all
+    // escaped. Visible text, a combining mark included, is left as it is.
+    let odd = [
+        ("s\u{2028}", "para\u{2029}"),
+        ("s", "bidi\u{202e}evil\u{2066}x\u{2069}"),
+        ("s", "zw\u{200b}sp\u{feff}soft\u{ad}"),
+        ("s", "tag\u{e0001}"),
+        ("s", "nb\u{a0}sp"),
+        ("s", "u\u{308} \u{2713}"),
+    ];
+    let inventory: Vec<InventoryTest> = odd.iter().map(|&(s, n)| id(s, n)).collect();
+    let plan = plan(&[], &inventory);
+    let json = plan.to_json(HistoryState::Ok);
+    for escape in [
+        r#""s\u2028","name":"para\u2029""#,
+        r"bidi\u202eevil\u2066x\u2069",
+        r"zw\u200bsp\ufeffsoft\u00ad",
+        r"tag\udb40\udc01",
+        r"nb\u00a0sp",
+        "u\u{308} \u{2713}",
+    ] {
+        assert!(json.contains(escape), "{escape} not in {json}");
+    }
+    assert!(!json.chars().any(invisible), "{json:?}");
+    assert_eq!(read_group(&json, "rich"), pairs(&odd));
+}
