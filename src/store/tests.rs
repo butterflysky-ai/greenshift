@@ -12,7 +12,7 @@ fn tc(suite: &str, name: &str, outcome: Outcome, ms: Option<i64>) -> TestCase {
 }
 
 const RUN: NewRun<'static> = NewRun {
-    commit: Some("0123abcd"),
+    commit: None,
     source: "nextest",
     files: &[],
 };
@@ -316,7 +316,9 @@ fn record_run_writes_one_run_and_every_result() {
         tc("gears", "needs_a_lathe", Outcome::Skipped, Some(0)),
     ];
     let files = [PathBuf::from("target/nextest/default/junit.xml")];
+    let commit: CommitId = "0123abcd".parse().unwrap();
     let run = NewRun {
+        commit: Some(&commit),
         files: &files,
         ..RUN
     };
@@ -810,4 +812,43 @@ fn a_read_only_open_refuses_what_open_refuses() {
         let err = Store::open_read_only(Path::new(special)).unwrap_err();
         assert!(matches!(err, StoreError::MemoryPath { .. }), "{err:?}");
     }
+}
+
+#[test]
+fn a_commit_id_is_7_to_64_hex_digits() {
+    let sha1 = "0123456789abcdef0123456789abcdef01234567";
+    let sha256 = "0123456789abcdef".repeat(4);
+    for ok in ["0123abc", "deadbeef", sha1, &sha256] {
+        assert_eq!(ok.parse::<CommitId>().unwrap().as_str(), ok);
+    }
+}
+
+#[test]
+fn a_commit_id_refuses_too_few_or_too_many_digits() {
+    for bad in ["", "0", "0123ab", &"a".repeat(65)] {
+        assert_eq!(bad.parse::<CommitId>(), Err(BadCommitId), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_commit_id_refuses_what_is_not_hex() {
+    for bad in [
+        "0123abg",
+        "HEAD~1234",
+        "v1.2.3-45",
+        " 0123abcd",
+        "0123abcd\n",
+        "0x123abcd",
+        "０１２３４５６",
+    ] {
+        assert_eq!(bad.parse::<CommitId>(), Err(BadCommitId), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_commit_id_is_kept_in_lower_case() {
+    let id: CommitId = "0123ABCDef".parse().unwrap();
+    assert_eq!(id.as_str(), "0123abcdef");
+    assert_eq!(id.to_string(), "0123abcdef");
+    assert_eq!(id, "0123abcdef".parse().unwrap());
 }

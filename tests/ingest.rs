@@ -166,8 +166,8 @@ fn default_db_is_created_under_dot_greenshift() {
 fn each_invocation_is_a_new_run_sharing_test_identities() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("history.sqlite");
-    ingest(&db, &[fixture("nextest.xml")], &["--commit", "aaa"]).success();
-    ingest(&db, &[fixture("nextest.xml")], &["--commit", "bbb"])
+    ingest(&db, &[fixture("nextest.xml")], &["--commit", "aaaaaaa"]).success();
+    ingest(&db, &[fixture("nextest.xml")], &["--commit", "bbbbbbb"])
         .success()
         .stdout(predicate::str::contains("recorded run 2"));
     let conn = Connection::open(&db).unwrap();
@@ -355,4 +355,49 @@ fn sqlite_errors_quoting_the_store_file_escape_control_bytes() {
                 .and(predicate::str::contains(r"\u{1b}[31mRED"))
                 .and(predicate::str::contains("\u{1b}").not()),
         );
+}
+
+#[test]
+fn a_bad_commit_is_a_usage_error_that_says_what_a_commit_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    for bad in ["abc12", "not-a-sha", "0123abcdg", "HEAD"] {
+        ingest(&db, &[fixture("nextest.xml")], &["--commit", bad])
+            .failure()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(
+                predicate::str::contains("--commit")
+                    .and(predicate::str::contains("7 to 64 hex digits")),
+            );
+    }
+    assert!(!db.exists());
+}
+
+#[test]
+fn a_bad_commit_is_shown_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    ingest(
+        &db,
+        &[fixture("nextest.xml")],
+        &["--commit", "\u{1b}[31mRED\nx"],
+    )
+    .failure()
+    .code(2)
+    .stderr(
+        predicate::str::contains(r"\u{1b}[31mRED\nx").and(predicate::str::contains("\u{1b}").not()),
+    );
+}
+
+#[test]
+fn a_commit_is_stored_in_lowercase() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    ingest(&db, &[fixture("nextest.xml")], &["--commit", "0123ABCDef"]).success();
+    let conn = Connection::open(&db).unwrap();
+    let commit: String = conn
+        .query_row("SELECT commit_sha FROM runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(commit, "0123abcdef");
 }

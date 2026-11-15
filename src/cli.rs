@@ -5,11 +5,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use clap::builder::NonEmptyStringValueParser;
+use clap::builder::{NonEmptyStringValueParser, TypedValueParser};
+use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::junit::Tainted;
 use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Thresholds, Wilson};
-use crate::store::{self, NewRun, Store};
+use crate::store::{self, BadCommitId, CommitId, NewRun, Store};
 use crate::{junit, nextest};
 
 /// Pick which tests to run from what your tests have done before.
@@ -40,9 +42,10 @@ pub struct IngestArgs {
     #[arg(long, value_name = "PATH", default_value = store::DEFAULT_PATH)]
     pub db: PathBuf,
 
-    /// Commit the tests ran against.
-    #[arg(long, value_name = "SHA", value_parser = NonEmptyStringValueParser::new())]
-    pub commit: Option<String>,
+    /// Commit the tests ran against: 7 to 64 hex digits, as
+    /// `git rev-parse HEAD` prints it. Stored in lower case.
+    #[arg(long, value_name = "SHA", value_parser = CommitIdParser)]
+    pub commit: Option<CommitId>,
 
     /// Where the results came from, e.g. the test runner or CI job.
     #[arg(
@@ -139,6 +142,37 @@ impl EstimatorKind {
     }
 }
 
+/// Parses `--commit` as a [`CommitId`]. clap's own error for a rejected
+/// value quotes it raw; this one quotes it escaped, as [`Tainted`] shows
+/// text, so a value holding terminal control bytes prints harmlessly.
+#[derive(Debug, Clone, Copy)]
+struct CommitIdParser;
+
+impl TypedValueParser for CommitIdParser {
+    type Value = CommitId;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<CommitId, clap::Error> {
+        let text = value.to_string_lossy();
+        text.parse().map_err(|err: BadCommitId| {
+            let arg = arg.map_or_else(|| "--commit".to_owned(), ToString::to_string);
+            let shown = Tainted::from(text.as_ref());
+            clap::Error::raw(
+                ErrorKind::ValueValidation,
+                format!(
+                    "invalid value '{shown}' for '{arg}': {err}\n\n\
+                     For more information, try '--help'.\n"
+                ),
+            )
+            .with_cmd(cmd)
+        })
+    }
+}
+
 fn percentage(text: &str) -> Result<f64, String> {
     match text.parse::<f64>() {
         Ok(n) if (0.0..=100.0).contains(&n) => Ok(n),
@@ -169,7 +203,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
     let mut store = Store::open(&args.db)?;
     let recorded = store.record_run(
         &NewRun {
-            commit: args.commit.as_deref(),
+            commit: args.commit.as_ref(),
             source: &args.source,
             files: &args.files,
         },
@@ -297,7 +331,7 @@ mod tests {
             "--db",
             "h.sqlite",
             "--commit",
-            "abc123",
+            "abc1234",
             "--source",
             "nextest",
             "a.xml",
@@ -307,7 +341,7 @@ mod tests {
             panic!("not ingest");
         };
         assert_eq!(args.db, PathBuf::from("h.sqlite"));
-        assert_eq!(args.commit.as_deref(), Some("abc123"));
+        assert_eq!(args.commit.as_ref().map(CommitId::as_str), Some("abc1234"));
         assert_eq!(args.source, "nextest");
     }
 
