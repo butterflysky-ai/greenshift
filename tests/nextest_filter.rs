@@ -166,13 +166,13 @@ impl Project {
             .success();
     }
 
-    /// One run as CI makes it (see `.github/workflows/ci.yml`): the poor
-    /// and then the rich filterset from the history so far, with
+    /// One run as CI makes it (see `.github/workflows/ci.yml`): the rich
+    /// and then the poor filterset from the history so far, with
     /// `--min-runs 3`, each run by nextest as a pass of its own, failing
     /// `fail`, and both passes' JUnit ingested together as one run.
     /// Returns the two filtersets.
     fn run_passes(&mut self, fail: &[(&str, &str)]) -> (String, String) {
-        let picked = ["--poor", "--rich"]
+        let picked = ["--rich", "--poor"]
             .map(|class| self.filter(&["--source", "nextest", "--min-runs", "3", class]));
         let fail: String = fail.iter().map(|(b, n)| format!("{b}\t{n}\n")).collect();
         self.runs += 1;
@@ -206,7 +206,7 @@ impl Project {
             .args(&kept)
             .assert()
             .success();
-        let [poor, rich] = picked;
+        let [rich, poor] = picked;
         (poor, rich)
     }
 

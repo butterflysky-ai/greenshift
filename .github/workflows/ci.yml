@@ -75,24 +75,27 @@ jobs:
       - name: Check every test is in exactly one pass
         id: partition
         run: scripts/check-partition.sh target/greenshift/poor.expr target/greenshift/rich.expr
-      # Both passes run, the second even when the first fails; the job
-      # fails if either does. Either can select no test (the poor pass
-      # while the history is young), hence --no-tests=pass.
-      - name: cargo nextest run (poor)
-        run: |
-          cargo nextest run --locked --profile ci-poor --no-tests=pass \
-            -E "$(cat target/greenshift/poor.expr)"
+      # The rich tests, which have caught every failure on record, run
+      # first, to fail fast; the poor ones after. Both passes run, the
+      # second even when the first fails; the job fails if either does.
+      # Either can select no test (the poor pass while the history is
+      # young, the rich one once every test is poor), hence
+      # --no-tests=pass.
       - name: cargo nextest run (rich)
-        if: ${{ !cancelled() && steps.partition.outcome == 'success' }}
         run: |
           cargo nextest run --locked --profile ci-rich --no-tests=pass \
             -E "$(cat target/greenshift/rich.expr)"
+      - name: cargo nextest run (poor)
+        if: ${{ !cancelled() && steps.partition.outcome == 'success' }}
+        run: |
+          cargo nextest run --locked --profile ci-poor --no-tests=pass \
+            -E "$(cat target/greenshift/poor.expr)"
       # Both passes' JUnit, as one run, failures included.
       - name: Record the passes in the test history
         if: always()
         run: |
           files=()
-          for profile in ci-poor ci-rich; do
+          for profile in ci-rich ci-poor; do
             junit="target/nextest/$profile/junit.xml"
             if [ -f "$junit" ]; then files+=("$junit"); fi
           done
