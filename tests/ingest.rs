@@ -12,8 +12,14 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The binary, without the CI branch variables of the environment this
+/// test runs in, so a run records no branch unless a test sets one.
 fn greenshift() -> Command {
-    Command::cargo_bin("greenshift").expect("binary builds")
+    let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
+    for var in greenshift::cli::BRANCH_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 fn ingest(db: &Path, files: &[PathBuf], extra: &[&str]) -> assert_cmd::assert::Assert {
@@ -443,17 +449,11 @@ fn partial_marks_the_run_as_partial() {
     assert_eq!(partial_flags(&conn), [false, true]);
 }
 
-/// The CI variables a branch is read from.
-const BRANCH_VARS: [&str; 2] = ["GITHUB_HEAD_REF", "GITHUB_REF_NAME"];
-
 /// `ingest` of one fixture with `extra` arguments and, of the branch
 /// variables, only those in `env`, whatever the environment of this test.
 fn ingest_in_env(db: &Path, extra: &[&str], env: &[(&str, &str)]) -> assert_cmd::assert::Assert {
-    let mut cmd = greenshift();
-    for var in BRANCH_VARS {
-        cmd.env_remove(var);
-    }
-    cmd.envs(env.iter().copied())
+    greenshift()
+        .envs(env.iter().copied())
         .arg("ingest")
         .arg("--db")
         .arg(db)

@@ -42,8 +42,18 @@ impl Job {
 
     /// The script, as CI calls it, on both passes' paths.
     fn record(&self) -> assert_cmd::assert::Assert {
+        self.record_in_env(&[])
+    }
+
+    /// [`Job::record`], with only the CI branch variables in `env` set,
+    /// whatever the environment of this test.
+    fn record_in_env(&self, env: &[(&str, &str)]) -> assert_cmd::assert::Assert {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/record-history.sh");
-        Command::new("bash")
+        let mut cmd = Command::new("bash");
+        for var in greenshift::cli::BRANCH_VARS {
+            cmd.env_remove(var);
+        }
+        cmd.envs(env.iter().copied())
             .arg(script)
             .arg(env!("CARGO_BIN_EXE_greenshift"))
             .arg(self.db())
@@ -83,6 +93,22 @@ fn both_passes_are_recorded_as_one_whole_run() {
         .success()
         .stdout(contains("recorded run 1 with 13 tests from 2 files"));
     assert_eq!(job.runs(), [run(false, 13)]);
+}
+
+#[test]
+fn a_push_records_the_branch_ci_names() {
+    let job = Job::new();
+    job.wrote(&job.rich, "vaelii-run-vars.xml");
+    job.wrote(&job.poor, "nextest.xml");
+    // As GitHub Actions sets them on a push to main.
+    job.record_in_env(&[("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "main")])
+        .success()
+        .stdout(contains(" on branch main\n"));
+    let branch: Option<String> = Connection::open(job.db())
+        .unwrap()
+        .query_row("SELECT branch FROM runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(branch.as_deref(), Some("main"));
 }
 
 #[test]

@@ -6,8 +6,14 @@ use std::path::PathBuf;
 
 use assert_cmd::Command;
 
+/// The binary, without the CI branch variables of the environment this
+/// test runs in, so a run records no branch unless a test sets one.
 fn greenshift() -> Command {
-    Command::cargo_bin("greenshift").expect("binary builds")
+    let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
+    for var in greenshift::cli::BRANCH_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 /// `text` as an XML attribute value.

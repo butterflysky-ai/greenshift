@@ -109,8 +109,7 @@ impl Project {
             let key = key.to_string_lossy().into_owned();
             let inherited = key.starts_with("NEXTEST_")
                 || (key.starts_with("CARGO_") && key != "CARGO_HOME")
-                || key == "GITHUB_HEAD_REF"
-                || key == "GITHUB_REF_NAME";
+                || greenshift::cli::BRANCH_VARS.contains(&key.as_str());
             if inherited {
                 cmd.env_remove(&key);
             }
