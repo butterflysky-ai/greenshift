@@ -628,13 +628,20 @@ fn stored_outcome(text: &str) -> Option<Outcome> {
 }
 
 /// Wraps a SQLite error with the store path it happened on.
+///
+/// The message is the error and its chain of sources, joined by ": ". A
+/// source whose text already ends the message is left out: some errors,
+/// such as rusqlite's conversion failures, show their source themselves.
 fn sqlite_err(path: &Tainted) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
     move |sqlite| {
         let mut chain = sqlite.to_string();
         let mut cause = std::error::Error::source(&sqlite);
         while let Some(c) = cause {
-            chain.push_str(": ");
-            chain.push_str(&c.to_string());
+            let text = c.to_string();
+            if !chain.ends_with(&text) {
+                chain.push_str(": ");
+                chain.push_str(&text);
+            }
             cause = c.source();
         }
         StoreError::Sqlite {
