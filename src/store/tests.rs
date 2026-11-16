@@ -1012,6 +1012,7 @@ fn a_version_1_store_is_migrated_and_its_runs_are_not_partial() {
         )]
     );
     assert!(!history.runs[0].partial);
+    assert_eq!(run_rows(&store)[0].4, None, "no branch is known");
     // New runs are written alongside the old one.
     let partial = NewRun {
         partial: true,
@@ -1129,6 +1130,25 @@ fn a_version_2_store_is_migrated_and_its_runs_have_no_branch() {
         [row("s", "t", "failed", Some(7))],
         "results are kept"
     );
+}
+
+#[test]
+fn a_read_only_open_reads_a_version_2_store_as_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    version_2_store(&path);
+    let store = Store::open_read_only(&path).unwrap().unwrap();
+    assert_eq!(store.schema_version().unwrap(), 2);
+    let flags: Vec<bool> = store
+        .history(&[])
+        .unwrap()
+        .runs
+        .iter()
+        .map(|r| r.partial)
+        .collect();
+    assert_eq!(flags, [false, true]);
+    drop(store);
+    assert_eq!(user_version(&path), 2);
 }
 
 #[test]
