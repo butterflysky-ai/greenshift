@@ -10,7 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Keep in step with rust-version in Cargo.toml.
+  # Keep in step with rust-version in Cargo.toml and release.yml.
   RUST_TOOLCHAIN: "1.98.0"
 
 jobs:
@@ -126,6 +126,8 @@ jobs:
       - name: cargo test --doc
         run: cargo test --locked --doc
 
+  # release.yml repeats this build for tagged releases; keep the two in
+  # step.
   release-musl:
     name: static release build (x86_64-unknown-linux-musl)
     runs-on: ubuntu-latest
