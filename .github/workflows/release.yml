@@ -64,5 +64,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           name="greenshift-$TAG-$TARGET"
+          # A pre-release version (v0.2.0-rc.1) is a pre-release, not the
+          # latest release.
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
           gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes \
-            "dist/$name" "dist/$name.sha256"
+            "${prerelease[@]}" "dist/$name" "dist/$name.sha256"
