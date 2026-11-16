@@ -308,6 +308,31 @@ the doctests with `cargo test --doc`.
 SQLite is bundled, so release builds for `x86_64-unknown-linux-musl` are
 fully static.
 
+## Install a release
+
+Each release tag (such as `v0.1.0`) has a static Linux binary and its
+SHA-256 checksum:
+
+```
+https://github.com/paceheart/greenshift/releases/download/<tag>/greenshift-<tag>-x86_64-unknown-linux-musl
+https://github.com/paceheart/greenshift/releases/download/<tag>/greenshift-<tag>-x86_64-unknown-linux-musl.sha256
+```
+
+Download both into one directory, then check the binary against the
+checksum before you run it:
+
+```
+tag=v0.1.0
+base="https://github.com/paceheart/greenshift/releases/download/$tag"
+curl -fLO "$base/greenshift-$tag-x86_64-unknown-linux-musl"
+curl -fLO "$base/greenshift-$tag-x86_64-unknown-linux-musl.sha256"
+sha256sum -c "greenshift-$tag-x86_64-unknown-linux-musl.sha256" &&
+    chmod +x "greenshift-$tag-x86_64-unknown-linux-musl"
+```
+
+`sha256sum -c` prints `OK` and exits 0 only when the file matches. To pin
+a version, record the tag and the checksum and compare against those.
+
 ## License
 
 MIT; see [LICENSE](LICENSE).
