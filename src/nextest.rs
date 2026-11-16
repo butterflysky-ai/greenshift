@@ -16,7 +16,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
+use crate::plan::InventoryTest;
 use crate::select::{Class, Line};
+use crate::tainted::Tainted;
 
 /// `text` as the string of a filterset matcher such as `test(=...)`.
 ///
@@ -146,6 +148,49 @@ pub fn listing(json: &str) -> Result<Listing, InventoryError> {
         listing.binaries.insert(id.to_owned());
     }
     Ok(listing)
+}
+
+/// The tests a full `cargo nextest list --message-format json` listing
+/// selects: the testcases of each `listed` binary whose `filter-match`
+/// status is `matches`, by binary id and then name. A testcase that its
+/// filters, or its being ignored, leave out is `mismatch`. Each test's
+/// suite is its binary id, as in nextest's JUnit. A binaries-only listing
+/// names no tests, so it is refused.
+pub fn selected_tests(json: &str) -> Result<Vec<InventoryTest>, InventoryError> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|err| InventoryError(err.to_string()))?;
+    let entries = value
+        .get("rust-suites")
+        .ok_or_else(|| InventoryError("no rust-suites: not a full listing".to_owned()))?
+        .as_object()
+        .ok_or_else(|| InventoryError("binaries are not an object".to_owned()))?;
+    let mut tests = Vec::new();
+    for entry in entries.values() {
+        let id = entry
+            .get("binary-id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| InventoryError("a binary without a binary-id".to_owned()))?;
+        if entry.get("status").and_then(serde_json::Value::as_str) != Some("listed") {
+            continue;
+        }
+        let cases = entry
+            .get("testcases")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| InventoryError("testcases are not an object".to_owned()))?;
+        for (name, case) in cases {
+            let status = case
+                .pointer("/filter-match/status")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| InventoryError("a testcase without a filter-match".to_owned()))?;
+            if status == "matches" {
+                tests.push(InventoryTest {
+                    suite: Tainted::raw(id),
+                    name: Tainted::raw(name.as_str()),
+                });
+            }
+        }
+    }
+    Ok(tests)
 }
 
 /// The binary ids of a [`listing`].

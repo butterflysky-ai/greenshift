@@ -238,3 +238,48 @@ fn a_binary_a_full_listing_skipped_keeps_every_test() {
     assert!(listing.has("x", "any::name"));
     assert!(!listing.has("y", "any::name"));
 }
+
+/// The `(suite, name)` of each test, raw.
+fn raw(tests: &[crate::plan::InventoryTest]) -> Vec<(&str, &str)> {
+    tests
+        .iter()
+        .map(|t| (t.suite.as_raw(), t.name.as_raw()))
+        .collect()
+}
+
+#[test]
+fn selected_tests_are_the_matching_testcases_of_listed_binaries() {
+    let json = r#"{"rust-suites":{
+        "b::odd":{"binary-id":"b::odd","status":"listed","testcases":{
+            "a (b), c":{"kind":"test","ignored":false,"filter-match":{"status":"matches"}},
+            "left::out":{"kind":"test","ignored":false,"filter-match":{"status":"mismatch","reason":"expression"}},
+            "ignored":{"kind":"test","ignored":true,"filter-match":{"status":"mismatch","reason":"ignored"}}}},
+        "a::plain":{"binary-id":"a::plain","status":"listed","testcases":{
+            "z":{"filter-match":{"status":"matches"}},
+            "m":{"filter-match":{"status":"matches"}}}},
+        "c::skipped":{"binary-id":"c::skipped","status":"skipped","testcases":{}}}}"#;
+    assert_eq!(
+        raw(&selected_tests(json).unwrap()),
+        [("a::plain", "m"), ("a::plain", "z"), ("b::odd", "a (b), c")]
+    );
+    assert_eq!(
+        raw(&selected_tests(FULL_LIST).unwrap()),
+        [("greenshift", "cli::tests::ingest_options")]
+    );
+}
+
+#[test]
+fn selected_tests_needs_a_full_listing() {
+    // A binaries-only listing names no tests, so it selects none of them.
+    for bad in [
+        BINARIES_ONLY,
+        "not json",
+        "{}",
+        r#"{"rust-suites":[]}"#,
+        r#"{"rust-suites":{"x":{"status":"listed","testcases":{}}}}"#,
+        r#"{"rust-suites":{"x":{"binary-id":"x","status":"listed","testcases":[]}}}"#,
+        r#"{"rust-suites":{"x":{"binary-id":"x","status":"listed","testcases":{"t":{}}}}}"#,
+    ] {
+        assert!(selected_tests(bad).is_err(), "{bad:?}");
+    }
+}
