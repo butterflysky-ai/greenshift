@@ -665,6 +665,7 @@ mod tests {
         assert_eq!(args.source, "junit");
         assert!(!args.partial);
         assert_eq!(args.branch, None);
+        assert_eq!(args.tag, None);
     }
 
     #[test]
