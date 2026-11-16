@@ -238,6 +238,26 @@ fn rich_and_poor_both_run_and_are_recorded_as_one_run() {
 }
 
 #[test]
+fn the_poor_group_runs_after_the_rich_group_fails() {
+    let p = Project::new();
+    // As above: beta is rich, the rest poor.
+    let args = ["--min-runs", "1", "--", "--no-fail-fast"];
+    let first = p.run(&args, &["beta (b), c"]);
+    assert_eq!(first.status.code(), Some(100), "{}", stderr(&first));
+    let green = p.run(&args, &[]);
+    assert!(green.status.success(), "{}", stderr(&green));
+    // The rich group fails, under nextest's default fail-fast; the poor
+    // group still runs, and both are recorded.
+    let out = p.run(&["--min-runs", "1"], &["beta (b), c"]);
+    assert_eq!(out.status.code(), Some(100), "{}", stderr(&out));
+    let runs = p.runs();
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[2].files, 2, "rich and poor ran");
+    assert!(!runs[2].partial);
+    assert_eq!(runs[2].results, every_test(&["beta (b), c"]));
+}
+
+#[test]
 fn a_long_filterset_is_split_over_several_runs() {
     let p = Project::new();
     // Each test's term is over 40 bytes, so each runs alone.
