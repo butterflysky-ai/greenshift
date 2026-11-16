@@ -1105,8 +1105,8 @@ fn a_run_has_a_branch_or_a_tag_never_both() {
 /// The same constraint, reached the way real code reaches it: through
 /// [`Store::record_run`], not a raw `INSERT`. `NewRun` can represent a run
 /// with both a branch and a tag (the CHECK constraint is its only guard),
-/// so this proves the guard holds at that boundary too, and that failing
-/// it rolls the whole transaction back rather than leaving a partial run.
+/// so this proves the guard holds at that boundary too: the run is
+/// refused, no row is written, and the store still records the next run.
 #[test]
 fn record_run_rejects_a_run_with_both_a_branch_and_a_tag() {
     let mut store = Store::open_in_memory().unwrap();
@@ -1120,7 +1120,7 @@ fn record_run_rejects_a_run_with_both_a_branch_and_a_tag() {
     assert_eq!(count(&store, "runs"), 0, "the rejected run left no row");
 
     let recorded = store.record_run(&RUN, &[]).unwrap();
-    assert_eq!(recorded.run_id, 1, "ids still start from a clean slate");
+    assert_eq!(recorded.run_id, 1, "the next run is recorded as the first");
 }
 
 /// A store at schema version 2, as greenshift wrote it before runs had a
