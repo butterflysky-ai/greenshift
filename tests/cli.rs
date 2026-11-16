@@ -90,14 +90,17 @@ fn a_db_path_from_argv_is_shown_escaped_on_success() {
 
 #[cfg(unix)]
 #[test]
-fn a_branch_from_argv_or_the_ci_env_is_shown_escaped() {
-    for (flag, env) in [(&["--branch", EVIL][..], None), (&[][..], Some(EVIL))] {
+fn a_branch_or_tag_from_argv_or_the_ci_env_is_shown_escaped() {
+    let tag_push = [("GITHUB_REF_NAME", EVIL), ("GITHUB_REF_TYPE", "tag")];
+    for (flag, env, kind) in [
+        (&["--branch", EVIL][..], &[][..], "branch"),
+        (&[], &[("GITHUB_HEAD_REF", EVIL)], "branch"),
+        (&["--tag", EVIL], &[], "tag"),
+        (&[], &tag_push, "tag"),
+    ] {
         let dir = tempfile::tempdir().unwrap();
-        let mut cmd = greenshift();
-        if let Some(value) = env {
-            cmd.env("GITHUB_HEAD_REF", value);
-        }
-        let out = cmd
+        let out = greenshift()
+            .envs(env.iter().copied())
             .arg("ingest")
             .arg("--db")
             .arg(dir.path().join("history.sqlite"))
@@ -107,7 +110,7 @@ fn a_branch_from_argv_or_the_ci_env_is_shown_escaped() {
             .success();
         shows_escaped(
             &out.get_output().stdout,
-            &format!(" on branch {EVIL_SHOWN}\n"),
+            &format!(" on {kind} {EVIL_SHOWN}\n"),
         );
     }
 }
