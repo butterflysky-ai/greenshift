@@ -341,8 +341,9 @@ greenshift run nextest --commit "$(git rev-parse HEAD)" -- --no-fail-fast
   sets the file in a tool config file (`--tool-config-file`), which
   nextest ranks below `.config/nextest.toml`. The runs use the profile
   `greenshift`, which inherits the repository's `default` profile; a
-  `--profile` among NEXTEST_ARGS is used instead, and then works only if
-  `.config/nextest.toml` does not set that profile's `junit.path`.
+  `--profile` among NEXTEST_ARGS, or else a nonempty `NEXTEST_PROFILE`,
+  is used instead, and then works only if `.config/nextest.toml` does
+  not set that profile's `junit.path`.
 - **Record.** Every JUnit file written is ingested as one run, as
   `ingest` records it, with `--commit` if given. When a run wrote no
   JUnit, the files that exist are recorded as a partial run, and stderr

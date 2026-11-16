@@ -6,7 +6,7 @@ fn os(args: &[&str]) -> Vec<OsString> {
 }
 
 fn backend(args: &[&str]) -> Nextest {
-    Nextest::new(&os(args), MAX_FILTERSET_BYTES).unwrap()
+    Nextest::new(&os(args), None, MAX_FILTERSET_BYTES).unwrap()
 }
 
 #[test]
@@ -103,8 +103,27 @@ fn a_profile_passed_on_is_used_instead_of_greenshifts() {
         assert!(n.list_args.is_empty(), "{args:?}");
         assert!(n.run_args.is_empty(), "{args:?}");
     }
-    assert!(Nextest::new(&os(&["--profile"]), 1).is_err());
-    assert!(Nextest::new(&os(&["--profile="]), 1).is_err());
+    assert!(Nextest::new(&os(&["--profile"]), None, 1).is_err());
+    assert!(Nextest::new(&os(&["--profile="]), None, 1).is_err());
+}
+
+#[test]
+fn the_profile_in_nextest_profile_is_used_unless_one_is_passed_on() {
+    // nextest's own --profile reads NEXTEST_PROFILE; greenshift always
+    // passes --profile, so it must read it in nextest's place.
+    let env = |value: &str, args: &[&str]| {
+        Nextest::new(&os(args), Some(OsStr::new(value)), MAX_FILTERSET_BYTES)
+    };
+    assert_eq!(env("ci", &[]).unwrap().profile, "ci");
+    assert_eq!(env("ci", &["--profile", "local"]).unwrap().profile, "local");
+    // Empty is unset, as clap takes it.
+    assert_eq!(env("", &[]).unwrap().profile, PROFILE);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = OsStr::from_bytes(b"\xff");
+        assert!(Nextest::new(&[], Some(bad), 1).is_err());
+    }
 }
 
 #[test]
@@ -250,7 +269,7 @@ fn filtersets_name_each_test_and_none_with_no_tests() {
 
 #[test]
 fn each_invocation_has_its_own_junit_and_config() {
-    let n = Nextest::new(&os(&["--no-fail-fast"]), 40).unwrap();
+    let n = Nextest::new(&os(&["--no-fail-fast"]), None, 40).unwrap();
     let tests: Vec<InventoryTest> = ["a", "b", "c"].map(|t| test("bin", t)).into();
     let tests: Vec<&InventoryTest> = tests.iter().collect();
     let dir = Path::new("/scratch");

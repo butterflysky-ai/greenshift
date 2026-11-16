@@ -435,7 +435,11 @@ pub fn plan_groups<'t>(
 
 /// Run the whole cycle with cargo-nextest; see [`run`].
 pub fn run_nextest(args: &NextestRunArgs) -> anyhow::Result<ExitCode> {
-    let backend = run::nextest::Nextest::new(&args.args, args.max_filterset_bytes)?;
+    let backend = run::nextest::Nextest::new(
+        &args.args,
+        std::env::var_os("NEXTEST_PROFILE").as_deref(),
+        args.max_filterset_bytes,
+    )?;
     run::run(&backend, &args.options)
 }
 

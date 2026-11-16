@@ -12,9 +12,10 @@
 //! below the repository's `.config/nextest.toml`, so the profile used is
 //! one the repository does not configure: `greenshift`, which, like any
 //! profile, inherits the repository's `default` profile. A `--profile`
-//! among the passed-on arguments is used instead.
+//! among the passed-on arguments, or else `NEXTEST_PROFILE`, is used
+//! instead.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -141,8 +142,14 @@ fn option(arg: &str) -> Option<((bool, Goes), bool)> {
 impl Nextest {
     /// The backend for the arguments `args` that follow `--` on
     /// greenshift's command line, split by where each goes (see
-    /// [`OPTIONS`]).
-    pub fn new(args: &[OsString], max_filterset_bytes: usize) -> anyhow::Result<Nextest> {
+    /// [`OPTIONS`]). `env_profile` is `NEXTEST_PROFILE`, which nextest
+    /// reads for `--profile` when none is given: greenshift always gives
+    /// one, so it reads it in nextest's place, empty being unset.
+    pub fn new(
+        args: &[OsString],
+        env_profile: Option<&OsStr>,
+        max_filterset_bytes: usize,
+    ) -> anyhow::Result<Nextest> {
         let mut profile = None;
         let mut list_args = Vec::new();
         let mut run_args = Vec::new();
@@ -170,8 +177,16 @@ impl Nextest {
                 Goes::Profile => profile = Some(profile_name(&taken)?),
             }
         }
+        let profile = match (profile, env_profile) {
+            (Some(profile), _) => profile,
+            (None, Some(env)) if !env.is_empty() => env
+                .to_str()
+                .context("NEXTEST_PROFILE needs a profile name in UTF-8")?
+                .to_owned(),
+            (None, _) => PROFILE.to_owned(),
+        };
         Ok(Nextest {
-            profile: profile.unwrap_or_else(|| PROFILE.to_owned()),
+            profile,
             list_args,
             run_args,
             max_filterset_bytes,
