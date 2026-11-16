@@ -65,8 +65,9 @@ jobs:
         run: |
           name="greenshift-$TAG-$TARGET"
           # A pre-release version (v0.2.0-rc.1) is a pre-release, not the
-          # latest release.
+          # latest release. Build metadata (after a "+") may hold a "-"
+          # too, but does not make one: v0.2.0+build-1 is a release.
           prerelease=()
-          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          case "${TAG%%+*}" in *-*) prerelease=(--prerelease) ;; esac
           gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes \
             "${prerelease[@]}" "dist/$name" "dist/$name.sha256"
