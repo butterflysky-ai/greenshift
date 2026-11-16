@@ -738,6 +738,25 @@ mod tests {
         );
         let empty_tag = [("GITHUB_REF_NAME", ""), ("GITHUB_REF_TYPE", "tag")];
         assert_eq!(resolve_git_ref(None, None, env_of(&empty_tag)), None);
+        // On a tag push the head ref is never the branch, even when set.
+        let tag_and_head_ref = [
+            ("GITHUB_HEAD_REF", "feature"),
+            ("GITHUB_REF_NAME", "v1.2.0"),
+            ("GITHUB_REF_TYPE", "tag"),
+        ];
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&tag_and_head_ref)),
+            tag("v1.2.0")
+        );
+        let empty_tag_and_head_ref = [
+            ("GITHUB_HEAD_REF", "feature"),
+            ("GITHUB_REF_NAME", ""),
+            ("GITHUB_REF_TYPE", "tag"),
+        ];
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&empty_tag_and_head_ref)),
+            None
+        );
         let branch_push = [("GITHUB_REF_NAME", "main"), ("GITHUB_REF_TYPE", "branch")];
         assert_eq!(
             resolve_git_ref(None, None, env_of(&branch_push)),
