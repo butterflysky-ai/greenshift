@@ -442,3 +442,100 @@ fn partial_marks_the_run_as_partial() {
     let conn = Connection::open(&db).unwrap();
     assert_eq!(partial_flags(&conn), [false, true]);
 }
+
+/// The CI variables a branch is read from.
+const BRANCH_VARS: [&str; 2] = ["GITHUB_HEAD_REF", "GITHUB_REF_NAME"];
+
+/// `ingest` of one fixture with `extra` arguments and, of the branch
+/// variables, only those in `env`, whatever the environment of this test.
+fn ingest_in_env(db: &Path, extra: &[&str], env: &[(&str, &str)]) -> assert_cmd::assert::Assert {
+    let mut cmd = greenshift();
+    for var in BRANCH_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.envs(env.iter().copied())
+        .arg("ingest")
+        .arg("--db")
+        .arg(db)
+        .args(extra)
+        .arg(fixture("nextest.xml"))
+        .assert()
+}
+
+fn branches(db: &Path) -> Vec<Option<String>> {
+    Connection::open(db)
+        .unwrap()
+        .prepare("SELECT branch FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn the_branch_flag_beats_the_ci_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let env = [("GITHUB_HEAD_REF", "feature"), ("GITHUB_REF_NAME", "main")];
+    ingest_in_env(&db, &["--branch", "mine"], &env)
+        .success()
+        .stdout(predicate::str::contains("on branch mine"));
+    assert_eq!(branches(&db), [Some("mine".to_owned())]);
+}
+
+#[test]
+fn a_pull_request_head_ref_beats_the_ref_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let env = [
+        ("GITHUB_HEAD_REF", "feature"),
+        ("GITHUB_REF_NAME", "7/merge"),
+    ];
+    ingest_in_env(&db, &[], &env)
+        .success()
+        .stdout(predicate::str::contains("on branch feature"));
+    assert_eq!(branches(&db), [Some("feature".to_owned())]);
+}
+
+#[test]
+fn an_empty_head_ref_falls_back_to_the_ref_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let env = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "main")];
+    ingest_in_env(&db, &[], &env).success();
+    ingest_in_env(&db, &[], &[("GITHUB_REF_NAME", "main")]).success();
+    assert_eq!(
+        branches(&db),
+        [Some("main".to_owned()), Some("main".to_owned())]
+    );
+}
+
+#[test]
+fn no_flag_and_no_ci_env_is_no_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    ingest_in_env(&db, &[], &[])
+        .success()
+        .stdout(predicate::str::contains("branch").not());
+    // An empty ref name is no branch either.
+    ingest_in_env(
+        &db,
+        &[],
+        &[("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "")],
+    )
+    .success();
+    assert_eq!(branches(&db), [None, None]);
+}
+
+#[test]
+fn an_empty_branch_flag_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    ingest_in_env(&db, &["--branch", ""], &[])
+        .code(2)
+        .stderr(predicate::str::contains(
+            "a value is required for '--branch",
+        ));
+    assert!(!db.exists());
+}

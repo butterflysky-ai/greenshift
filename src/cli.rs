@@ -64,6 +64,10 @@ pub struct RunOptions {
     /// Commit the tests run against, as for `ingest --commit`.
     #[arg(long, value_name = "SHA")]
     pub commit: Option<CommitId>,
+
+    /// Branch the tests run on, as for `ingest --branch`.
+    #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -118,6 +122,12 @@ pub struct IngestArgs {
     /// its results still count towards each test's results.
     #[arg(long)]
     pub partial: bool,
+
+    /// Branch the tests ran on. Default: from the CI environment,
+    /// GITHUB_HEAD_REF if nonempty (a pull request), else GITHUB_REF_NAME;
+    /// none if neither is set.
+    #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -323,6 +333,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
         cases.extend(report.cases);
     }
+    let branch = branch(args.branch.as_deref(), |var| std::env::var_os(var));
     let mut store = Store::open(&args.db)?;
     let recorded = store.record_run(
         &NewRun {
@@ -330,22 +341,49 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
             source: &args.source,
             files: &args.files,
             partial: args.partial,
-            branch: None,
+            branch: branch.as_deref(),
         },
         &cases,
     )?;
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     println!(
-        "greenshift: recorded {}run {} with {} test{} from {} file{} into {}",
+        "greenshift: recorded {}run {} with {} test{} from {} file{} into {}{}",
         if args.partial { "partial " } else { "" },
         recorded.run_id,
         recorded.results,
         plural(recorded.results),
         args.files.len(),
         plural(args.files.len()),
-        Tainted::from(args.db.as_path())
+        Tainted::from(args.db.as_path()),
+        match &branch {
+            Some(branch) => format!(" on branch {}", Tainted::raw(branch.as_str())),
+            None => String::new(),
+        }
     );
     Ok(())
+}
+
+/// The CI variables [`branch`] reads, in order: on a pull request,
+/// GitHub Actions sets the first to the PR's branch and the second to
+/// its merge ref (`7/merge`); otherwise only the second, to the branch or
+/// tag pushed. Forgejo and Gitea Actions set the same variables.
+pub const BRANCH_VARS: [&str; 2] = ["GITHUB_HEAD_REF", "GITHUB_REF_NAME"];
+
+/// The branch to record a run on: `flag` when given, else the first of
+/// [`BRANCH_VARS`] that `env` gives nonempty, else none. A value that is
+/// not UTF-8 is taken lossily, so a branch run is still recorded as one.
+pub fn branch(
+    flag: Option<&str>,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<String> {
+    if let Some(flag) = flag {
+        return Some(flag.to_owned());
+    }
+    BRANCH_VARS
+        .iter()
+        .filter_map(|var| env(var))
+        .find(|value| !value.is_empty())
+        .map(|value| value.to_string_lossy().into_owned())
 }
 
 /// Print the selection. Reads the store only; with no full run from the
@@ -565,6 +603,7 @@ mod tests {
         assert_eq!(args.commit, None);
         assert_eq!(args.source, "junit");
         assert!(!args.partial);
+        assert_eq!(args.branch, None);
     }
 
     #[test]
@@ -579,6 +618,8 @@ mod tests {
             "--source",
             "nextest",
             "--partial",
+            "--branch",
+            "topic",
             "a.xml",
         ])
         .unwrap();
@@ -589,6 +630,35 @@ mod tests {
         assert_eq!(args.commit.as_ref().map(CommitId::as_str), Some("abc1234"));
         assert_eq!(args.source, "nextest");
         assert!(args.partial);
+        assert_eq!(args.branch.as_deref(), Some("topic"));
+    }
+
+    /// An environment holding only `vars`.
+    fn env_of<'v>(vars: &'v [(&str, &str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'v {
+        move |var| {
+            vars.iter()
+                .find(|(name, _)| *name == var)
+                .map(|(_, value)| value.into())
+        }
+    }
+
+    #[test]
+    fn the_branch_is_the_flag_then_the_head_ref_then_the_ref_name() {
+        let both = [
+            ("GITHUB_HEAD_REF", "feature"),
+            ("GITHUB_REF_NAME", "7/merge"),
+        ];
+        assert_eq!(branch(Some("mine"), env_of(&both)).as_deref(), Some("mine"));
+        assert_eq!(branch(None, env_of(&both)).as_deref(), Some("feature"));
+        let push = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "main")];
+        assert_eq!(branch(None, env_of(&push)).as_deref(), Some("main"));
+        assert_eq!(
+            branch(None, env_of(&[("GITHUB_REF_NAME", "main")])).as_deref(),
+            Some("main")
+        );
+        let empty = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "")];
+        assert_eq!(branch(None, env_of(&empty)), None);
+        assert_eq!(branch(None, env_of(&[])), None);
     }
 
     #[test]
@@ -596,6 +666,7 @@ mod tests {
         assert!(Cli::try_parse_from(["greenshift", "ingest"]).is_err());
         assert!(Cli::try_parse_from(["greenshift", "ingest", "--commit", "", "a.xml"]).is_err());
         assert!(Cli::try_parse_from(["greenshift", "ingest", "--source", "", "a.xml"]).is_err());
+        assert!(Cli::try_parse_from(["greenshift", "ingest", "--branch", "", "a.xml"]).is_err());
     }
 
     fn select_args(args: &[&str]) -> Result<SelectArgs, clap::Error> {

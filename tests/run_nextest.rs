@@ -98,15 +98,24 @@ impl Project {
     /// `fail` names, without the environment of the nextest or cargo run
     /// this test is part of.
     fn run(&self, args: &[&str], fail: &[&str]) -> Output {
+        self.run_in_env(args, fail, &[])
+    }
+
+    /// [`Project::run`], with `env` set too. No CI branch variable is
+    /// inherited: only those in `env` are set.
+    fn run_in_env(&self, args: &[&str], fail: &[&str], env: &[(&str, &str)]) -> Output {
         let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
         for (key, _) in std::env::vars_os() {
             let key = key.to_string_lossy().into_owned();
-            let inherited =
-                key.starts_with("NEXTEST_") || (key.starts_with("CARGO_") && key != "CARGO_HOME");
+            let inherited = key.starts_with("NEXTEST_")
+                || (key.starts_with("CARGO_") && key != "CARGO_HOME")
+                || key == "GITHUB_HEAD_REF"
+                || key == "GITHUB_REF_NAME";
             if inherited {
                 cmd.env_remove(&key);
             }
         }
+        cmd.envs(env.iter().copied());
         let fail: String = fail.iter().map(|name| format!("{name}\n")).collect();
         cmd.current_dir(self.root())
             .env("FAIL", fail)
@@ -323,4 +332,32 @@ fn a_listing_that_fails_ends_the_run_with_its_status() {
     let out = p.run(&["--", "--no-such-option"], &[]);
     assert!(!out.status.success());
     assert!(!p.db.exists(), "nothing was recorded");
+}
+
+#[test]
+fn the_run_is_recorded_with_its_branch() {
+    let p = Project::new();
+    // From the CI env when not given; the flag when given.
+    let ci = p.run_in_env(&[], &[], &[("GITHUB_REF_NAME", "main")]);
+    assert!(ci.status.success(), "{}", stderr(&ci));
+    let given = p.run_in_env(
+        &["--branch", "topic"],
+        &[],
+        &[("GITHUB_HEAD_REF", "feature")],
+    );
+    assert!(given.status.success(), "{}", stderr(&given));
+    let none = p.run(&[], &[]);
+    assert!(none.status.success(), "{}", stderr(&none));
+    let branches: Vec<Option<String>> = Connection::open(&p.db)
+        .unwrap()
+        .prepare("SELECT branch FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        branches,
+        [Some("main".to_owned()), Some("topic".to_owned()), None]
+    );
 }
