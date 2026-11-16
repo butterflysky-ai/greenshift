@@ -97,6 +97,8 @@ fn a_profile_passed_on_is_used_instead_of_greenshifts() {
         &["--profile=ci"],
         &["-P", "ci"],
         &["-Pci"],
+        // clap, and so nextest, takes `-P=ci` as `-P ci`.
+        &["-P=ci"],
     ] {
         let n = backend(args);
         assert_eq!(n.profile, "ci", "{args:?}");
@@ -105,6 +107,7 @@ fn a_profile_passed_on_is_used_instead_of_greenshifts() {
     }
     assert!(Nextest::new(&os(&["--profile"]), None, 1).is_err());
     assert!(Nextest::new(&os(&["--profile="]), None, 1).is_err());
+    assert!(Nextest::new(&os(&["-P="]), None, 1).is_err());
 }
 
 #[test]

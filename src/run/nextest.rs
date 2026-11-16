@@ -251,7 +251,11 @@ fn profile_name(taken: &[OsString]) -> anyhow::Result<String> {
         Some(value) => value.to_str(),
         None => arg
             .strip_prefix("--profile=")
-            .or_else(|| arg.strip_prefix("-P")),
+            // `-Pci` or, as clap takes it too, `-P=ci`.
+            .or_else(|| {
+                arg.strip_prefix("-P")
+                    .map(|rest| rest.strip_prefix('=').unwrap_or(rest))
+            }),
     };
     match name {
         Some(name) if !name.is_empty() => Ok(name.to_owned()),
