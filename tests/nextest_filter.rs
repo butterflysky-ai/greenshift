@@ -387,8 +387,14 @@ fn junit_tests(path: &Path) -> BTreeSet<(String, String)> {
         .collect()
 }
 
+/// The binary, without the CI branch and tag variables of the environment
+/// this test runs in, so a run records neither unless a test sets one.
 fn greenshift() -> Command {
-    Command::cargo_bin("greenshift").expect("binary builds")
+    let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
+    for var in greenshift::cli::CI_REF_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 fn tests(binary: &str, names: &[&str]) -> Vec<(String, String)> {

@@ -14,7 +14,7 @@ plan, run and record.
 
 ```
 greenshift ingest <JUNIT_XML>... [--db PATH] [--commit SHA] [--source NAME]
-                  [--partial]
+                  [--branch NAME | --tag NAME] [--partial]
 ```
 
 Every file given in one invocation is recorded as one run. For example, with
@@ -39,6 +39,22 @@ greenshift ingest target/nextest/default/junit.xml \
   lower case; anything else, such as `HEAD` or a tag, is a usage error
   (exit 2). Runs recorded before this check keep whatever they were given.
   `--source` names the producer or CI job (default `junit`).
+- `--branch` names the branch the tests ran on, and the output says it
+  (`... on branch NAME`). It is not part of `--source`: the source says
+  what produced the results, the branch what they ran on. Without the
+  flag it comes from the CI environment: `GITHUB_HEAD_REF` when it is
+  nonempty (a pull request's branch, on GitHub Actions), else
+  `GITHUB_REF_NAME` (the branch pushed). Forgejo and Gitea Actions set
+  the same variables. An empty variable counts as unset; with neither
+  flag nor variable, the run has no branch. Runs recorded before
+  greenshift stored branches have none.
+- `--tag` names the tag the tests ran on instead (`... on tag NAME`).
+  Without either flag, a tag push is one: when `GITHUB_REF_TYPE` is
+  `tag`, `GITHUB_REF_NAME` is the run's tag and the run has no branch.
+  A run has a branch or a tag, never both, so giving both flags is a
+  usage error (exit 2), and either flag replaces what the CI
+  environment says. Only the tag pushed is recorded, not other tags on
+  the commit.
 - `--partial` records the run as holding only part of the suite: one pass
   of several when another wrote no JUnit, say. `select` never counts a
   partial run as full, whatever its size; its results still count towards
@@ -301,7 +317,8 @@ Exit status:
 
 ```
 greenshift run nextest [--db PATH] [--source NAME] [--commit SHA]
-                       [--min-runs N] [--coverage N] [--confidence N]
+                       [--branch NAME | --tag NAME] [--min-runs N]
+                       [--coverage N] [--confidence N]
                        [--estimator wilson|empirical|smoothed]
                        [--max-filterset-bytes BYTES] [-- NEXTEST_ARGS...]
 ```
@@ -345,11 +362,12 @@ greenshift run nextest --commit "$(git rev-parse HEAD)" -- --no-fail-fast
   is used instead, and then works only if `.config/nextest.toml` does
   not set that profile's `junit.path`.
 - **Record.** Every JUnit file written is ingested as one run, as
-  `ingest` records it, with `--commit` if given. When a run wrote no
-  JUnit, the files that exist are recorded as a partial run, and stderr
-  names each missing file. When none exist, nothing is recorded. A
-  failure to record is named on stderr and does not change the exit
-  status.
+  `ingest` records it, with `--commit` if given, and the branch or tag
+  as `ingest` finds it: `--branch` or `--tag`, else the CI environment.
+  When a run wrote no JUnit, the files that exist are recorded as a
+  partial run, and stderr names each missing file. When none exist,
+  nothing is recorded. A failure to record is named on stderr and does
+  not change the exit status.
 - **NEXTEST_ARGS**, after `--`, go to `cargo nextest run`, after
   greenshift's own arguments. They go to `cargo nextest list` as well,
   except runner and reporter options that only `run` takes (such as

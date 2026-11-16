@@ -118,6 +118,8 @@ fn record_as(store: &mut Store, source: &str, partial: bool, cases: &[TestCase])
                 source,
                 files: &[],
                 partial,
+                branch: None,
+                tag: None,
             },
             cases,
         )

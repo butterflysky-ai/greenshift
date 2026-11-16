@@ -32,6 +32,12 @@
 //! version 1 take the default, 0, as every run then was recorded as whole.
 //! A version 1 store opened read-only is read as if migrated: its runs
 //! are not partial.
+//!
+//! Schema version 3 adds `runs.branch` and `runs.tag`: the branch or the
+//! tag the tests ran on, from `--branch`, `--tag` or the CI environment,
+//! or NULL when none names one. A run has at most one of them. Runs
+//! written before version 3 keep NULL in both: what they ran on is not
+//! known.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -91,6 +97,11 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE runs ADD COLUMN partial INTEGER NOT NULL DEFAULT 0
         CHECK (partial IN (0, 1));
+    "#,
+    // 3: the branch or the tag a run's tests ran on, when known.
+    r#"
+    ALTER TABLE runs ADD COLUMN branch TEXT;
+    ALTER TABLE runs ADD COLUMN tag TEXT CHECK (branch IS NULL OR tag IS NULL);
     "#,
 ];
 
@@ -205,6 +216,10 @@ pub struct NewRun<'a> {
     /// The run holds only part of the suite (one of several passes, say),
     /// so it never counts as a full run, whatever its size.
     pub partial: bool,
+    /// The branch the tests ran on, if known.
+    pub branch: Option<&'a str>,
+    /// The tag the tests ran on, if known; never with a branch.
+    pub tag: Option<&'a str>,
 }
 
 /// What [`Store::record_run`] wrote.
@@ -446,8 +461,15 @@ impl Store {
         let sqlite = sqlite_err(path);
         let tx = self.conn.transaction().map_err(&sqlite)?;
         tx.execute(
-            "INSERT INTO runs (commit_sha, source, partial) VALUES (?1, ?2, ?3)",
-            params![run.commit.map(CommitId::as_str), run.source, run.partial],
+            "INSERT INTO runs (commit_sha, source, partial, branch, tag)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                run.commit.map(CommitId::as_str),
+                run.source,
+                run.partial,
+                run.branch,
+                run.tag
+            ],
         )
         .map_err(&sqlite)?;
         let run_id = tx.last_insert_rowid();

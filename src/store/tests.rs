@@ -16,6 +16,8 @@ const RUN: NewRun<'static> = NewRun {
     source: "nextest",
     files: &[],
     partial: false,
+    branch: None,
+    tag: None,
 };
 
 /// The paths recorded for a run, in order, as stored.
@@ -73,7 +75,7 @@ fn row(suite: &str, name: &str, outcome: &str, ms: Option<i64>) -> Row {
 fn fresh_store_is_at_the_current_schema_version() {
     let store = Store::open_in_memory().unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 2);
+    assert_eq!(SCHEMA_VERSION, 3);
 }
 
 #[test]
@@ -91,7 +93,15 @@ fn schema_has_runs_tests_and_results() {
             &store,
             "SELECT name FROM pragma_table_info('runs') ORDER BY cid"
         ),
-        ["id", "commit_sha", "source", "ingested_at", "partial"]
+        [
+            "id",
+            "commit_sha",
+            "source",
+            "ingested_at",
+            "partial",
+            "branch",
+            "tag"
+        ]
     );
     assert_eq!(
         strings(
@@ -595,6 +605,8 @@ fn run_from(source: &'static str) -> NewRun<'static> {
         source,
         files: &[],
         partial: false,
+        branch: None,
+        tag: None,
     }
 }
 
@@ -1003,6 +1015,8 @@ fn a_version_1_store_is_migrated_and_its_runs_are_not_partial() {
         )]
     );
     assert!(!history.runs[0].partial);
+    assert_eq!(run_rows(&store)[0].4, None, "no branch is known");
+    assert_eq!(run_rows(&store)[0].5, None, "no tag is known");
     // New runs are written alongside the old one.
     let partial = NewRun {
         partial: true,
@@ -1064,4 +1078,169 @@ fn runs_partial_holds_only_0_or_1() {
         .execute("INSERT INTO runs (source, partial) VALUES ('x', 2)", [])
         .unwrap_err();
     assert!(err.to_string().contains("CHECK"), "{err}");
+}
+
+#[test]
+fn a_run_has_a_branch_or_a_tag_never_both() {
+    let store = Store::open_in_memory().unwrap();
+    for (branch, tag) in [(None, None), (Some("main"), None), (None, Some("v1"))] {
+        store
+            .conn
+            .execute(
+                "INSERT INTO runs (source, branch, tag) VALUES ('x', ?1, ?2)",
+                params![branch, tag],
+            )
+            .unwrap();
+    }
+    let err = store
+        .conn
+        .execute(
+            "INSERT INTO runs (source, branch, tag) VALUES ('x', 'main', 'v1')",
+            [],
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("CHECK"), "{err}");
+}
+
+/// The same constraint, reached the way real code reaches it: through
+/// [`Store::record_run`], not a raw `INSERT`. `NewRun` can represent a run
+/// with both a branch and a tag (the CHECK constraint is its only guard),
+/// so this proves the guard holds at that boundary too: the run is
+/// refused, no row is written, and the store still records the next run.
+#[test]
+fn record_run_rejects_a_run_with_both_a_branch_and_a_tag() {
+    let mut store = Store::open_in_memory().unwrap();
+    let both = NewRun {
+        branch: Some("main"),
+        tag: Some("v1"),
+        ..RUN
+    };
+    let err = store.record_run(&both, &[]).unwrap_err();
+    assert!(err.to_string().contains("CHECK"), "{err}");
+    assert_eq!(count(&store, "runs"), 0, "the rejected run left no row");
+
+    let recorded = store.record_run(&RUN, &[]).unwrap();
+    assert_eq!(recorded.run_id, 1, "the next run is recorded as the first");
+}
+
+/// A store at schema version 2, as greenshift wrote it before runs had a
+/// branch, holding a whole run and a partial one.
+fn version_2_store(path: &Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(MIGRATIONS[0]).unwrap();
+    conn.execute_batch(MIGRATIONS[1]).unwrap();
+    conn.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
+    conn.execute_batch(
+        "INSERT INTO runs (id, commit_sha, source, partial)
+         VALUES (1, 'abc1234', 'nextest', 0), (2, NULL, 'ci', 1);
+         INSERT INTO tests (id, suite, name) VALUES (1, 's', 't');
+         INSERT INTO results (run_id, test_id, outcome, duration_ms)
+         VALUES (1, 1, 'passed', 5), (2, 1, 'failed', 7);",
+    )
+    .unwrap();
+}
+
+/// (id, commit_sha, source, partial, branch, tag) of every run, oldest first.
+type RunRow = (
+    i64,
+    Option<String>,
+    String,
+    bool,
+    Option<String>,
+    Option<String>,
+);
+
+fn run_rows(store: &Store) -> Vec<RunRow> {
+    let mut stmt = store
+        .conn
+        .prepare("SELECT id, commit_sha, source, partial, branch, tag FROM runs ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+        ))
+    })
+    .unwrap()
+    .collect::<Result<_, _>>()
+    .unwrap()
+}
+
+#[test]
+fn a_version_2_store_is_migrated_and_its_runs_have_no_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    version_2_store(&path);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(
+        run_rows(&store),
+        [
+            (
+                1,
+                Some("abc1234".into()),
+                "nextest".into(),
+                false,
+                None,
+                None
+            ),
+            (2, None, "ci".into(), true, None, None),
+        ]
+    );
+    assert_eq!(
+        rows(&store, 2),
+        [row("s", "t", "failed", Some(7))],
+        "results are kept"
+    );
+}
+
+#[test]
+fn a_read_only_open_reads_a_version_2_store_as_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.sqlite");
+    version_2_store(&path);
+    let store = Store::open_read_only(&path).unwrap().unwrap();
+    assert_eq!(store.schema_version().unwrap(), 2);
+    let flags: Vec<bool> = store
+        .history(&[])
+        .unwrap()
+        .runs
+        .iter()
+        .map(|r| r.partial)
+        .collect();
+    assert_eq!(flags, [false, true]);
+    drop(store);
+    assert_eq!(user_version(&path), 2);
+}
+
+#[test]
+fn a_run_is_recorded_with_its_branch_or_none() {
+    let mut store = Store::open_in_memory().unwrap();
+    for branch in [Some("main"), None, Some("feature/x")] {
+        store.record_run(&NewRun { branch, ..RUN }, &[]).unwrap();
+    }
+    let branches: Vec<Option<String>> = run_rows(&store).into_iter().map(|r| r.4).collect();
+    assert_eq!(
+        branches,
+        [Some("main".into()), None, Some("feature/x".into())]
+    );
+}
+
+#[test]
+fn a_run_is_recorded_with_its_tag_or_none() {
+    let mut store = Store::open_in_memory().unwrap();
+    for tag in [Some("v1.2.0"), None, Some("v2.0.0-rc1")] {
+        store.record_run(&NewRun { tag, ..RUN }, &[]).unwrap();
+    }
+    let tags: Vec<Option<String>> = run_rows(&store).into_iter().map(|r| r.5).collect();
+    assert_eq!(
+        tags,
+        [Some("v1.2.0".into()), None, Some("v2.0.0-rc1".into())]
+    );
 }

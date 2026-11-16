@@ -134,4 +134,13 @@ fn run_takes_options_and_arguments_after_a_separator() {
     assert!(parse(["greenshift", "run", "nextest", "--no-fail-fast"]).is_err());
     assert!(parse(["greenshift", "run"]).is_err());
     assert!(parse(["greenshift", "run", "lein"]).is_err());
+    assert!(parse(["greenshift", "run", "nextest", "--branch", ""]).is_err());
+    assert!(parse(["greenshift", "run", "nextest", "--tag", ""]).is_err());
+    let both = ["--branch", "main", "--tag", "v1"];
+    assert!(parse(["greenshift", "run", "nextest"].into_iter().chain(both)).is_err());
+    assert_eq!(
+        options(&["--branch", "topic"]).branch.as_deref(),
+        Some("topic")
+    );
+    assert_eq!(options(&["--tag", "v1.2.0"]).tag.as_deref(), Some("v1.2.0"));
 }

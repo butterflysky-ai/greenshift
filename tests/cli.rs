@@ -1,8 +1,14 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// The binary, without the CI branch and tag variables of the environment
+/// this test runs in, so a run records neither unless a test sets one.
 fn greenshift() -> Command {
-    Command::cargo_bin("greenshift").expect("binary builds")
+    let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
+    for var in greenshift::cli::CI_REF_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 #[test]
@@ -80,6 +86,33 @@ fn a_db_path_from_argv_is_shown_escaped_on_success() {
         .assert()
         .success();
     shows_escaped(&out.get_output().stdout, &format!("{EVIL_SHOWN}\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_branch_or_tag_from_argv_or_the_ci_env_is_shown_escaped() {
+    let tag_push = [("GITHUB_REF_NAME", EVIL), ("GITHUB_REF_TYPE", "tag")];
+    for (flag, env, kind) in [
+        (&["--branch", EVIL][..], &[][..], "branch"),
+        (&[], &[("GITHUB_HEAD_REF", EVIL)], "branch"),
+        (&["--tag", EVIL], &[], "tag"),
+        (&[], &tag_push, "tag"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = greenshift()
+            .envs(env.iter().copied())
+            .arg("ingest")
+            .arg("--db")
+            .arg(dir.path().join("history.sqlite"))
+            .args(flag)
+            .arg(fixture("nextest.xml"))
+            .assert()
+            .success();
+        shows_escaped(
+            &out.get_output().stdout,
+            &format!(" on {kind} {EVIL_SHOWN}\n"),
+        );
+    }
 }
 
 #[cfg(unix)]

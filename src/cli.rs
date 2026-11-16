@@ -64,6 +64,15 @@ pub struct RunOptions {
     /// Commit the tests run against, as for `ingest --commit`.
     #[arg(long, value_name = "SHA")]
     pub commit: Option<CommitId>,
+
+    /// Branch the tests run on, as for `ingest --branch`.
+    #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+    pub branch: Option<String>,
+
+    /// Tag the tests run on, instead of a branch, as for `ingest --tag`.
+    #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new(),
+          conflicts_with = "branch")]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -118,6 +127,19 @@ pub struct IngestArgs {
     /// its results still count towards each test's results.
     #[arg(long)]
     pub partial: bool,
+
+    /// Branch the tests ran on. Default: from the CI environment,
+    /// GITHUB_HEAD_REF if nonempty (a pull request), else GITHUB_REF_NAME,
+    /// unless GITHUB_REF_TYPE is tag; an empty variable counts as unset,
+    /// and with neither, none.
+    #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+    pub branch: Option<String>,
+
+    /// Tag the tests ran on, instead of a branch. Default: from the CI
+    /// environment, GITHUB_REF_NAME when GITHUB_REF_TYPE is tag.
+    #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new(),
+          conflicts_with = "branch")]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -323,6 +345,9 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
         cases.extend(report.cases);
     }
+    let git_ref = resolve_git_ref(args.branch.as_deref(), args.tag.as_deref(), |var| {
+        std::env::var_os(var)
+    });
     let mut store = Store::open(&args.db)?;
     let recorded = store.record_run(
         &NewRun {
@@ -330,21 +355,96 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
             source: &args.source,
             files: &args.files,
             partial: args.partial,
+            branch: git_ref.as_ref().and_then(GitRef::branch),
+            tag: git_ref.as_ref().and_then(GitRef::tag),
         },
         &cases,
     )?;
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     println!(
-        "greenshift: recorded {}run {} with {} test{} from {} file{} into {}",
+        "greenshift: recorded {}run {} with {} test{} from {} file{} into {}{}",
         if args.partial { "partial " } else { "" },
         recorded.run_id,
         recorded.results,
         plural(recorded.results),
         args.files.len(),
         plural(args.files.len()),
-        Tainted::from(args.db.as_path())
+        Tainted::from(args.db.as_path()),
+        match &git_ref {
+            Some(GitRef::Branch(name)) => format!(" on branch {}", Tainted::raw(name.as_str())),
+            Some(GitRef::Tag(name)) => format!(" on tag {}", Tainted::raw(name.as_str())),
+            None => String::new(),
+        }
     );
     Ok(())
+}
+
+/// On a pull request, GitHub Actions sets this to the PR's branch.
+const GITHUB_HEAD_REF: &str = "GITHUB_HEAD_REF";
+/// The branch or tag pushed, or a pull request's merge ref (`7/merge`).
+const GITHUB_REF_NAME: &str = "GITHUB_REF_NAME";
+/// `branch` or `tag`, saying what [`GITHUB_REF_NAME`] names.
+const GITHUB_REF_TYPE: &str = "GITHUB_REF_TYPE";
+
+/// The CI variables `ingest` reads a branch or tag from. On a pull
+/// request, GitHub Actions sets `GITHUB_HEAD_REF` to the PR's branch and
+/// `GITHUB_REF_NAME` to its merge ref (`7/merge`); otherwise only
+/// `GITHUB_REF_NAME`, to the branch or tag pushed, which
+/// `GITHUB_REF_TYPE` says (`branch` or `tag`). Forgejo and Gitea Actions
+/// set the same variables.
+pub const CI_REF_VARS: [&str; 3] = [GITHUB_HEAD_REF, GITHUB_REF_NAME, GITHUB_REF_TYPE];
+
+/// What a run's tests ran on.
+#[derive(Debug, PartialEq, Eq)]
+enum GitRef {
+    Branch(String),
+    Tag(String),
+}
+
+impl GitRef {
+    fn branch(&self) -> Option<&str> {
+        match self {
+            GitRef::Branch(name) => Some(name),
+            GitRef::Tag(_) => None,
+        }
+    }
+
+    fn tag(&self) -> Option<&str> {
+        match self {
+            GitRef::Tag(name) => Some(name),
+            GitRef::Branch(_) => None,
+        }
+    }
+}
+
+/// What to record a run on: the `branch` or `tag` flag when given (clap
+/// allows one at most), else from [`CI_REF_VARS`] in `env`. There,
+/// when `GITHUB_REF_TYPE` is `tag`, the tag is `GITHUB_REF_NAME`;
+/// otherwise the branch is `GITHUB_HEAD_REF`, else `GITHUB_REF_NAME`. An
+/// empty variable counts as unset, and a value that is not UTF-8 is still
+/// recorded, with U+FFFD for each invalid sequence.
+fn resolve_git_ref(
+    branch: Option<&str>,
+    tag: Option<&str>,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<GitRef> {
+    if let Some(branch) = branch {
+        return Some(GitRef::Branch(branch.to_owned()));
+    }
+    if let Some(tag) = tag {
+        return Some(GitRef::Tag(tag.to_owned()));
+    }
+    let var = |name: &str| {
+        env(name)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string_lossy().into_owned())
+    };
+    if env(GITHUB_REF_TYPE).is_some_and(|kind| kind == "tag") {
+        return var(GITHUB_REF_NAME).map(GitRef::Tag);
+    }
+    var(GITHUB_HEAD_REF)
+        .or_else(|| var(GITHUB_REF_NAME))
+        .map(GitRef::Branch)
 }
 
 /// Print the selection. Reads the store only; with no full run from the
@@ -564,6 +664,8 @@ mod tests {
         assert_eq!(args.commit, None);
         assert_eq!(args.source, "junit");
         assert!(!args.partial);
+        assert_eq!(args.branch, None);
+        assert_eq!(args.tag, None);
     }
 
     #[test]
@@ -578,6 +680,8 @@ mod tests {
             "--source",
             "nextest",
             "--partial",
+            "--branch",
+            "topic",
             "a.xml",
         ])
         .unwrap();
@@ -588,6 +692,117 @@ mod tests {
         assert_eq!(args.commit.as_ref().map(CommitId::as_str), Some("abc1234"));
         assert_eq!(args.source, "nextest");
         assert!(args.partial);
+        assert_eq!(args.branch.as_deref(), Some("topic"));
+    }
+
+    /// An environment holding only `vars`.
+    fn env_of<'v>(vars: &'v [(&str, &str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'v {
+        move |var| {
+            vars.iter()
+                .find(|(name, _)| *name == var)
+                .map(|(_, value)| value.into())
+        }
+    }
+
+    /// The branch [`resolve_git_ref`] finds with no tag flag; panics on a tag.
+    fn run_branch(
+        flag: Option<&str>,
+        env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Option<String> {
+        resolve_git_ref(flag, None, env).map(|found| match found {
+            GitRef::Branch(name) => name,
+            GitRef::Tag(name) => panic!("a tag, {name:?}, not a branch"),
+        })
+    }
+
+    #[test]
+    fn a_tag_push_is_its_tag_and_the_flags_replace_the_env() {
+        let tag_push = [
+            ("GITHUB_HEAD_REF", ""),
+            ("GITHUB_REF_NAME", "v1.2.0"),
+            ("GITHUB_REF_TYPE", "tag"),
+        ];
+        let tag = |name: &str| Some(GitRef::Tag(name.to_owned()));
+        let branch = |name: &str| Some(GitRef::Branch(name.to_owned()));
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&tag_push)),
+            tag("v1.2.0")
+        );
+        assert_eq!(
+            resolve_git_ref(Some("x"), None, env_of(&tag_push)),
+            branch("x")
+        );
+        assert_eq!(
+            resolve_git_ref(None, Some("v9"), env_of(&tag_push)),
+            tag("v9")
+        );
+        let empty_tag = [("GITHUB_REF_NAME", ""), ("GITHUB_REF_TYPE", "tag")];
+        assert_eq!(resolve_git_ref(None, None, env_of(&empty_tag)), None);
+        // On a tag push the head ref is never the branch, even when set.
+        let tag_and_head_ref = [
+            ("GITHUB_HEAD_REF", "feature"),
+            ("GITHUB_REF_NAME", "v1.2.0"),
+            ("GITHUB_REF_TYPE", "tag"),
+        ];
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&tag_and_head_ref)),
+            tag("v1.2.0")
+        );
+        let empty_tag_and_head_ref = [
+            ("GITHUB_HEAD_REF", "feature"),
+            ("GITHUB_REF_NAME", ""),
+            ("GITHUB_REF_TYPE", "tag"),
+        ];
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&empty_tag_and_head_ref)),
+            None
+        );
+        let branch_push = [("GITHUB_REF_NAME", "main"), ("GITHUB_REF_TYPE", "branch")];
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&branch_push)),
+            branch("main")
+        );
+        // An unrecognized GITHUB_REF_TYPE is not "tag", so it falls through
+        // to the branch precedence chain exactly as an unset one does.
+        let unknown_type = [("GITHUB_REF_NAME", "main"), ("GITHUB_REF_TYPE", "unknown")];
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&unknown_type)),
+            branch("main")
+        );
+    }
+
+    #[test]
+    fn the_branch_is_the_flag_then_the_head_ref_then_the_ref_name() {
+        let both = [
+            ("GITHUB_HEAD_REF", "feature"),
+            ("GITHUB_REF_NAME", "7/merge"),
+        ];
+        assert_eq!(
+            run_branch(Some("mine"), env_of(&both)).as_deref(),
+            Some("mine")
+        );
+        assert_eq!(run_branch(None, env_of(&both)).as_deref(), Some("feature"));
+        let push = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "main")];
+        assert_eq!(run_branch(None, env_of(&push)).as_deref(), Some("main"));
+        assert_eq!(
+            run_branch(None, env_of(&[("GITHUB_REF_NAME", "main")])).as_deref(),
+            Some("main")
+        );
+        let empty = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "")];
+        assert_eq!(run_branch(None, env_of(&empty)), None);
+        assert_eq!(run_branch(None, env_of(&[])), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_branch_variable_that_is_not_utf8_is_still_the_branch() {
+        use std::os::unix::ffi::OsStringExt;
+        let env = |var: &str| match var {
+            "GITHUB_HEAD_REF" => Some(std::ffi::OsString::from_vec(b"bad\xffname".to_vec())),
+            "GITHUB_REF_NAME" => Some("7/merge".into()),
+            _ => None,
+        };
+        assert_eq!(run_branch(None, env).as_deref(), Some("bad\u{fffd}name"));
     }
 
     #[test]
@@ -595,6 +810,10 @@ mod tests {
         assert!(Cli::try_parse_from(["greenshift", "ingest"]).is_err());
         assert!(Cli::try_parse_from(["greenshift", "ingest", "--commit", "", "a.xml"]).is_err());
         assert!(Cli::try_parse_from(["greenshift", "ingest", "--source", "", "a.xml"]).is_err());
+        assert!(Cli::try_parse_from(["greenshift", "ingest", "--branch", "", "a.xml"]).is_err());
+        assert!(Cli::try_parse_from(["greenshift", "ingest", "--tag", "", "a.xml"]).is_err());
+        let both = ["--branch", "main", "--tag", "v1", "a.xml"];
+        assert!(Cli::try_parse_from(["greenshift", "ingest"].iter().chain(&both)).is_err());
     }
 
     fn select_args(args: &[&str]) -> Result<SelectArgs, clap::Error> {
