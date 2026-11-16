@@ -1016,6 +1016,7 @@ fn a_version_1_store_is_migrated_and_its_runs_are_not_partial() {
     );
     assert!(!history.runs[0].partial);
     assert_eq!(run_rows(&store)[0].4, None, "no branch is known");
+    assert_eq!(run_rows(&store)[0].5, None, "no tag is known");
     // New runs are written alongside the old one.
     let partial = NewRun {
         partial: true,
@@ -1120,16 +1121,30 @@ fn version_2_store(path: &Path) {
     .unwrap();
 }
 
-/// (id, commit_sha, source, partial, branch) of every run, oldest first.
-type RunRow = (i64, Option<String>, String, bool, Option<String>);
+/// (id, commit_sha, source, partial, branch, tag) of every run, oldest first.
+type RunRow = (
+    i64,
+    Option<String>,
+    String,
+    bool,
+    Option<String>,
+    Option<String>,
+);
 
 fn run_rows(store: &Store) -> Vec<RunRow> {
     let mut stmt = store
         .conn
-        .prepare("SELECT id, commit_sha, source, partial, branch FROM runs ORDER BY id")
+        .prepare("SELECT id, commit_sha, source, partial, branch, tag FROM runs ORDER BY id")
         .unwrap();
     stmt.query_map([], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+        ))
     })
     .unwrap()
     .collect::<Result<_, _>>()
@@ -1146,8 +1161,15 @@ fn a_version_2_store_is_migrated_and_its_runs_have_no_branch() {
     assert_eq!(
         run_rows(&store),
         [
-            (1, Some("abc1234".into()), "nextest".into(), false, None),
-            (2, None, "ci".into(), true, None),
+            (
+                1,
+                Some("abc1234".into()),
+                "nextest".into(),
+                false,
+                None,
+                None
+            ),
+            (2, None, "ci".into(), true, None, None),
         ]
     );
     assert_eq!(
@@ -1186,5 +1208,18 @@ fn a_run_is_recorded_with_its_branch_or_none() {
     assert_eq!(
         branches,
         [Some("main".into()), None, Some("feature/x".into())]
+    );
+}
+
+#[test]
+fn a_run_is_recorded_with_its_tag_or_none() {
+    let mut store = Store::open_in_memory().unwrap();
+    for tag in [Some("v1.2.0"), None, Some("v2.0.0-rc1")] {
+        store.record_run(&NewRun { tag, ..RUN }, &[]).unwrap();
+    }
+    let tags: Vec<Option<String>> = run_rows(&store).into_iter().map(|r| r.5).collect();
+    assert_eq!(
+        tags,
+        [Some("v1.2.0".into()), None, Some("v2.0.0-rc1".into())]
     );
 }
