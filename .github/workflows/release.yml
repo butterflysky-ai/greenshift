@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in step with rust-version in Cargo.toml and ci.yml.
+  RUST_TOOLCHAIN: "1.98.0"
+
+jobs:
+  release-musl:
+    name: release (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check the tag matches the Cargo.toml version
+        run: scripts/check-release-tag.sh "$TAG"
+      # The same build as ci.yml's release-musl job.
+      - name: Install Rust and musl tools
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
+          rustup default "$RUST_TOOLCHAIN"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: cargo build --release
+        run: cargo build --locked --release --target "$TARGET"
+      - name: Check the binary is statically linked
+        run: |
+          bin="target/$TARGET/release/greenshift"
+          file "$bin"
+          out="$(ldd "$bin" 2>&1 || true)"
+          echo "ldd: $out"
+          case "$out" in
+            *"not a dynamic executable"*|*"statically linked"*) ;;
+            *) echo "::error::$bin is dynamically linked"; exit 1 ;;
+          esac
+          "$bin" --version
+      - name: Name the binary and write its checksum
+        run: |
+          name="greenshift-$TAG-$TARGET"
+          mkdir -p dist
+          cp "target/$TARGET/release/greenshift" "dist/$name"
+          cd dist
+          sha256sum "$name" > "$name.sha256"
+          cat "$name.sha256"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          name="greenshift-$TAG-$TARGET"
+          gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes \
+            "dist/$name" "dist/$name.sha256"
