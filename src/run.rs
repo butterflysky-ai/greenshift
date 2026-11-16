@@ -167,8 +167,8 @@ pub fn combined(codes: impl IntoIterator<Item = u8>) -> u8 {
 
 /// Record the JUnit files in `junit` that exist as one run, as
 /// `scripts/record-history.sh` does for CI: with some missing, as a
-/// partial run; with none, not at all. The branch is `--branch`, or as
-/// `ingest` finds it in the CI environment. Any error is named on stderr and
+/// partial run; with none, not at all. The branch or tag is `--branch` or
+/// `--tag`, or as `ingest` finds it in the CI environment. Any error is named on stderr and
 /// does not change the exit status: the tests have run.
 fn record(options: &RunOptions, backend: &str, junit: &[PathBuf]) {
     let mut files = Vec::new();
@@ -198,6 +198,7 @@ fn record(options: &RunOptions, backend: &str, junit: &[PathBuf]) {
         source: record_source(options, backend).to_owned(),
         partial,
         branch: options.branch.clone(),
+        tag: options.tag.clone(),
     };
     if let Err(err) = cli::ingest(&args) {
         cli::show_error(&err);

@@ -12,11 +12,11 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The binary, without the CI branch variables of the environment this
-/// test runs in, so a run records no branch unless a test sets one.
+/// The binary, without the CI branch and tag variables of the environment
+/// this test runs in, so a run records neither unless a test sets one.
 fn greenshift() -> Command {
     let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
-    for var in greenshift::cli::BRANCH_VARS {
+    for var in greenshift::cli::CI_REF_VARS {
         cmd.env_remove(var);
     }
     cmd
@@ -450,7 +450,7 @@ fn partial_marks_the_run_as_partial() {
     assert_eq!(partial_flags(&conn), [false, true]);
 }
 
-/// `ingest` of one fixture with `extra` arguments and, of the branch
+/// `ingest` of one fixture with `extra` arguments and, of the branch and tag
 /// variables, only those in `env`, whatever the environment of this test.
 fn ingest_in_env(db: &Path, extra: &[&str], env: &[(&str, &str)]) -> assert_cmd::assert::Assert {
     greenshift()
@@ -538,5 +538,100 @@ fn an_empty_branch_flag_is_a_usage_error() {
         .stderr(predicate::str::contains(
             "a value is required for '--branch",
         ));
+    assert!(!db.exists());
+}
+
+/// (branch, tag) of every run, oldest first.
+fn refs(db: &Path) -> Vec<(Option<String>, Option<String>)> {
+    Connection::open(db)
+        .unwrap()
+        .prepare("SELECT branch, tag FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn branch(name: &str) -> (Option<String>, Option<String>) {
+    (Some(name.to_owned()), None)
+}
+
+fn tag(name: &str) -> (Option<String>, Option<String>) {
+    (None, Some(name.to_owned()))
+}
+
+#[test]
+fn a_tag_push_records_the_tag_and_no_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    // As GitHub Actions sets them on a push of the tag v1.2.0.
+    let env = [
+        ("GITHUB_HEAD_REF", ""),
+        ("GITHUB_REF_NAME", "v1.2.0"),
+        ("GITHUB_REF_TYPE", "tag"),
+    ];
+    ingest_in_env(&db, &[], &env)
+        .success()
+        .stdout(predicate::str::contains(" on tag v1.2.0\n"))
+        .stdout(predicate::str::contains(" on branch").not());
+    assert_eq!(refs(&db), [tag("v1.2.0")]);
+}
+
+#[test]
+fn a_branch_push_records_the_branch_and_no_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let env = [
+        ("GITHUB_HEAD_REF", ""),
+        ("GITHUB_REF_NAME", "main"),
+        ("GITHUB_REF_TYPE", "branch"),
+    ];
+    ingest_in_env(&db, &[], &env)
+        .success()
+        .stdout(predicate::str::contains(" on branch main\n"));
+    assert_eq!(refs(&db), [branch("main")]);
+}
+
+#[test]
+fn either_flag_replaces_the_ci_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    let tag_push = [
+        ("GITHUB_HEAD_REF", ""),
+        ("GITHUB_REF_NAME", "v1.2.0"),
+        ("GITHUB_REF_TYPE", "tag"),
+    ];
+    ingest_in_env(&db, &["--branch", "mine"], &tag_push)
+        .success()
+        .stdout(predicate::str::contains(" on branch mine\n"));
+    let pull_request = [
+        ("GITHUB_HEAD_REF", "feature"),
+        ("GITHUB_REF_NAME", "7/merge"),
+        ("GITHUB_REF_TYPE", "branch"),
+    ];
+    ingest_in_env(&db, &["--tag", "v9"], &pull_request)
+        .success()
+        .stdout(predicate::str::contains(" on tag v9\n"));
+    assert_eq!(refs(&db), [branch("mine"), tag("v9")]);
+}
+
+#[test]
+fn both_a_branch_and_a_tag_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    ingest_in_env(&db, &["--branch", "main", "--tag", "v1"], &[])
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+    assert!(!db.exists());
+}
+
+#[test]
+fn an_empty_tag_flag_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.sqlite");
+    ingest_in_env(&db, &["--tag", ""], &[])
+        .code(2)
+        .stderr(predicate::str::contains("a value is required for '--tag"));
     assert!(!db.exists());
 }

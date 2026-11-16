@@ -12,11 +12,11 @@ fn fixture(name: &str) -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
-/// The binary, without the CI branch variables of the environment this
-/// test runs in, so a run records no branch unless a test sets one.
+/// The binary, without the CI branch and tag variables of the environment
+/// this test runs in, so a run records neither unless a test sets one.
 fn greenshift() -> Command {
     let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
-    for var in greenshift::cli::BRANCH_VARS {
+    for var in greenshift::cli::CI_REF_VARS {
         cmd.env_remove(var);
     }
     cmd

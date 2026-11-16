@@ -135,4 +135,7 @@ fn run_takes_options_and_arguments_after_a_separator() {
     assert!(parse(["greenshift", "run"]).is_err());
     assert!(parse(["greenshift", "run", "lein"]).is_err());
     assert!(parse(["greenshift", "run", "nextest", "--branch", ""]).is_err());
+    assert!(parse(["greenshift", "run", "nextest", "--tag", ""]).is_err());
+    let both = ["--branch", "main", "--tag", "v1"];
+    assert!(parse(["greenshift", "run", "nextest"].into_iter().chain(both)).is_err());
 }

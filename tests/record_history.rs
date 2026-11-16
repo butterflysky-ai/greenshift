@@ -45,12 +45,12 @@ impl Job {
         self.record_in_env(&[])
     }
 
-    /// [`Job::record`], with only the CI branch variables in `env` set,
+    /// [`Job::record`], with only the CI branch and tag variables in `env` set,
     /// whatever the environment of this test.
     fn record_in_env(&self, env: &[(&str, &str)]) -> assert_cmd::assert::Assert {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/record-history.sh");
         let mut cmd = Command::new("bash");
-        for var in greenshift::cli::BRANCH_VARS {
+        for var in greenshift::cli::CI_REF_VARS {
             cmd.env_remove(var);
         }
         cmd.envs(env.iter().copied())

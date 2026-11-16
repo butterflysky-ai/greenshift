@@ -17,6 +17,7 @@ const RUN: NewRun<'static> = NewRun {
     files: &[],
     partial: false,
     branch: None,
+    tag: None,
 };
 
 /// The paths recorded for a run, in order, as stored.
@@ -98,7 +99,8 @@ fn schema_has_runs_tests_and_results() {
             "source",
             "ingested_at",
             "partial",
-            "branch"
+            "branch",
+            "tag"
         ]
     );
     assert_eq!(
@@ -604,6 +606,7 @@ fn run_from(source: &'static str) -> NewRun<'static> {
         files: &[],
         partial: false,
         branch: None,
+        tag: None,
     }
 }
 
@@ -1072,6 +1075,28 @@ fn runs_partial_holds_only_0_or_1() {
     let err = store
         .conn
         .execute("INSERT INTO runs (source, partial) VALUES ('x', 2)", [])
+        .unwrap_err();
+    assert!(err.to_string().contains("CHECK"), "{err}");
+}
+
+#[test]
+fn a_run_has_a_branch_or_a_tag_never_both() {
+    let store = Store::open_in_memory().unwrap();
+    for (branch, tag) in [(None, None), (Some("main"), None), (None, Some("v1"))] {
+        store
+            .conn
+            .execute(
+                "INSERT INTO runs (source, branch, tag) VALUES ('x', ?1, ?2)",
+                params![branch, tag],
+            )
+            .unwrap();
+    }
+    let err = store
+        .conn
+        .execute(
+            "INSERT INTO runs (source, branch, tag) VALUES ('x', 'main', 'v1')",
+            [],
+        )
         .unwrap_err();
     assert!(err.to_string().contains("CHECK"), "{err}");
 }

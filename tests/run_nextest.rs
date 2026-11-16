@@ -101,7 +101,7 @@ impl Project {
         self.run_in_env(args, fail, &[])
     }
 
-    /// [`Project::run`], with `env` set too. No CI branch variable is
+    /// [`Project::run`], with `env` set too. No CI branch or tag variable is
     /// inherited: only those in `env` are set.
     fn run_in_env(&self, args: &[&str], fail: &[&str], env: &[(&str, &str)]) -> Output {
         let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
@@ -109,7 +109,7 @@ impl Project {
             let key = key.to_string_lossy().into_owned();
             let inherited = key.starts_with("NEXTEST_")
                 || (key.starts_with("CARGO_") && key != "CARGO_HOME")
-                || greenshift::cli::BRANCH_VARS.contains(&key.as_str());
+                || greenshift::cli::CI_REF_VARS.contains(&key.as_str());
             if inherited {
                 cmd.env_remove(&key);
             }
@@ -358,5 +358,31 @@ fn the_run_is_recorded_with_its_branch() {
     assert_eq!(
         branches,
         [Some("main".to_owned()), Some("topic".to_owned()), None]
+    );
+}
+
+#[test]
+fn the_run_is_recorded_with_its_tag() {
+    let p = Project::new();
+    // From the CI env on a tag push; the flag when given.
+    let tag_push = [("GITHUB_REF_NAME", "v1.2.0"), ("GITHUB_REF_TYPE", "tag")];
+    let ci = p.run_in_env(&[], &[], &tag_push);
+    assert!(ci.status.success(), "{}", stderr(&ci));
+    let given = p.run_in_env(&["--tag", "v9"], &[], &[("GITHUB_REF_NAME", "main")]);
+    assert!(given.status.success(), "{}", stderr(&given));
+    let refs: Vec<(Option<String>, Option<String>)> = Connection::open(&p.db)
+        .unwrap()
+        .prepare("SELECT branch, tag FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        refs,
+        [
+            (None, Some("v1.2.0".to_owned())),
+            (None, Some("v9".to_owned()))
+        ]
     );
 }
