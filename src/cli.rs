@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Thresholds, Wilson};
 use crate::store::{self, CommitId, NewRun, Store};
 use crate::tainted::Tainted;
-use crate::{junit, nextest, plan};
+use crate::{junit, nextest, plan, run};
 
 /// Pick which tests to run from what your tests have done before.
 #[derive(Debug, Parser)]
@@ -34,6 +34,59 @@ pub enum Command {
     /// Print select's choice for the current tests as JSON rich and poor
     /// groups, for any test runner.
     Plan(PlanArgs),
+    /// List the tests, run the rich and then the poor ones with a test
+    /// runner, and record the results as one run.
+    Run(RunArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    #[command(subcommand)]
+    pub backend: Backend,
+}
+
+/// The test runners `run` drives.
+#[derive(Debug, Subcommand)]
+pub enum Backend {
+    /// Run the tests with cargo-nextest.
+    Nextest(NextestRunArgs),
+}
+
+/// What `run` takes whatever the test runner.
+#[derive(Debug, Args)]
+#[command(mut_arg("db", |db| {
+    db.help("History store to read and record the run in (created if missing)")
+}))]
+pub struct RunOptions {
+    #[command(flatten)]
+    pub select: SelectArgs,
+
+    /// Commit the tests run against, as for `ingest --commit`.
+    #[arg(long, value_name = "SHA")]
+    pub commit: Option<CommitId>,
+}
+
+#[derive(Debug, Args)]
+#[command(mut_arg("source", |source| {
+    source
+        .action(clap::ArgAction::Set)
+        .default_value("nextest")
+        .help("Read only runs from this source, and record the run as from it")
+}))]
+pub struct NextestRunArgs {
+    #[command(flatten)]
+    pub options: RunOptions,
+
+    /// The longest filterset to give one `cargo nextest run`, in bytes;
+    /// a longer one is split over several runs.
+    #[arg(long, value_name = "BYTES", default_value_t = run::nextest::MAX_FILTERSET_BYTES,
+          value_parser = clap::value_parser!(usize))]
+    pub max_filterset_bytes: usize,
+
+    /// Arguments for `cargo nextest run` and, where it takes them,
+    /// `cargo nextest list`.
+    #[arg(last = true, value_name = "NEXTEST_ARGS")]
+    pub args: Vec<std::ffi::OsString>,
 }
 
 #[derive(Debug, Args)]
@@ -250,6 +303,9 @@ pub fn run() -> anyhow::Result<ExitCode> {
         Command::Select(args) => select(&args),
         Command::NextestFilter(args) => nextest_filter(&args),
         Command::Plan(args) => plan(&args),
+        Command::Run(args) => match args.backend {
+            Backend::Nextest(args) => run_nextest(&args),
+        },
     }
 }
 
@@ -375,6 +431,12 @@ pub fn plan_groups<'t>(
     })?;
     let groups = groups.expect("with_history hands the lines on");
     Ok((plan::HistoryState::Ok, groups))
+}
+
+/// Run the whole cycle with cargo-nextest; see [`run`].
+pub fn run_nextest(args: &NextestRunArgs) -> anyhow::Result<ExitCode> {
+    let backend = run::nextest::Nextest::new(&args.args, args.max_filterset_bytes)?;
+    run::run(&backend, &args.options)
 }
 
 /// The history `plan` reads. A missing store is created, and its history
