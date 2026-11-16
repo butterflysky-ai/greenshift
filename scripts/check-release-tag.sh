@@ -15,12 +15,19 @@ fi
 tag="$1"
 manifest="${2:-Cargo.toml}"
 
+# A plain `version = "..."` (or '...') under [package]; anything else,
+# such as version.workspace = true, is reported as no version.
 version="$(awk '
-    /^\[/ { in_package = ($0 == "[package]") }
-    in_package && /^version[[:space:]]*=/ {
-        sub(/^version[[:space:]]*=[[:space:]]*"/, "")
-        sub(/".*$/, "")
-        print
+    { sub(/\r$/, "") }
+    /^[[:space:]]*\[/ {
+        in_package = ($0 ~ /^[[:space:]]*\[[[:space:]]*package[[:space:]]*\][[:space:]]*(#.*)?$/)
+    }
+    in_package && /^[[:space:]]*version[[:space:]]*=[[:space:]]*["\047]/ {
+        sub(/^[[:space:]]*version[[:space:]]*=[[:space:]]*/, "")
+        q = substr($0, 1, 1)
+        $0 = substr($0, 2)
+        end = index($0, q)
+        if (end) print substr($0, 1, end - 1)
         exit
     }
 ' "$manifest")"
