@@ -326,8 +326,8 @@ tag=v0.1.0
 base="https://github.com/paceheart/greenshift/releases/download/$tag"
 curl -fLO "$base/greenshift-$tag-x86_64-unknown-linux-musl"
 curl -fLO "$base/greenshift-$tag-x86_64-unknown-linux-musl.sha256"
-sha256sum -c "greenshift-$tag-x86_64-unknown-linux-musl.sha256"
-chmod +x "greenshift-$tag-x86_64-unknown-linux-musl"
+sha256sum -c "greenshift-$tag-x86_64-unknown-linux-musl.sha256" &&
+    chmod +x "greenshift-$tag-x86_64-unknown-linux-musl"
 ```
 
 `sha256sum -c` prints `OK` and exits 0 only when the file matches. To pin
