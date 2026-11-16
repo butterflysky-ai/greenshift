@@ -134,4 +134,5 @@ fn run_takes_options_and_arguments_after_a_separator() {
     assert!(parse(["greenshift", "run", "nextest", "--no-fail-fast"]).is_err());
     assert!(parse(["greenshift", "run"]).is_err());
     assert!(parse(["greenshift", "run", "lein"]).is_err());
+    assert!(parse(["greenshift", "run", "nextest", "--branch", ""]).is_err());
 }

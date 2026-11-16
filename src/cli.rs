@@ -125,7 +125,7 @@ pub struct IngestArgs {
 
     /// Branch the tests ran on. Default: from the CI environment,
     /// GITHUB_HEAD_REF if nonempty (a pull request), else GITHUB_REF_NAME;
-    /// none if neither is set.
+    /// an empty variable counts as unset, and with neither, none.
     #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
     pub branch: Option<String>,
 }
@@ -333,7 +333,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
         cases.extend(report.cases);
     }
-    let branch = branch(args.branch.as_deref(), |var| std::env::var_os(var));
+    let branch = run_branch(args.branch.as_deref(), |var| std::env::var_os(var));
     let mut store = Store::open(&args.db)?;
     let recorded = store.record_run(
         &NewRun {
@@ -363,7 +363,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The CI variables [`branch`] reads, in order: on a pull request,
+/// The CI variables `ingest` reads a branch from, in order: on a pull request,
 /// GitHub Actions sets the first to the PR's branch and the second to
 /// its merge ref (`7/merge`); otherwise only the second, to the branch or
 /// tag pushed. Forgejo and Gitea Actions set the same variables.
@@ -371,8 +371,8 @@ pub const BRANCH_VARS: [&str; 2] = ["GITHUB_HEAD_REF", "GITHUB_REF_NAME"];
 
 /// The branch to record a run on: `flag` when given, else the first of
 /// [`BRANCH_VARS`] that `env` gives nonempty, else none. A value that is
-/// not UTF-8 is taken lossily, so a branch run is still recorded as one.
-pub fn branch(
+/// not UTF-8 is still recorded, with U+FFFD for each invalid sequence.
+fn run_branch(
     flag: Option<&str>,
     env: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Option<String> {
@@ -648,17 +648,32 @@ mod tests {
             ("GITHUB_HEAD_REF", "feature"),
             ("GITHUB_REF_NAME", "7/merge"),
         ];
-        assert_eq!(branch(Some("mine"), env_of(&both)).as_deref(), Some("mine"));
-        assert_eq!(branch(None, env_of(&both)).as_deref(), Some("feature"));
-        let push = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "main")];
-        assert_eq!(branch(None, env_of(&push)).as_deref(), Some("main"));
         assert_eq!(
-            branch(None, env_of(&[("GITHUB_REF_NAME", "main")])).as_deref(),
+            run_branch(Some("mine"), env_of(&both)).as_deref(),
+            Some("mine")
+        );
+        assert_eq!(run_branch(None, env_of(&both)).as_deref(), Some("feature"));
+        let push = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "main")];
+        assert_eq!(run_branch(None, env_of(&push)).as_deref(), Some("main"));
+        assert_eq!(
+            run_branch(None, env_of(&[("GITHUB_REF_NAME", "main")])).as_deref(),
             Some("main")
         );
         let empty = [("GITHUB_HEAD_REF", ""), ("GITHUB_REF_NAME", "")];
-        assert_eq!(branch(None, env_of(&empty)), None);
-        assert_eq!(branch(None, env_of(&[])), None);
+        assert_eq!(run_branch(None, env_of(&empty)), None);
+        assert_eq!(run_branch(None, env_of(&[])), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_branch_variable_that_is_not_utf8_is_still_the_branch() {
+        use std::os::unix::ffi::OsStringExt;
+        let env = |var: &str| match var {
+            "GITHUB_HEAD_REF" => Some(std::ffi::OsString::from_vec(b"bad\xffname".to_vec())),
+            "GITHUB_REF_NAME" => Some("7/merge".into()),
+            _ => None,
+        };
+        assert_eq!(run_branch(None, env).as_deref(), Some("bad\u{fffd}name"));
     }
 
     #[test]

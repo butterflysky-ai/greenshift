@@ -300,6 +300,7 @@ fn ingest_help_lists_its_options() {
             predicate::str::contains("--db <PATH>")
                 .and(predicate::str::contains("--commit <SHA>"))
                 .and(predicate::str::contains("--source <NAME>"))
+                .and(predicate::str::contains("--branch <NAME>"))
                 .and(predicate::str::contains(".greenshift/history.sqlite")),
         );
 }
