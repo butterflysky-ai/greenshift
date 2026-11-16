@@ -1,5 +1,7 @@
-//! Runs `scripts/check-release-tag.sh`, which the release workflow uses
-//! to check a tag against the version in Cargo.toml. Needs bash and awk.
+//! Runs `scripts/check-release-tag.sh` and `scripts/is-prerelease-tag.sh`,
+//! which the release workflow uses to check a tag against the version in
+//! Cargo.toml and to decide whether a release is a pre-release. Needs
+//! bash and awk.
 
 use std::path::Path;
 
@@ -8,6 +10,10 @@ use predicates::str::contains;
 
 fn script() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-release-tag.sh")
+}
+
+fn prerelease_script() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/is-prerelease-tag.sh")
 }
 
 /// The script on `tag` and a manifest holding `toml`.
@@ -87,6 +93,45 @@ fn a_missing_tag_is_a_usage_error() {
     for args in [&[][..], &["v1", "Cargo.toml", "extra"]] {
         Command::new("bash")
             .arg(script())
+            .args(args)
+            .assert()
+            .code(2)
+            .stdout("")
+            .stderr(contains("usage:"));
+    }
+}
+
+/// A tag with a "-" before any "+" is a pre-release; build metadata
+/// (after a "+") holding a "-" of its own does not make one. Regression
+/// test for the bug release.yml's history fixed: `case "$TAG" in *-*)`
+/// took v0.2.0+build-1 for a pre-release because it never stripped the
+/// build-metadata suffix first.
+#[test]
+fn prerelease_is_judged_before_any_build_metadata() {
+    for (tag, is_prerelease) in [
+        ("v1.0.0", false),
+        ("v0.2.0-rc.1", true),
+        ("v0.2.0+build-1", false),
+        ("v0.2.0+build", false),
+        ("v0.2.0-rc.1+build.5", true),
+    ] {
+        let assert = Command::new("bash")
+            .arg(prerelease_script())
+            .arg(tag)
+            .assert();
+        if is_prerelease {
+            assert.success().stdout(contains("yes"));
+        } else {
+            assert.code(1).stdout(contains("no"));
+        }
+    }
+}
+
+#[test]
+fn a_missing_prerelease_tag_arg_is_a_usage_error() {
+    for args in [&[][..], &["v1", "extra"]] {
+        Command::new("bash")
+            .arg(prerelease_script())
             .args(args)
             .assert()
             .code(2)
