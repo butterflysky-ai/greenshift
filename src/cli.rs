@@ -339,25 +339,42 @@ pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
 /// one fails, with nothing printed, before the store is touched.
 pub fn plan(args: &PlanArgs) -> anyhow::Result<ExitCode> {
     let tests = read_inventory(&args.inventory, plan::parse_inventory)?;
+    let (history, groups) = plan_groups(&args.select, &tests)?;
+    let mut out = std::io::stdout().lock();
+    written(
+        writeln!(out, "{}", groups.to_json(history))
+            .and_then(|()| out.flush())
+            .map(|()| ExitCode::SUCCESS),
+    )
+}
+
+/// `tests` split into rich and poor as [`plan()`] splits them, from lines
+/// made as [`select()`] makes them but chosen from `tests` alone, by
+/// suite and name, and whether the store could be used. A missing store
+/// is created empty; an existing one is only read. With no history, or a
+/// store that cannot be created or read, every test is rich; stderr says
+/// which, naming the error.
+pub fn plan_groups<'t>(
+    args: &SelectArgs,
+    tests: &'t [plan::InventoryTest],
+) -> anyhow::Result<(plan::HistoryState, plan::Plan<'t>)> {
+    let history = match plan_history(args) {
+        Ok(history) => history,
+        Err(err) => {
+            show_error(&err);
+            return Ok((plan::HistoryState::Error, plan::plan(&[], tests)));
+        }
+    };
     let known: HashSet<(&Tainted, &Tainted)> =
         tests.iter().map(|test| (&test.suite, &test.name)).collect();
     let eligible = |suite: &Tainted, name: &Tainted| known.contains(&(suite, name));
-    let write = |history: plan::HistoryState, lines: Option<&[Line<'_>]>| {
-        let mut out = std::io::stdout().lock();
-        let lines = lines.unwrap_or_default();
-        writeln!(out, "{}", plan::plan(lines, &tests).to_json(history))
-            .and_then(|()| out.flush())
-            .map(|()| ExitCode::SUCCESS)
-    };
-    match plan_history(&args.select) {
-        Ok(history) => with_history(&history, &args.select, eligible, |lines| {
-            write(plan::HistoryState::Ok, lines)
-        }),
-        Err(err) => {
-            show_error(&err);
-            written(write(plan::HistoryState::Error, None))
-        }
-    }
+    let mut groups = None;
+    with_history(&history, args, eligible, |lines| {
+        groups = Some(plan::plan(lines.unwrap_or_default(), tests));
+        Ok(ExitCode::SUCCESS)
+    })?;
+    let groups = groups.expect("with_history hands the lines on");
+    Ok((plan::HistoryState::Ok, groups))
 }
 
 /// The history `plan` reads. A missing store is created, and its history
