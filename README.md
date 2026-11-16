@@ -7,6 +7,8 @@ per-repo SQLite store (`greenshift ingest`), chooses tests from that
 history (`greenshift select`) and writes that choice as a cargo-nextest
 filterset (`greenshift nextest-filter`) or, for any test runner, as JSON
 rich and poor groups of the current tests (`greenshift plan`).
+`greenshift run nextest` does the whole cycle with cargo-nextest: list,
+plan, run and record.
 
 ## Ingest
 
@@ -294,6 +296,77 @@ Exit status:
   `suite` and `name` (stderr names the line). No line is skipped, as a
   skipped test would be in neither group.
 - 2: a usage error, such as no `--inventory`.
+
+## Run nextest
+
+```
+greenshift run nextest [--db PATH] [--source NAME] [--commit SHA]
+                       [--min-runs N] [--coverage N] [--confidence N]
+                       [--estimator wilson|empirical|smoothed]
+                       [--max-filterset-bytes BYTES] [-- NEXTEST_ARGS...]
+```
+
+`run nextest` lists the tests with cargo-nextest, plans them as `plan`
+does, runs the rich group and then the poor group, and records both
+groups' results in the store as one run:
+
+```
+greenshift run nextest --commit "$(git rev-parse HEAD)" -- --no-fail-fast
+```
+
+- **List.** `cargo nextest list --message-format json` gives the tests:
+  each listed binary's testcases that its filters select. A test's suite
+  is its binary id and its name the test's name, as in nextest's JUnit.
+- **Plan.** The tests are split into rich and poor as `plan` splits an
+  inventory, with `select`'s options. Only runs from `--source` are read
+  (default `nextest`), and the run is recorded as from it. A missing
+  store is created empty, so every test is rich and stderr says
+  `no history: run the full suite`. A store that cannot be read is named
+  on stderr, followed by `greenshift: running every test as rich`, and
+  every test is rich.
+- **Run.** Each group runs as `cargo nextest run -E <filterset>`, the
+  filterset naming the group's tests one by one, rich first. The poor
+  group runs whether or not the rich group failed. An empty group does
+  not run; with no test in either, the rich group runs with `none()`, so
+  nextest's `--no-tests` decides the outcome, and nothing is recorded.
+- **Batches.** A group whose filterset is longer than
+  `--max-filterset-bytes` (default 100,000) runs as several
+  `cargo nextest run`s, each naming the next tests in the group's order
+  that fit. Every one of them runs, whether or not one before it
+  failed. A single test whose term is longer still runs alone. The
+  default keeps each `-E` under Linux's 131,072-byte limit on one
+  argument (see **Size** under Nextest filter).
+- **JUnit.** Each `cargo nextest run` writes JUnit to a file of its own
+  in a scratch directory that greenshift removes at the end. greenshift
+  sets the file in a tool config file (`--tool-config-file`), which
+  nextest ranks below `.config/nextest.toml`. The runs use the profile
+  `greenshift`, which inherits the repository's `default` profile; a
+  `--profile` among NEXTEST_ARGS is used instead, and then works only if
+  `.config/nextest.toml` does not set that profile's `junit.path`.
+- **Record.** Every JUnit file written is ingested as one run, as
+  `ingest` records it, with `--commit` if given. When a run wrote no
+  JUnit, the files that exist are recorded as a partial run, and stderr
+  names each missing file. When none exist, nothing is recorded. A
+  failure to record is named on stderr and does not change the exit
+  status.
+- **NEXTEST_ARGS**, after `--`, go to `cargo nextest run`, after
+  greenshift's own arguments. They go to `cargo nextest list` as well,
+  except runner and reporter options that only `run` takes (such as
+  `--no-fail-fast`, `-j` and `--retries`). Options that choose tests,
+  `-E` and `--partition`, go to `list` only: the listing applies them,
+  and a second `-E` on `run` would add the tests it matches to the
+  group's. Test name filters and everything after a further `--` go to
+  both.
+
+Exit status:
+
+- The exit status of the first `cargo nextest run` that failed, in the
+  order they ran, or 0 when every one succeeded. One that could not start
+  counts as 1, and one a signal ended as 128 plus the signal.
+- The exit status of `cargo nextest list` when it fails, with nothing run
+  or recorded.
+- 1 for an error before any test runs, such as listing output that
+  greenshift cannot read; 2 for a usage error.
 
 ## Building
 
