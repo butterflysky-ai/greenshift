@@ -345,7 +345,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
         let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
         cases.extend(report.cases);
     }
-    let git_ref = run_ref(args.branch.as_deref(), args.tag.as_deref(), |var| {
+    let git_ref = resolve_git_ref(args.branch.as_deref(), args.tag.as_deref(), |var| {
         std::env::var_os(var)
     });
     let mut store = Store::open(&args.db)?;
@@ -395,7 +395,7 @@ const GITHUB_REF_TYPE: &str = "GITHUB_REF_TYPE";
 pub const CI_REF_VARS: [&str; 3] = [GITHUB_HEAD_REF, GITHUB_REF_NAME, GITHUB_REF_TYPE];
 
 /// What a run's tests ran on.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 enum GitRef {
     Branch(String),
     Tag(String),
@@ -423,7 +423,7 @@ impl GitRef {
 /// otherwise the branch is `GITHUB_HEAD_REF`, else `GITHUB_REF_NAME`. An
 /// empty variable counts as unset, and a value that is not UTF-8 is still
 /// recorded, with U+FFFD for each invalid sequence.
-fn run_ref(
+fn resolve_git_ref(
     branch: Option<&str>,
     tag: Option<&str>,
     env: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -704,12 +704,12 @@ mod tests {
         }
     }
 
-    /// The branch [`run_ref`] finds with no tag flag; panics on a tag.
+    /// The branch [`resolve_git_ref`] finds with no tag flag; panics on a tag.
     fn run_branch(
         flag: Option<&str>,
         env: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Option<String> {
-        run_ref(flag, None, env).map(|found| match found {
+        resolve_git_ref(flag, None, env).map(|found| match found {
             GitRef::Branch(name) => name,
             GitRef::Tag(name) => panic!("a tag, {name:?}, not a branch"),
         })
@@ -724,17 +724,32 @@ mod tests {
         ];
         let tag = |name: &str| Some(GitRef::Tag(name.to_owned()));
         let branch = |name: &str| Some(GitRef::Branch(name.to_owned()));
-        assert_eq!(run_ref(None, None, env_of(&tag_push)), tag("v1.2.0"));
-        assert_eq!(run_ref(Some("x"), None, env_of(&tag_push)), branch("x"));
-        assert_eq!(run_ref(None, Some("v9"), env_of(&tag_push)), tag("v9"));
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&tag_push)),
+            tag("v1.2.0")
+        );
+        assert_eq!(
+            resolve_git_ref(Some("x"), None, env_of(&tag_push)),
+            branch("x")
+        );
+        assert_eq!(
+            resolve_git_ref(None, Some("v9"), env_of(&tag_push)),
+            tag("v9")
+        );
         let empty_tag = [("GITHUB_REF_NAME", ""), ("GITHUB_REF_TYPE", "tag")];
-        assert_eq!(run_ref(None, None, env_of(&empty_tag)), None);
+        assert_eq!(resolve_git_ref(None, None, env_of(&empty_tag)), None);
         let branch_push = [("GITHUB_REF_NAME", "main"), ("GITHUB_REF_TYPE", "branch")];
-        assert_eq!(run_ref(None, None, env_of(&branch_push)), branch("main"));
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&branch_push)),
+            branch("main")
+        );
         // An unrecognized GITHUB_REF_TYPE is not "tag", so it falls through
         // to the branch precedence chain exactly as an unset one does.
         let unknown_type = [("GITHUB_REF_NAME", "main"), ("GITHUB_REF_TYPE", "unknown")];
-        assert_eq!(run_ref(None, None, env_of(&unknown_type)), branch("main"));
+        assert_eq!(
+            resolve_git_ref(None, None, env_of(&unknown_type)),
+            branch("main")
+        );
     }
 
     #[test]
