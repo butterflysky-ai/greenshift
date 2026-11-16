@@ -1,0 +1,326 @@
+//! Runs `greenshift run nextest` on a scratch project with real
+//! cargo-nextest, and checks what it ran and recorded. Needs
+//! cargo-nextest installed.
+
+use std::path::PathBuf;
+use std::process::Output;
+
+use assert_cmd::Command;
+use rusqlite::Connection;
+
+const PACKAGE: &str = "run-me";
+
+/// The tests of the `one` binary, and of the `two` binary.
+const ONE: &[&str] = &["alpha", "beta (b), c", "gamma"];
+const TWO: &[&str] = &["delta", "epsilon"];
+
+/// A test binary that lists `names` and fails a test when `FAIL` has a
+/// line naming it.
+fn harness(names: &[&str]) -> String {
+    format!(
+        r#"const NAMES: &[&str] = &{names:?};
+
+fn main() {{
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--list") {{
+        if !args.iter().any(|a| a == "--ignored") {{
+            for name in NAMES {{
+                println!("{{name}}: test");
+            }}
+        }}
+        return;
+    }}
+    let name = args.iter().find(|a| !a.starts_with("--")).expect("a test name");
+    let fail = std::env::var("FAIL").unwrap_or_default();
+    if fail.lines().any(|line| line == name) {{
+        eprintln!("failing {{name}} as asked");
+        std::process::exit(101);
+    }}
+}}
+"#
+    )
+}
+
+struct Project {
+    dir: tempfile::TempDir,
+    db: PathBuf,
+}
+
+/// One stored run: its source, commit, whether it is partial, how many
+/// JUnit files it came from, and its results as `(binary, name,
+/// outcome)`, sorted.
+#[derive(Debug, PartialEq)]
+struct Run {
+    source: String,
+    commit: Option<String>,
+    partial: bool,
+    files: usize,
+    results: Vec<(String, String, String)>,
+}
+
+impl Project {
+    fn new() -> Project {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".config")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        std::fs::write(root.join("tests/one.rs"), harness(ONE)).unwrap();
+        std::fs::write(root.join("tests/two.rs"), harness(TWO)).unwrap();
+        let mut manifest = format!(
+            "[package]\nname = \"{PACKAGE}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             publish = false\nautotests = false\n\n[workspace]\n\n\
+             [lib]\ntest = false\ndoctest = false\n"
+        );
+        for binary in ["one", "two"] {
+            manifest.push_str(&format!(
+                "\n[[test]]\nname = \"{binary}\"\nharness = false\n"
+            ));
+        }
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        // greenshift's own nextest config: it sets the default profile's
+        // JUnit path, which run's profile must not take.
+        std::fs::write(
+            root.join(".config/nextest.toml"),
+            include_str!("../.config/nextest.toml"),
+        )
+        .unwrap();
+        let db = dir.path().join("history.sqlite");
+        Project { dir, db }
+    }
+
+    fn root(&self) -> PathBuf {
+        self.dir.path().join("project")
+    }
+
+    /// `greenshift run nextest <args>` in the project, failing the tests
+    /// `fail` names, without the environment of the nextest or cargo run
+    /// this test is part of.
+    fn run(&self, args: &[&str], fail: &[&str]) -> Output {
+        let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
+        for (key, _) in std::env::vars_os() {
+            let key = key.to_string_lossy().into_owned();
+            let inherited =
+                key.starts_with("NEXTEST_") || (key.starts_with("CARGO_") && key != "CARGO_HOME");
+            if inherited {
+                cmd.env_remove(&key);
+            }
+        }
+        let fail: String = fail.iter().map(|name| format!("{name}\n")).collect();
+        cmd.current_dir(self.root())
+            .env("FAIL", fail)
+            .args(["run", "nextest", "--db"])
+            .arg(&self.db)
+            .args(args)
+            .output()
+            .expect("greenshift runs")
+    }
+
+    /// Every stored run, oldest first.
+    fn runs(&self) -> Vec<Run> {
+        let conn = Connection::open(&self.db).unwrap();
+        let mut runs = conn
+            .prepare(
+                "SELECT id, source, commit_sha, partial, \
+                 (SELECT count(*) FROM run_files f WHERE f.run_id = runs.id) \
+                 FROM runs ORDER BY id",
+            )
+            .unwrap();
+        let runs: Vec<(i64, Run)> = runs
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    Run {
+                        source: row.get(1)?,
+                        commit: row.get(2)?,
+                        partial: row.get::<_, i64>(3)? == 1,
+                        files: row.get::<_, i64>(4)? as usize,
+                        results: Vec::new(),
+                    },
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let prefix = format!("{PACKAGE}::");
+        runs.into_iter()
+            .map(|(id, mut run)| {
+                let mut results = conn
+                    .prepare(
+                        "SELECT t.suite, t.name, r.outcome FROM results r \
+                         JOIN tests t ON t.id = r.test_id WHERE r.run_id = ?1 \
+                         ORDER BY t.suite, t.name",
+                    )
+                    .unwrap();
+                run.results = results
+                    .query_map([id], |row| {
+                        let suite: String = row.get(0)?;
+                        Ok((
+                            suite.strip_prefix(&prefix).unwrap_or(&suite).to_owned(),
+                            row.get(1)?,
+                            row.get(2)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                run
+            })
+            .collect()
+    }
+}
+
+/// Every test, as stored, with `failed` failed and the rest passed.
+fn every_test(failed: &[&str]) -> Vec<(String, String, String)> {
+    let mut tests: Vec<(String, String, String)> = [("one", ONE), ("two", TWO)]
+        .iter()
+        .flat_map(|(binary, names)| {
+            names.iter().map(move |name| {
+                let outcome = if failed.contains(name) {
+                    "failed"
+                } else {
+                    "passed"
+                };
+                (binary.to_string(), name.to_string(), outcome.to_owned())
+            })
+        })
+        .collect();
+    tests.sort();
+    tests
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn a_fresh_store_runs_every_test_and_records_one_run() {
+    let p = Project::new();
+    let out = p.run(&["--commit", "ABCDEF1", "--", "--no-fail-fast"], &["gamma"]);
+    // nextest's own exit status for failing tests.
+    assert_eq!(out.status.code(), Some(100), "{}", stderr(&out));
+    assert!(stderr(&out).contains("no history: run the full suite"));
+    assert_eq!(
+        p.runs(),
+        [Run {
+            source: "nextest".to_owned(),
+            commit: Some("abcdef1".to_owned()),
+            partial: false,
+            // Every test is rich, so there is no poor run.
+            files: 1,
+            results: every_test(&["gamma"]),
+        }]
+    );
+}
+
+#[test]
+fn rich_and_poor_both_run_and_are_recorded_as_one_run() {
+    let p = Project::new();
+    // A history in which only beta's failure is on record: beta is rich,
+    // the rest poor.
+    let args = ["--min-runs", "1", "--", "--no-fail-fast"];
+    let first = p.run(&args, &["beta (b), c"]);
+    assert_eq!(first.status.code(), Some(100), "{}", stderr(&first));
+    let green = p.run(&args, &[]);
+    assert!(green.status.success(), "{}", stderr(&green));
+    // A failure in the poor group: the rich group passes, the poor one
+    // still runs, and greenshift exits with its status.
+    let out = p.run(&args, &["delta"]);
+    assert_eq!(out.status.code(), Some(100), "{}", stderr(&out));
+    let runs = p.runs();
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[1].files, 2, "rich and poor ran");
+    assert_eq!(runs[1].results, every_test(&[]));
+    assert_eq!(runs[2].files, 2);
+    assert!(!runs[2].partial);
+    assert_eq!(runs[2].results, every_test(&["delta"]));
+}
+
+#[test]
+fn the_poor_group_runs_after_the_rich_group_fails() {
+    let p = Project::new();
+    // As above: beta is rich, the rest poor.
+    let args = ["--min-runs", "1", "--", "--no-fail-fast"];
+    let first = p.run(&args, &["beta (b), c"]);
+    assert_eq!(first.status.code(), Some(100), "{}", stderr(&first));
+    let green = p.run(&args, &[]);
+    assert!(green.status.success(), "{}", stderr(&green));
+    // The rich group fails, under nextest's default fail-fast; the poor
+    // group still runs, and both are recorded.
+    let out = p.run(&["--min-runs", "1"], &["beta (b), c"]);
+    assert_eq!(out.status.code(), Some(100), "{}", stderr(&out));
+    let runs = p.runs();
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[2].files, 2, "rich and poor ran");
+    assert!(!runs[2].partial);
+    assert_eq!(runs[2].results, every_test(&["beta (b), c"]));
+}
+
+#[test]
+fn a_long_filterset_is_split_over_several_runs() {
+    let p = Project::new();
+    // Each test's term is over 40 bytes, so each runs alone.
+    let out = p.run(&["--max-filterset-bytes", "40"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let runs = p.runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].files, ONE.len() + TWO.len());
+    assert!(!runs[0].partial);
+    assert_eq!(runs[0].results, every_test(&[]));
+}
+
+#[test]
+fn a_filterset_passed_on_chooses_the_tests() {
+    let p = Project::new();
+    // One run per test, each running only the test it names: the
+    // filterset passed on chose them, and a run given it as well would
+    // run both.
+    let args = [
+        "--max-filterset-bytes",
+        "40",
+        "--",
+        "-E",
+        "test(/^(alpha|delta)$/)",
+    ];
+    let out = p.run(&args, &[]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(err.matches(" 1 test run: 1 passed").count(), 2, "{err}");
+    let runs = p.runs();
+    assert_eq!(runs[0].files, 2);
+    let names: Vec<&str> = runs[0]
+        .results
+        .iter()
+        .map(|(_, name, _)| name.as_str())
+        .collect();
+    assert_eq!(names, ["alpha", "delta"]);
+}
+
+#[test]
+fn a_store_that_cannot_be_read_still_runs_every_test() {
+    let p = Project::new();
+    std::fs::write(&p.db, "not a greenshift store, nor SQLite at all").unwrap();
+    let out = p.run(&["--", "--no-fail-fast"], &["epsilon"]);
+    let err = stderr(&out);
+    // The tests' status, not the store's.
+    assert_eq!(out.status.code(), Some(100), "{err}");
+    assert!(err.contains("greenshift: error: history store"), "{err}");
+    assert!(
+        err.contains("greenshift: running every test as rich"),
+        "{err}"
+    );
+    assert!(err.contains("5 tests run: 4 passed, 1 failed"), "{err}");
+    assert_eq!(
+        std::fs::read(&p.db).unwrap(),
+        b"not a greenshift store, nor SQLite at all"
+    );
+}
+
+#[test]
+fn a_listing_that_fails_ends_the_run_with_its_status() {
+    let p = Project::new();
+    let out = p.run(&["--", "--no-such-option"], &[]);
+    assert!(!out.status.success());
+    assert!(!p.db.exists(), "nothing was recorded");
+}
