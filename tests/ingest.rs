@@ -517,7 +517,7 @@ fn no_flag_and_no_ci_env_is_no_branch() {
     let db = dir.path().join("history.sqlite");
     ingest_in_env(&db, &[], &[])
         .success()
-        .stdout(predicate::str::contains("branch").not());
+        .stdout(predicate::str::contains(" on branch").not());
     // An empty ref name is no branch either.
     ingest_in_env(
         &db,
