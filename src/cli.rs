@@ -379,13 +379,20 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// On a pull request, GitHub Actions sets this to the PR's branch.
+const GITHUB_HEAD_REF: &str = "GITHUB_HEAD_REF";
+/// The branch or tag pushed, or a pull request's merge ref (`7/merge`).
+const GITHUB_REF_NAME: &str = "GITHUB_REF_NAME";
+/// `branch` or `tag`, saying what [`GITHUB_REF_NAME`] names.
+const GITHUB_REF_TYPE: &str = "GITHUB_REF_TYPE";
+
 /// The CI variables `ingest` reads a branch or tag from. On a pull
 /// request, GitHub Actions sets `GITHUB_HEAD_REF` to the PR's branch and
 /// `GITHUB_REF_NAME` to its merge ref (`7/merge`); otherwise only
 /// `GITHUB_REF_NAME`, to the branch or tag pushed, which
 /// `GITHUB_REF_TYPE` says (`branch` or `tag`). Forgejo and Gitea Actions
 /// set the same variables.
-pub const CI_REF_VARS: [&str; 3] = ["GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_REF_TYPE"];
+pub const CI_REF_VARS: [&str; 3] = [GITHUB_HEAD_REF, GITHUB_REF_NAME, GITHUB_REF_TYPE];
 
 /// What a run's tests ran on.
 #[derive(Debug, PartialEq)]
@@ -432,11 +439,11 @@ fn run_ref(
             .filter(|value| !value.is_empty())
             .map(|value| value.to_string_lossy().into_owned())
     };
-    if env("GITHUB_REF_TYPE").is_some_and(|kind| kind == "tag") {
-        return var("GITHUB_REF_NAME").map(GitRef::Tag);
+    if env(GITHUB_REF_TYPE).is_some_and(|kind| kind == "tag") {
+        return var(GITHUB_REF_NAME).map(GitRef::Tag);
     }
-    var("GITHUB_HEAD_REF")
-        .or_else(|| var("GITHUB_REF_NAME"))
+    var(GITHUB_HEAD_REF)
+        .or_else(|| var(GITHUB_REF_NAME))
         .map(GitRef::Branch)
 }
 
@@ -723,6 +730,10 @@ mod tests {
         assert_eq!(run_ref(None, None, env_of(&empty_tag)), None);
         let branch_push = [("GITHUB_REF_NAME", "main"), ("GITHUB_REF_TYPE", "branch")];
         assert_eq!(run_ref(None, None, env_of(&branch_push)), branch("main"));
+        // An unrecognized GITHUB_REF_TYPE is not "tag", so it falls through
+        // to the branch precedence chain exactly as an unset one does.
+        let unknown_type = [("GITHUB_REF_NAME", "main"), ("GITHUB_REF_TYPE", "unknown")];
+        assert_eq!(run_ref(None, None, env_of(&unknown_type)), branch("main"));
     }
 
     #[test]
