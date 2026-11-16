@@ -90,6 +90,30 @@ fn a_db_path_from_argv_is_shown_escaped_on_success() {
 
 #[cfg(unix)]
 #[test]
+fn a_branch_from_argv_or_the_ci_env_is_shown_escaped() {
+    for (flag, env) in [(&["--branch", EVIL][..], None), (&[][..], Some(EVIL))] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = greenshift();
+        if let Some(value) = env {
+            cmd.env("GITHUB_HEAD_REF", value);
+        }
+        let out = cmd
+            .arg("ingest")
+            .arg("--db")
+            .arg(dir.path().join("history.sqlite"))
+            .args(flag)
+            .arg(fixture("nextest.xml"))
+            .assert()
+            .success();
+        shows_escaped(
+            &out.get_output().stdout,
+            &format!(" on branch {EVIL_SHOWN}\n"),
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_db_path_from_argv_is_shown_escaped_in_store_errors() {
     let dir = tempfile::tempdir().unwrap();
     // A regular file where the store's directory would go.
