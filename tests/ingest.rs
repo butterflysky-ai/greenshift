@@ -69,7 +69,7 @@ fn both_producers_in_one_invocation_make_one_run() {
     assert_eq!(commit.as_deref(), Some("0123abcd"));
     assert_eq!(source, "ci");
     assert!(!partial);
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     let recorded: Vec<Vec<u8>> = conn
         .prepare("SELECT path FROM run_files ORDER BY position")
         .unwrap()

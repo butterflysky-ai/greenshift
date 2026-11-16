@@ -330,6 +330,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
             source: &args.source,
             files: &args.files,
             partial: args.partial,
+            branch: None,
         },
         &cases,
     )?;
