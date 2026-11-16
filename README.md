@@ -365,9 +365,9 @@ greenshift run nextest --commit "$(git rev-parse HEAD)" -- --no-fail-fast
   `ingest` records it, with `--commit` if given, and the branch or tag
   as `ingest` finds it: `--branch` or `--tag`, else the CI environment.
   When a run wrote no JUnit, the files that exist are recorded as a
-  partial run, and stderr names each missing file. When none exist, nothing is recorded. A
-  failure to record is named on stderr and does not change the exit
-  status.
+  partial run, and stderr names each missing file. When none exist,
+  nothing is recorded. A failure to record is named on stderr and does
+  not change the exit status.
 - **NEXTEST_ARGS**, after `--`, go to `cargo nextest run`, after
   greenshift's own arguments. They go to `cargo nextest list` as well,
   except runner and reporter options that only `run` takes (such as
