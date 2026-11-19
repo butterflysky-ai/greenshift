@@ -96,20 +96,28 @@ jobs:
           printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/greenshift" | sha256sum --check
           chmod +x "$RUNNER_TEMP/greenshift"
       - name: Download SQLite data
+        id: artifact
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: greenshift-history
           path: data
       - name: Validate, merge and publish
         id: save
+        if: ${{ steps.artifact.outcome == 'success' }}
         env:
           GREENSHIFT_HISTORY_TOKEN: ${{ github.token }}
         run: |
           oid=$("$RUNNER_TEMP/greenshift" history publish --remote "$HISTORY_REMOTE" \
             --db data/publish.sqlite --cache-dir .greenshift/cache --default-branch "$DEFAULT_BRANCH")
-          echo "key=greenshift-history-$oid" >> "$GITHUB_OUTPUT"
+          if [[ "$oid" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            echo "key=greenshift-history-$oid" >> "$GITHUB_OUTPUT"
+          else
+            echo '::warning::⚠ History was not published; no cache copy will be saved'
+          fi
       - name: Save fast copy
         id: cache
+        if: ${{ steps.save.outputs.key != '' }}
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -118,3 +126,6 @@ jobs:
       - name: Report cache degradation
         if: ${{ !cancelled() && steps.cache.outcome == 'failure' }}
         run: echo '::warning::⚠ History cache save failed; durable ref was published independently'
+      - name: Report missing history artifact
+        if: ${{ !cancelled() && steps.artifact.outcome == 'failure' }}
+        run: echo '::warning::⚠ No history artifact available; keeping the canonical ref unchanged'

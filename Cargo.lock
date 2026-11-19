@@ -321,6 +321,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "flate2",
+ "libc",
  "predicates",
  "quick-xml",
  "rusqlite",

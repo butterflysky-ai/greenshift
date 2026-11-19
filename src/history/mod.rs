@@ -4,10 +4,12 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use secrecy::{ExposeSecret, SecretString};
+#[cfg(unix)]
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 use tempfile::TempDir;
 
 use crate::tainted::Tainted;
@@ -33,24 +35,50 @@ pub struct Remote {
     scratch: TempDir,
     url: String,
     token: Option<SecretString>,
+    timeout: Duration,
+}
+
+// A git operation owns the entire helper process group, not just its immediate
+// process. Early errors and timeout must not leave network transports running.
+struct GitChild {
+    child: Child,
+    complete: bool,
+}
+
+impl Drop for GitChild {
+    fn drop(&mut self) {
+        if !self.complete {
+            #[cfg(unix)]
+            {
+                // SAFETY: this child was spawned in its own process group; the
+                // negative pid addresses that group, never our caller's group.
+                unsafe {
+                    libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 impl Remote {
-    /// HTTP(S), SSH, and local git remotes are supported. Tokens are optional,
+    /// HTTPS, unauthenticated HTTP, and local git remotes are supported. Tokens are optional,
     /// supplied only through GREENSHIFT_HISTORY_TOKEN, never command arguments.
     pub fn new(url: &str) -> Result<Self, HistoryError> {
         if url.is_empty() || url.starts_with('-') || url.chars().any(char::is_control) {
             return Err(error("invalid history remote"));
         }
         if url.contains("://")
-            && !["https://", "http://", "ssh://", "file://"]
+            && !["https://", "http://", "file://"]
                 .iter()
                 .any(|prefix| url.starts_with(prefix))
         {
             return Err(error("unsupported history remote protocol"));
         }
         if !url.contains("://") && url.contains(':') {
-            return Err(error("use an explicit ssh:// URL for SSH history remotes"));
+            return Err(error("unsupported history remote syntax"));
         }
         // URL-embedded credentials would reach git diagnostics. Require the
         // dedicated secret environment variable instead.
@@ -64,13 +92,26 @@ impl Remote {
                 return Err(error("history remote must not embed credentials"));
             }
         }
+        let token = std::env::var("GREENSHIFT_HISTORY_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(SecretString::from);
+        if token.is_some() && url.starts_with("http://") {
+            return Err(error("history token authentication requires HTTPS"));
+        }
+        let url = if !url.contains("://") {
+            fs::canonicalize(url)
+                .map_err(error)?
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            url.to_owned()
+        };
         let remote = Self {
             scratch: tempfile::tempdir().map_err(error)?,
-            url: url.to_owned(),
-            token: std::env::var("GREENSHIFT_HISTORY_TOKEN")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(SecretString::from),
+            url,
+            token,
+            timeout: TIMEOUT,
         };
         remote.git(["init", "--bare", "."], None)?;
         Ok(remote)
@@ -84,6 +125,11 @@ impl Remote {
         let stdout = tempfile::tempfile().map_err(error)?;
         let stderr = tempfile::tempfile().map_err(error)?;
         let mut cmd = Command::new("git");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
         // Git's inherited configuration can run hooks, redirect object stores,
         // or install remote helpers. Only the isolated transport owns its state.
         for (key, _) in std::env::vars_os() {
@@ -105,49 +151,59 @@ impl Remote {
                 "core.hooksPath=/dev/null",
                 "-c",
                 "protocol.ext.allow=never",
+                "-c",
+                "http.followRedirects=false",
             ])
             .args(args)
             .stdin(Stdio::piped())
             .stdout(stdout.try_clone().map_err(error)?)
             .stderr(stderr.try_clone().map_err(error)?);
         if let Some(token) = &self.token {
-            use std::os::unix::fs::PermissionsExt;
-            let askpass = self.scratch.path().join("askpass");
-            fs::write(&askpass, "#!/bin/sh\ncase \"$1\" in *Username*) echo x-access-token;; *) printf '%s' \"$GREENSHIFT_HISTORY_TOKEN\";; esac\n").map_err(error)?;
-            fs::set_permissions(&askpass, fs::Permissions::from_mode(0o700)).map_err(error)?;
-            cmd.env("GIT_ASKPASS", askpass)
-                .env("GREENSHIFT_HISTORY_TOKEN", token.expose_secret());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let askpass = self.scratch.path().join("askpass");
+                fs::write(&askpass, "#!/bin/sh\ncase \"$1\" in *Username*) echo x-access-token;; *) printf '%s' \"$GREENSHIFT_HISTORY_TOKEN\";; esac\n").map_err(error)?;
+                fs::set_permissions(&askpass, fs::Permissions::from_mode(0o700)).map_err(error)?;
+                cmd.env("GIT_ASKPASS", askpass)
+                    .env("GREENSHIFT_HISTORY_TOKEN", token.expose_secret());
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = token;
+                return Err(error(
+                    "history token authentication is not supported on this platform",
+                ));
+            }
         }
-        let mut child = cmd.spawn().map_err(error)?;
+        let mut process = GitChild {
+            child: cmd.spawn().map_err(error)?,
+            complete: false,
+        };
         if let Some(data) = input {
-            if let Err(err) = child
+            if let Err(err) = process
+                .child
                 .stdin
                 .take()
                 .ok_or_else(|| error("git stdin missing"))?
                 .write_all(data)
             {
-                let _ = child.kill();
-                let _ = child.wait();
                 return Err(error(err));
             }
         } else {
-            drop(child.stdin.take());
+            drop(process.child.stdin.take());
         }
         let started = Instant::now();
         let status = loop {
-            if let Some(status) = child.try_wait().map_err(error)? {
+            if let Some(status) = process.child.try_wait().map_err(error)? {
                 break status;
             }
-            if started.elapsed() > TIMEOUT {
-                let _ = child.kill();
-                let _ = child.wait();
+            if started.elapsed() > self.timeout {
                 return Err(error("git operation timed out"));
             }
             if stdout.metadata().map_err(error)?.len() > snapshot::MAX_DB_BYTES
                 || stderr.metadata().map_err(error)?.len() > 1024 * 1024
             {
-                let _ = child.kill();
-                let _ = child.wait();
                 return Err(error("git output exceeds size limit"));
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -156,6 +212,7 @@ impl Remote {
             // Never echo git diagnostics: a remote can reflect credentials.
             return Err(error(format!("git operation failed ({status})")));
         }
+        process.complete = true;
         if stdout.metadata().map_err(error)?.len() > snapshot::MAX_DB_BYTES {
             return Err(error("git output exceeds history size limit"));
         }
@@ -240,6 +297,7 @@ impl Remote {
     /// Restore canonical history, optionally using the exact immutable cache
     /// copy. A missing ref does not treat an arbitrary cached DB as canonical.
     pub fn restore(&self, db: &Path, cache: Option<&Path>) -> Result<bool, HistoryError> {
+        check_restore_destination(db)?;
         let Some(oid) = self.head()? else {
             return Ok(false);
         };
@@ -253,6 +311,7 @@ impl Remote {
         if !hit {
             self.read(&oid, stage.path())?;
         }
+        check_restore_destination(db)?;
         stage.persist(db).map_err(error)?;
         Ok(true)
     }
@@ -314,13 +373,55 @@ fn valid_oid(oid: &str) -> bool {
 }
 
 fn bounded_read(path: &Path, cap: u64) -> Result<Vec<u8>, HistoryError> {
-    let file = File::open(path).map_err(error)?;
+    // Reject symlinks and special files before opening, then verify the opened
+    // handle too. O_NONBLOCK closes the FIFO race between those two checks.
+    if !fs::symlink_metadata(path).map_err(error)?.is_file() {
+        return Err(error("cached history must be a regular file"));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(error)?;
+    if !file.metadata().map_err(error)?.is_file() {
+        return Err(error("cached history must be a regular file"));
+    }
     let mut bytes = Vec::new();
     file.take(cap + 1).read_to_end(&mut bytes).map_err(error)?;
     if bytes.len() as u64 > cap {
         return Err(error("cached history exceeds size limit"));
     }
     Ok(bytes)
+}
+
+fn check_restore_destination(path: &Path) -> Result<(), HistoryError> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        match fs::symlink_metadata(Path::new(&sidecar)) {
+            Ok(_) => {
+                return Err(error(
+                    "history destination has SQLite sidecars; close other connections first",
+                ))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+            Err(err) => return Err(error(err)),
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            crate::store::Store::open_read_only(path).map_err(error)?;
+            Ok(())
+        }
+        Ok(_) => Err(error(
+            "history destination must be a regular greenshift database",
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(error(err)),
+    }
 }
 
 fn compress(path: &Path) -> Result<Vec<u8>, HistoryError> {
@@ -339,4 +440,56 @@ fn decompress(bytes: &[u8], path: &Path) -> Result<(), HistoryError> {
         return Err(error("decompressed snapshot exceeds size limit"));
     }
     output.sync_all().map_err(error)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_git_timeout_terminates_transport_helper_group() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/history.git", listener.local_addr().unwrap());
+        let mut remote = Remote::new(&url).unwrap();
+        remote.timeout = Duration::from_millis(150);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let (stream, _) = listener.accept().unwrap();
+                // A stalled peer outlives the operation timeout.
+                std::thread::sleep(Duration::from_millis(400));
+                drop(stream);
+            });
+            let result = remote.head();
+            assert!(result.unwrap_err().to_string().contains("timed out"));
+            // Directly inspect the OS reader, not merely git's parent status.
+            // A killed orphan may remain briefly as an empty-cmdline zombie.
+            let deadline = Instant::now() + Duration::from_millis(150);
+            loop {
+                let alive = fs::read_dir("/proc")
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .bytes()
+                            .all(|b| b.is_ascii_digit())
+                            && fs::read(entry.path().join("cmdline"))
+                                .ok()
+                                .is_some_and(|bytes| {
+                                    bytes.windows(url.len()).any(|part| part == url.as_bytes())
+                                })
+                    });
+                if !alive {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "git transport helper survived timeout"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+    }
 }

@@ -84,11 +84,45 @@ fn schema(conn: &Connection) -> Result<Vec<SchemaObject>, SnapshotError> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+fn check_sidecars(path: &Path) -> Result<(), SnapshotError> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        match std::fs::symlink_metadata(Path::new(&sidecar)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                return Err(invalid(
+                    "snapshot must be standalone: SQLite sidecar exists",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_output(path: &Path) -> Result<(), SnapshotError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.is_file() => (),
+        Ok(_) => {
+            return Err(invalid(
+                "snapshot destination must be a regular non-symlink file",
+            ))
+        }
+    }
+    // Never remove sidecars: they may belong to a live database. Replacing only
+    // its main inode would leave another reader observing the previous WAL.
+    check_sidecars(path)
+}
+
 fn open_checked(path: &Path) -> Result<Connection, SnapshotError> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.len() > MAX_DB_BYTES {
         return Err(invalid("expected a regular SQLite file at most 256 MiB"));
     }
+    check_sidecars(path)?;
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -289,6 +323,7 @@ pub fn validate(path: &Path) -> Result<(), SnapshotError> {
 }
 
 fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
+    check_output(output)?;
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -334,6 +369,7 @@ fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
     drop(conn);
     validate(temporary.path())?;
     temporary.as_file().sync_all()?;
+    check_output(output)?;
     temporary
         .persist(output)
         .map_err(|error| SnapshotError::Io(error.error))?;
@@ -642,5 +678,100 @@ mod tests {
         snapshot(&input, &output).unwrap();
         let store = Store::open_read_only(&output).unwrap().unwrap();
         assert!(store.history(&[]).unwrap().runs.is_empty());
+    }
+
+    #[test]
+    fn test_validate_valid_live_wal_input_rejected_without_touching_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input");
+        fixture(&path, "source");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; UPDATE runs SET source='live-wal';")
+            .unwrap();
+        let wal = dir.path().join("input-wal");
+        let before = std::fs::read(&wal).unwrap();
+        assert!(!before.is_empty());
+        assert!(matches!(
+            validate(&path),
+            Err(SnapshotError::Invalid(
+                "snapshot must be standalone: SQLite sidecar exists"
+            ))
+        ));
+        assert_eq!(std::fs::read(&wal).unwrap(), before);
+        assert_eq!(
+            conn.query_row("SELECT source FROM runs", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "live-wal"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_live_wal_output_rejected_preserving_visible_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        fixture(&input, "replacement");
+        fixture(&output, "original");
+        let conn = Connection::open(&output).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; UPDATE runs SET source='visible-original';")
+            .unwrap();
+        let before_db = std::fs::read(&output).unwrap();
+        let before_wal = std::fs::read(dir.path().join("output-wal")).unwrap();
+        assert!(snapshot(&input, &output).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), before_db);
+        assert_eq!(
+            std::fs::read(dir.path().join("output-wal")).unwrap(),
+            before_wal
+        );
+        let reader = Connection::open(&output).unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT source FROM runs", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "visible-original"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_snapshot_nonregular_inputs_and_outputs_rejected_before_sqlite_open() {
+        use std::os::unix::fs::{symlink, FileTypeExt};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let link = dir.path().join("link");
+        let socket = dir.path().join("socket");
+        fixture(&input, "source");
+        symlink(&input, &link).unwrap();
+        let _listener = UnixListener::bind(&socket).unwrap();
+        for path in [&link, &socket, dir.path()] {
+            assert!(matches!(validate(path), Err(SnapshotError::Invalid(_))));
+            assert!(snapshot(&input, path).is_err());
+        }
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket());
+    }
+
+    #[test]
+    fn test_snapshot_orphan_sidecars_are_never_unlinked() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        fixture(&input, "source");
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let sidecar = dir.path().join(format!("output{suffix}"));
+            std::fs::write(&sidecar, b"owned-by-another-writer").unwrap();
+            assert!(snapshot(&input, &output).is_err());
+            assert_eq!(std::fs::read(&sidecar).unwrap(), b"owned-by-another-writer");
+            assert!(!output.exists());
+            std::fs::remove_file(&sidecar).unwrap();
+        }
     }
 }

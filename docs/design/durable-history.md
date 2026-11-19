@@ -25,8 +25,11 @@ Storage errors emit `⚠` and preserve the test result. Explicit history command
 also warn and return zero on storage failure; successful publish prints the new
 commit identity, while a failed publish prints no identity.
 
-Authentication is supplied through `GREENSHIFT_HISTORY_TOKEN`. URL-embedded
-credentials and custom remote-helper protocols are refused. Git runs in its own
+On Unix, authentication is supplied through `GREENSHIFT_HISTORY_TOKEN` for HTTPS
+only; authenticated HTTP and redirects are refused. Unauthenticated HTTP and
+local paths/file URLs are also supported; SSH/custom helpers are not. Token
+authentication on other platforms reports unsupported without breaking local
+ingestion/selection. URL-embedded credentials are refused. Git runs in its own
 temporary bare repository, with inherited Git configuration removed, hooks
 disabled, no checkout, and bounded operation duration/output. Tokens do not enter
 command arguments or diagnostics.
@@ -47,6 +50,28 @@ is not installed by this change. A caller must choose a published release that
 contains these commands and pin its independently verified SHA-256. `init`
 generation, per-branch saves/fold-in, multi-invocation keys and cache-only mode are
 separate work.
+
+Reusable workflows cannot elevate their caller's permissions. A caller must
+grant `contents:write` to the calling job; the called **test** job explicitly
+downgrades its token to read-only. For example, after copying the reference:
+
+```yaml
+name: Tests
+on: [push, pull_request]
+jobs:
+  test-history:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/history.yml
+    with:
+      release: v0.1.0 # Replace with the chosen release containing history commands.
+      sha256: REPLACE_WITH_INDEPENDENTLY_VERIFIED_RELEASE_SHA256
+```
+
+These placeholders must be filled before installation; they do not claim an
+existing release already contains the feature. Fork PRs run tests only. Missing
+history artifacts warn and skip publication/cache save rather than fail an
+otherwise successful workflow.
 
 ## Publisher trust boundary
 
