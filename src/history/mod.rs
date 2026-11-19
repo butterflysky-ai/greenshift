@@ -450,17 +450,42 @@ mod tests {
     fn test_git_timeout_terminates_transport_helper_group() {
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/history.git", listener.local_addr().unwrap());
         let mut remote = Remote::new(&url).unwrap();
         remote.timeout = Duration::from_millis(150);
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                let (stream, _) = listener.accept().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(1);
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "git never connected to timeout fixture"
+                            );
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(err) => panic!("timeout fixture accept failed: {err}"),
+                    }
+                };
                 // A stalled peer outlives the operation timeout.
                 std::thread::sleep(Duration::from_millis(400));
                 drop(stream);
             });
-            let result = remote.head();
+            // The test's own peer must not be routed through inherited proxies.
+            let result = remote.git(
+                [
+                    "-c",
+                    "http.proxy=",
+                    "ls-remote",
+                    "--refs",
+                    &url,
+                    HISTORY_REF,
+                ],
+                None,
+            );
             assert!(result.unwrap_err().to_string().contains("timed out"));
             // Directly inspect the OS reader, not merely git's parent status.
             // A killed orphan may remain briefly as an empty-cmdline zombie.
