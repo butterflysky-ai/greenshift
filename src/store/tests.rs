@@ -75,7 +75,7 @@ fn row(suite: &str, name: &str, outcome: &str, ms: Option<i64>) -> Row {
 fn fresh_store_is_at_the_current_schema_version() {
     let store = Store::open_in_memory().unwrap();
     assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 3);
+    assert_eq!(SCHEMA_VERSION, 4);
 }
 
 #[test]
@@ -100,7 +100,8 @@ fn schema_has_runs_tests_and_results() {
             "ingested_at",
             "partial",
             "branch",
-            "tag"
+            "tag",
+            "history_id"
         ]
     );
     assert_eq!(
@@ -1178,7 +1179,7 @@ fn a_version_2_store_is_migrated_and_its_runs_have_no_branch() {
     let path = dir.path().join("history.sqlite");
     version_2_store(&path);
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
     assert_eq!(
         run_rows(&store),
         [

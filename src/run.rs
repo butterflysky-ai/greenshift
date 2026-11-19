@@ -71,6 +71,23 @@ pub trait Backend {
 
 /// Run the whole cycle with `backend`; see the module docs.
 pub fn run(backend: &dyn Backend, options: &RunOptions) -> anyhow::Result<ExitCode> {
+    let mut history_unavailable = false;
+    if let Some(url) = &options.history_remote {
+        let restored = crate::history::Remote::new(url).and_then(|remote| {
+            remote.restore(&options.select.db, options.history_cache_dir.as_deref())
+        });
+        match restored {
+            Ok(true) => {}
+            Ok(false) => {
+                history_unavailable = true;
+                eprintln!("greenshift: ⚠ no durable history; running without it");
+            }
+            Err(err) => {
+                history_unavailable = true;
+                eprintln!("greenshift: ⚠ {err}");
+            }
+        }
+    }
     // Removed when dropped, at the end of the run.
     let scratch = tempfile::Builder::new()
         .prefix("greenshift-run-")
@@ -82,7 +99,14 @@ pub fn run(backend: &dyn Backend, options: &RunOptions) -> anyhow::Result<ExitCo
         Listed::Tests(tests) => tests,
         Listed::Failed(code) => return Ok(ExitCode::from(code)),
     };
-    let (history, groups) = cli::plan_groups(&options.select, &tests)?;
+    let (history, groups) = if history_unavailable {
+        (
+            crate::plan::HistoryState::Error,
+            crate::plan::plan(&[], &tests),
+        )
+    } else {
+        cli::plan_groups(&options.select, &tests)?
+    };
     if history == crate::plan::HistoryState::Error {
         eprintln!("greenshift: running every test as rich");
     }
@@ -96,6 +120,11 @@ pub fn run(backend: &dyn Backend, options: &RunOptions) -> anyhow::Result<ExitCo
     } else {
         let junit: Vec<PathBuf> = invocations.into_iter().map(|inv| inv.junit).collect();
         record(options, backend.name(), &junit);
+    }
+    if let Some(path) = &options.history_artifact {
+        if let Err(err) = crate::history::snapshot::snapshot(&options.select.db, path) {
+            eprintln!("greenshift: ⚠ could not export history artifact: {err}");
+        }
     }
     Ok(ExitCode::from(combined(codes)))
 }

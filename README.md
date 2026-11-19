@@ -387,6 +387,14 @@ Exit status:
 - 1 for an error before any test runs, such as listing output that
   greenshift cannot read; 2 for a usage error.
 
+## Durable CI history
+
+Opt-in git-ref snapshots, stock cache integration and a separate trusted publisher
+are described in [durable history](docs/design/durable-history.md), including the
+GitHub workflow reference and the unresolved stock Forgejo token-isolation gate.
+`greenshift history --help` lists the storage commands. Existing local runs keep
+their current behavior unless `--history-remote` is supplied.
+
 ## Building
 
 ```

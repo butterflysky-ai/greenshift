@@ -37,6 +37,39 @@ pub enum Command {
     /// List the tests, run the rich and then the poor ones with a test
     /// runner, and record the results as one run.
     Run(RunArgs),
+    /// Restore or publish durable history, or print its immutable cache key.
+    History(HistoryArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryArgs {
+    #[command(subcommand)]
+    pub operation: HistoryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HistoryCommand {
+    /// Restore canonical history (a cache miss is harmless).
+    Restore(HistoryOptions),
+    /// Validate and publish a snapshot; run only in a fresh trusted job.
+    Publish(HistoryOptions),
+    /// Print the canonical ref identity for stock actions/cache.
+    CacheKey(HistoryOptions),
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryOptions {
+    /// Canonical repository URL. Credentials belong in GREENSHIFT_HISTORY_TOKEN.
+    #[arg(long)]
+    pub remote: String,
+    #[arg(long, default_value = store::DEFAULT_PATH)]
+    pub db: PathBuf,
+    /// Optional stock-action cache directory (not a cache service endpoint).
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
+    /// Required for CI publishing: the forge's configured default branch.
+    #[arg(long)]
+    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -73,6 +106,18 @@ pub struct RunOptions {
     #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new(),
           conflicts_with = "branch")]
     pub tag: Option<String>,
+
+    /// Restore durable history before listing tests (opt-in).
+    #[arg(long)]
+    pub history_remote: Option<String>,
+
+    /// Write a validated SQLite data artifact after recording, for a fresh publisher.
+    #[arg(long)]
+    pub history_artifact: Option<PathBuf>,
+
+    /// Optional directory restored by stock actions/cache.
+    #[arg(long)]
+    pub history_cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -328,7 +373,63 @@ pub fn run() -> anyhow::Result<ExitCode> {
         Command::Run(args) => match args.backend {
             Backend::Nextest(args) => run_nextest(&args),
         },
+        Command::History(args) => history(&args),
     }
+}
+
+fn history(args: &HistoryArgs) -> anyhow::Result<ExitCode> {
+    let options = match &args.operation {
+        HistoryCommand::Restore(options)
+        | HistoryCommand::Publish(options)
+        | HistoryCommand::CacheKey(options) => options,
+    };
+    let result = (|| -> anyhow::Result<()> {
+        let remote = crate::history::Remote::new(&options.remote)?;
+        match &args.operation {
+            HistoryCommand::Restore(_) => {
+                if !remote.restore(&options.db, options.cache_dir.as_deref())? {
+                    eprintln!("greenshift: ⚠ no durable history; running without it");
+                }
+            }
+            HistoryCommand::Publish(_) => {
+                // The workflow is the authorization boundary. Do not infer
+                // publish authority merely from possession of a token.
+                if std::env::var("GITHUB_EVENT_NAME")
+                    .is_ok_and(|event| event == "pull_request" || event == "pull_request_target")
+                {
+                    anyhow::bail!("publishing history from pull requests is refused");
+                }
+                if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+                    let branch = options
+                        .default_branch
+                        .as_deref()
+                        .context("CI publishing requires --default-branch")?;
+                    if std::env::var("GITHUB_EVENT_NAME").ok().as_deref() != Some("push")
+                        || std::env::var("GITHUB_REF").ok().as_deref()
+                            != Some(&format!("refs/heads/{branch}"))
+                    {
+                        anyhow::bail!("only default-branch pushes may publish history");
+                    }
+                }
+                println!(
+                    "{}",
+                    remote.publish(&options.db, options.cache_dir.as_deref())?
+                );
+            }
+            HistoryCommand::CacheKey(_) => {
+                println!(
+                    "greenshift-history-{}",
+                    remote.head()?.as_deref().unwrap_or("empty")
+                );
+            }
+        }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        eprintln!("greenshift: ⚠ {err:#}");
+    }
+    // History storage must never turn a successful test job into a failed one.
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Name `err` on stderr as greenshift names every error, whether it ends

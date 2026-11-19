@@ -203,6 +203,64 @@ fn stderr(out: &Output) -> String {
 }
 
 #[test]
+fn durable_restore_failure_still_runs_all_tests_and_exports_failed_results() {
+    let p = Project::new();
+    let artifact = p.dir.path().join("publish.sqlite");
+    let out = p.run(
+        &[
+            "--history-remote",
+            "/nonexistent/history.git",
+            "--history-artifact",
+            artifact.to_str().unwrap(),
+            "--",
+            "--no-fail-fast",
+        ],
+        &["gamma"],
+    );
+    assert_eq!(out.status.code(), Some(100), "{}", stderr(&out));
+    assert!(stderr(&out).contains('⚠'));
+    greenshift::history::snapshot::validate(&artifact).unwrap();
+    let conn = Connection::open(artifact).unwrap();
+    let (total, failed): (i64, i64) = conn
+        .query_row(
+            "SELECT count(*),sum(outcome='failed') FROM results",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((total, failed), (5, 1));
+}
+
+#[test]
+fn durable_ref_restored_before_plan_in_real_run() {
+    let p = Project::new();
+    assert!(p.run(&[], &[]).status.success());
+    let repo = p.dir.path().join("remote.git");
+    assert!(std::process::Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&repo)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let remote = greenshift::history::Remote::new(repo.to_str().unwrap()).unwrap();
+    remote.publish(&p.db, None).unwrap();
+    std::fs::remove_file(&p.db).unwrap();
+    let out = p.run(
+        &[
+            "--history-remote",
+            repo.to_str().unwrap(),
+            "--min-runs",
+            "1",
+        ],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.runs().len(), 2);
+    assert!(!stderr(&out).contains("no history: run the full suite"));
+}
+
+#[test]
 fn a_fresh_store_runs_every_test_and_records_one_run() {
     let p = Project::new();
     let out = p.run(&["--commit", "ABCDEF1", "--", "--no-fail-fast"], &["gamma"]);
