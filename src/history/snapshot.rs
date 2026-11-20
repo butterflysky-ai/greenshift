@@ -1,6 +1,6 @@
-//! Bounded, data-only SQLite snapshots. Input SQL is never executed as SQL.
+//! Data-only SQLite snapshots. Input SQL is never executed as SQL.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use rusqlite::{config::DbConfig, params, Connection, OpenFlags};
@@ -9,12 +9,13 @@ use crate::junit::Outcome;
 use crate::store::{self, Store, APPLICATION_ID, SCHEMA_VERSION};
 use crate::tainted::Tainted;
 
-/// Maximum uncompressed snapshot size.
-pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
-/// Maximum rows in each snapshot table.
-pub const MAX_ROWS: i64 = 2_000_000;
-/// Maximum bytes in any text or path field.
-pub const MAX_FIELD_BYTES: usize = 65_536;
+mod dictionary;
+mod frozen;
+mod text;
+
+use dictionary::{DictionaryBuilder, TestDictionary, TestId, TestKey};
+use frozen::{FrozenBytes, FrozenFiles, FrozenResults, FrozenRuns};
+use text::FrozenText;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -34,46 +35,63 @@ impl From<rusqlite::Error> for SnapshotError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ResultRow {
-    suite: String,
-    name: String,
+    test: TestId,
     outcome: Outcome,
     duration: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Run {
-    history_id: String,
-    commit: Option<String>,
-    source: String,
-    at: String,
+struct RunMetadata {
+    history_id: FrozenText,
+    commit: Option<FrozenText>,
+    source: FrozenText,
+    at: FrozenText,
     partial: i64,
-    branch: Option<String>,
-    tag: Option<String>,
-    files: Vec<(i64, Vec<u8>)>,
+    branch: Option<FrozenText>,
+    tag: Option<FrozenText>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Run {
+    metadata: RunMetadata,
+    files: FrozenFiles,
+    results: FrozenResults,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RunBuilder {
+    metadata: RunMetadata,
+    files: Vec<(i64, FrozenBytes)>,
     results: Vec<ResultRow>,
 }
 
+impl RunBuilder {
+    fn freeze(self) -> Run {
+        Run {
+            metadata: self.metadata,
+            files: FrozenFiles::from_vec(self.files),
+            results: FrozenResults::from_vec(self.results),
+        }
+    }
+}
+
+fn freeze_runs(builders: impl ExactSizeIterator<Item = RunBuilder>) -> FrozenRuns {
+    // Reserve the completed run vector once; it never grows beside the live
+    // builder map/vector. Box shrinking happens only after that input is gone.
+    let mut runs = Vec::with_capacity(builders.len());
+    runs.extend(builders.map(RunBuilder::freeze));
+    FrozenRuns::from_vec(runs)
+}
+
 struct Data {
-    tests: Vec<(String, String)>,
-    runs: Vec<Run>,
+    tests: TestDictionary,
+    runs: FrozenRuns,
 }
 
 fn invalid(why: &'static str) -> SnapshotError {
     SnapshotError::Invalid(why)
-}
-
-struct Budget(usize);
-
-impl Budget {
-    fn charge(&mut self, bytes: usize) -> Result<(), SnapshotError> {
-        self.0 = self
-            .0
-            .checked_sub(bytes)
-            .ok_or_else(|| invalid("expanded snapshot exceeds memory budget"))?;
-        Ok(())
-    }
 }
 
 type SchemaObject = (String, String, String, Option<String>);
@@ -120,8 +138,8 @@ fn check_output(path: &Path) -> Result<(), SnapshotError> {
 
 fn open_checked(path: &Path) -> Result<(Connection, i64), SnapshotError> {
     let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.len() > MAX_DB_BYTES {
-        return Err(invalid("expected a regular SQLite file at most 256 MiB"));
+    if !metadata.is_file() {
+        return Err(invalid("expected a regular SQLite file"));
     }
     check_sidecars(path)?;
     let conn = Connection::open_with_flags(
@@ -133,16 +151,6 @@ fn open_checked(path: &Path) -> Result<(Connection, i64), SnapshotError> {
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
     // One read transaction covers schema validation and every subsequent query.
     conn.execute_batch("BEGIN")?;
-    let pages: i64 = conn.pragma_query_value(None, "page_count", |r| r.get(0))?;
-    let page_size: i64 = conn.pragma_query_value(None, "page_size", |r| r.get(0))?;
-    if pages < 0
-        || page_size <= 0
-        || pages
-            .checked_mul(page_size)
-            .is_none_or(|n| n > MAX_DB_BYTES as i64)
-    {
-        return Err(invalid("logical database size exceeds 256 MiB"));
-    }
     let app: i32 = conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if app != APPLICATION_ID {
@@ -156,13 +164,6 @@ fn open_checked(path: &Path) -> Result<(Connection, i64), SnapshotError> {
         return Err(invalid(
             "schema does not exactly match this greenshift release",
         ));
-    }
-    for table in ["runs", "tests", "results", "run_files"] {
-        let count: i64 =
-            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
-        if count > MAX_ROWS {
-            return Err(invalid("snapshot row limit exceeded"));
-        }
     }
     let check: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
     if check != "ok" {
@@ -179,42 +180,54 @@ fn open_checked(path: &Path) -> Result<(Connection, i64), SnapshotError> {
     Ok((conn, version))
 }
 
-fn field(text: &str) -> Result<(), SnapshotError> {
-    if text.len() > MAX_FIELD_BYTES {
-        Err(invalid("text field exceeds 64 KiB"))
+fn borrowed_text<'row>(
+    row: &'row rusqlite::Row<'_>,
+    column: usize,
+) -> Result<&'row str, SnapshotError> {
+    row.get_ref(column)?
+        .as_str()
+        .map_err(|_| invalid("expected UTF-8 text field"))
+}
+
+fn frozen_text(row: &rusqlite::Row<'_>, column: usize) -> Result<FrozenText, SnapshotError> {
+    let text = borrowed_text(row, column)?;
+    Ok(FrozenText::copy_from(text))
+}
+
+fn optional_text(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+) -> Result<Option<FrozenText>, SnapshotError> {
+    if matches!(row.get_ref(column)?, rusqlite::types::ValueRef::Null) {
+        Ok(None)
     } else {
-        Ok(())
+        frozen_text(row, column).map(Some)
     }
 }
 
 fn load(path: &Path) -> Result<Data, SnapshotError> {
-    load_with_budget(path, MAX_DB_BYTES as usize)
-}
-
-fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, SnapshotError> {
     let (conn, version) = open_checked(path)?;
-    // Account expanded names as well as row storage before copying them. A
-    // compact SQLite table can share a long name across millions of results.
-    // The row allowance includes vector spare capacity and map-node overhead;
-    // this is an application allocation budget, not a process RSS guarantee.
-    let mut budget = Budget(expanded_bytes);
-    let mut tests = BTreeMap::new();
+    // Normalize repeated test keys rather than expanding their text per result.
+    // There is intentionally no arbitrary history size/allocation limit. Inputs
+    // remain capable of exhausting memory, disk or CPU; see the design notes.
+    let mut test_ids = HashMap::new();
+    let mut dictionary = DictionaryBuilder::default();
     let mut stmt = conn.prepare("SELECT id,suite,name FROM tests ORDER BY id")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
-        let suite: String = row.get(1)?;
-        let name: String = row.get(2)?;
+        let suite = borrowed_text(row, 1)?;
+        let name = borrowed_text(row, 2)?;
         if id <= 0 {
             return Err(invalid("test id must be positive"));
         }
-        field(&suite)?;
-        field(&name)?;
-        budget.charge(2 * (std::mem::size_of::<(i64, String, String)>() + 64))?;
-        budget.charge(suite.len())?;
-        budget.charge(name.len())?;
-        tests.insert(id, (suite, name));
+        let local = dictionary.insert(TestKey::new(
+            FrozenText::copy_from(suite),
+            FrozenText::copy_from(name),
+        ));
+        test_ids.insert(id, local);
     }
+    let tests = dictionary.freeze();
     let mut runs = BTreeMap::new();
     let run_sql = match version {
         1 => "SELECT id,commit_sha,source,ingested_at,0,NULL,NULL,NULL FROM runs ORDER BY id",
@@ -226,46 +239,43 @@ fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, Snapshot
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
-        let run = Run {
-            history_id: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-            commit: row.get(1)?,
-            source: row.get(2)?,
-            at: row.get(3)?,
-            partial: row.get(4)?,
-            branch: row.get(5)?,
-            tag: row.get(6)?,
-            files: Vec::new(),
-            results: Vec::new(),
+        let history_id = match optional_text(row, 7)? {
+            Some(identity) => identity,
+            None => FrozenText::copy_from(""),
         };
-        if id <= 0 || ![0, 1].contains(&run.partial) || (run.branch.is_some() && run.tag.is_some())
+        let metadata = RunMetadata {
+            history_id,
+            commit: optional_text(row, 1)?,
+            source: frozen_text(row, 2)?,
+            at: frozen_text(row, 3)?,
+            partial: row.get(4)?,
+            branch: optional_text(row, 5)?,
+            tag: optional_text(row, 6)?,
+        };
+        if id <= 0
+            || ![0, 1].contains(&metadata.partial)
+            || (metadata.branch.is_some() && metadata.tag.is_some())
         {
             return Err(invalid("invalid run id, partial flag, or branch/tag"));
         }
         if version >= 4
-            && (run.history_id.len() != 32
-                || !run
+            && (metadata.history_id.len() != 32
+                || !metadata
                     .history_id
+                    .as_str()
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
         {
             return Err(invalid("run history id must be 32 lowercase hex digits"));
         }
-        for text in [
-            run.commit.as_deref(),
-            Some(run.source.as_str()),
-            Some(run.at.as_str()),
-            run.branch.as_deref(),
-            run.tag.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            field(text)?;
-            budget.charge(text.len())?;
-        }
-        budget.charge(run.history_id.len())?;
-        budget.charge(2 * (std::mem::size_of::<Run>() + 64))?;
-        runs.insert(id, run);
+        runs.insert(
+            id,
+            RunBuilder {
+                metadata,
+                files: Vec::new(),
+                results: Vec::new(),
+            },
+        );
     }
     let mut stmt =
         conn.prepare("SELECT run_id,position,path FROM run_files ORDER BY run_id,position")?;
@@ -273,16 +283,20 @@ fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, Snapshot
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
         let position: i64 = row.get(1)?;
-        let path: Vec<u8> = row.get(2)?;
-        if position < 0 || path.len() > MAX_FIELD_BYTES {
-            return Err(invalid("invalid run file position or path length"));
+        let path = row
+            .get_ref(2)?
+            .as_blob()
+            .map_err(|_| invalid("expected binary run file path"))?;
+        if position < 0 {
+            return Err(invalid("invalid run file position"));
         }
-        budget.charge(path.len())?;
-        budget.charge(2 * std::mem::size_of::<(i64, Vec<u8>)>())?;
-        runs.get_mut(&id)
-            .ok_or_else(|| invalid("unknown run for file"))?
-            .files
-            .push((position, path));
+        let run = runs
+            .get_mut(&id)
+            .ok_or_else(|| invalid("unknown run for file"))?;
+        if run.files.capacity() == 0 {
+            run.files.reserve_exact(1);
+        }
+        run.files.push((position, FrozenBytes::copy_from(path)));
     }
     let mut stmt = conn.prepare(
         "SELECT run_id,test_id,outcome,duration_ms FROM results ORDER BY run_id,test_id",
@@ -291,51 +305,47 @@ fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, Snapshot
     while let Some(row) = rows.next()? {
         let run_id: i64 = row.get(0)?;
         let test_id: i64 = row.get(1)?;
-        let outcome: String = row.get(2)?;
+        let outcome = borrowed_text(row, 2)?;
         let duration: Option<i64> = row.get(3)?;
-        let parsed_outcome = store::stored_outcome(&outcome)
-            .ok_or_else(|| invalid("invalid outcome or duration"))?;
+        let parsed_outcome =
+            store::stored_outcome(outcome).ok_or_else(|| invalid("invalid outcome or duration"))?;
         if duration.is_some_and(|d| d < 0) {
             return Err(invalid("invalid outcome or duration"));
         }
-        let (suite, name) = tests.get(&test_id).ok_or_else(|| invalid("unknown test"))?;
-        budget.charge(suite.len())?;
-        budget.charge(name.len())?;
-        budget.charge(outcome.len())?;
-        budget.charge(2 * std::mem::size_of::<ResultRow>())?;
-        runs.get_mut(&run_id)
-            .ok_or_else(|| invalid("unknown run for result"))?
-            .results
-            .push(ResultRow {
-                suite: suite.clone(),
-                name: name.clone(),
-                outcome: parsed_outcome,
-                duration,
-            });
+        let test = *test_ids
+            .get(&test_id)
+            .ok_or_else(|| invalid("unknown test"))?;
+        let run = runs
+            .get_mut(&run_id)
+            .ok_or_else(|| invalid("unknown run for result"))?;
+        if run.results.capacity() == 0 {
+            run.results.reserve_exact(1);
+        }
+        run.results.push(ResultRow {
+            test,
+            outcome: parsed_outcome,
+            duration,
+        });
     }
     if version < 4 {
-        budget.charge(
-            runs.len()
-                .checked_mul(2 * (std::mem::size_of::<(i64, String)>() + 32))
-                .ok_or_else(|| invalid("expanded snapshot exceeds memory budget"))?,
-        )?;
         for (id, identity) in store::legacy_run_identities(&conn)? {
             runs.get_mut(&id)
                 .ok_or_else(|| invalid("legacy identity has no run"))?
-                .history_id = identity;
+                .metadata
+                .history_id = FrozenText::new(identity);
         }
     }
     for run in runs.values_mut() {
         run.results
-            .sort_by(|a, b| (&a.suite, &a.name).cmp(&(&b.suite, &b.name)));
+            .sort_by(|a, b| tests.get(a.test).cmp(&tests.get(b.test)));
     }
     Ok(Data {
-        tests: tests.into_values().collect(),
-        runs: runs.into_values().collect(),
+        tests,
+        runs: freeze_runs(runs.into_values()),
     })
 }
 
-/// Reject any snapshot that is not bounded, canonical greenshift data.
+/// Reject any snapshot that is not canonical greenshift data.
 pub fn validate(path: &Path) -> Result<(), SnapshotError> {
     load(path).map(|_| ())
 }
@@ -352,33 +362,32 @@ fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
     let mut conn = Connection::open(store::as_plain_file(temporary.path()))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     let tx = conn.transaction()?;
-    let mut test_ids = HashMap::new();
-    for (suite, name) in &data.tests {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            test_ids.entry((suite.as_str(), name.as_str()))
-        {
-            tx.execute(
-                "INSERT INTO tests(suite,name) VALUES (?1,?2)",
-                params![suite, name],
-            )?;
-            entry.insert(tx.last_insert_rowid());
-        }
+    for key in data.tests.iter() {
+        tx.execute(
+            "INSERT INTO tests(suite,name) VALUES (?1,?2)",
+            params![key.suite().as_str(), key.name().as_str()],
+        )?;
     }
     let mut chronological: Vec<_> = data.runs.iter().collect();
-    chronological.sort_unstable_by(|a, b| (&a.at, &a.history_id).cmp(&(&b.at, &b.history_id)));
+    chronological.sort_unstable_by(|a, b| {
+        (&a.metadata.at, &a.metadata.history_id).cmp(&(&b.metadata.at, &b.metadata.history_id))
+    });
     for run in chronological {
-        tx.execute("INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![run.commit,run.source,run.at,run.partial,run.branch,run.tag,run.history_id])?;
+        let metadata = &run.metadata;
+        tx.execute("INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![metadata.commit.as_ref().map(FrozenText::as_str),metadata.source.as_str(),metadata.at.as_str(),metadata.partial,metadata.branch.as_ref().map(FrozenText::as_str),metadata.tag.as_ref().map(FrozenText::as_str),metadata.history_id.as_str()])?;
         let id = tx.last_insert_rowid();
-        for (position, path) in &run.files {
+        for (position, path) in run.files.iter() {
             tx.execute(
                 "INSERT INTO run_files(run_id,position,path) VALUES (?1,?2,?3)",
-                params![id, position, path],
+                params![id, position, path.as_bytes()],
             )?;
         }
-        for result in &run.results {
-            let test = test_ids
-                .get(&(result.suite.as_str(), result.name.as_str()))
+        for result in run.results.iter() {
+            data.tests
+                .get(result.test)
                 .ok_or_else(|| invalid("result test missing from snapshot"))?;
+            let test = i64::try_from(result.test.index() + 1)
+                .map_err(|_| invalid("test id exceeds SQLite range"))?;
             tx.execute(
                 "INSERT INTO results(run_id,test_id,outcome,duration_ms) VALUES (?1,?2,?3,?4)",
                 params![id, test, result.outcome.as_str(), result.duration],
@@ -402,21 +411,75 @@ pub fn snapshot(db: &Path, output: &Path) -> Result<(), SnapshotError> {
     write(&load(db)?, output)
 }
 
+fn remap_runs(
+    runs: &FrozenRuns,
+    mapping: &[TestId],
+    dictionary: &TestDictionary,
+) -> Result<Vec<RunBuilder>, SnapshotError> {
+    let mut remapped = Vec::with_capacity(runs.len());
+    for run in runs.iter() {
+        let mut results = Vec::with_capacity(run.results.len());
+        for result in run.results.iter() {
+            let test = *mapping
+                .get(result.test.index())
+                .ok_or_else(|| invalid("result test missing from snapshot"))?;
+            results.push(ResultRow { test, ..*result });
+        }
+        results.sort_by(|a, b| dictionary.get(a.test).cmp(&dictionary.get(b.test)));
+        let mut files = Vec::with_capacity(run.files.len());
+        files.extend(run.files.iter().cloned());
+        remapped.push(RunBuilder {
+            metadata: run.metadata.clone(),
+            files,
+            results,
+        });
+    }
+    Ok(remapped)
+}
+
 /// Merge complete histories without treating SQLite's local row ids as identity.
 /// Durable run identities make publication idempotent while retaining independently
 /// recorded identical runs. Conflicting contents for one identity are rejected.
 pub fn merge(current: &Path, incoming: &Path, output: &Path) -> Result<(), SnapshotError> {
-    let mut data = load(current)?;
+    let data = load(current)?;
     let other = load(incoming)?;
+    let mut keys = BTreeSet::new();
+    for key in data.tests.iter().chain(other.tests.iter()) {
+        if !keys.contains(key) {
+            keys.insert(key.clone());
+        }
+    }
+    let mut builder = DictionaryBuilder::default();
+    for key in keys {
+        builder.insert(key);
+    }
+    let remap = |dictionary: &TestDictionary| {
+        dictionary
+            .iter()
+            .map(|key| {
+                builder
+                    .id_for(key)
+                    .ok_or_else(|| invalid("test missing from merged dictionary"))
+            })
+            .collect::<Result<Vec<_>, SnapshotError>>()
+    };
+    let first = remap(&data.tests)?;
+    let second = remap(&other.tests)?;
+    let merged = builder.freeze();
+    let mut runs = remap_runs(&data.runs, &first, &merged)?;
+    let incoming = remap_runs(&other.runs, &second, &merged)?;
+    drop(data);
+    drop(other);
+    drop(first);
+    drop(second);
     let mut additions = Vec::new();
     {
-        let known: HashMap<_, _> = data
-            .runs
+        let known: HashMap<_, _> = runs
             .iter()
-            .map(|run| (run.history_id.as_str(), run))
+            .map(|run| (run.metadata.history_id.as_str(), run))
             .collect();
-        for run in other.runs {
-            match known.get(run.history_id.as_str()) {
+        for run in incoming {
+            match known.get(run.metadata.history_id.as_str()) {
                 Some(existing) if **existing != run => {
                     return Err(invalid("one run identity has conflicting contents"))
                 }
@@ -425,10 +488,11 @@ pub fn merge(current: &Path, incoming: &Path, output: &Path) -> Result<(), Snaps
             }
         }
     }
-    data.runs.extend(additions);
-    data.tests.extend(other.tests);
-    data.tests.sort();
-    data.tests.dedup();
+    runs.extend(additions);
+    let data = Data {
+        tests: merged,
+        runs: freeze_runs(runs.into_iter()),
+    };
     write(&data, output)
 }
 
@@ -437,7 +501,118 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_budget_repeated_shared_name_expansion_is_charged() {
+    fn test_frozen_snapshot_layout_and_capacity_receipt() {
+        eprintln!("snapshot layout: TestKey={} TestId={} ResultRow={} RunMetadata={} RunBuilder={} Run={} file_row={}",std::mem::size_of::<TestKey>(),std::mem::size_of::<TestId>(),std::mem::size_of::<ResultRow>(),std::mem::size_of::<RunMetadata>(),std::mem::size_of::<RunBuilder>(),std::mem::size_of::<Run>(),std::mem::size_of::<(i64,FrozenBytes)>());
+        let mut dictionary = DictionaryBuilder::default();
+        let test = dictionary.insert(TestKey::new(
+            FrozenText::copy_from("suite"),
+            FrozenText::copy_from("test"),
+        ));
+        for len in [0, 1, 2, 3, 5] {
+            let mut results = Vec::new();
+            let mut files = Vec::new();
+            for index in 0..len {
+                if results.capacity() == 0 {
+                    results.reserve_exact(1);
+                }
+                if files.capacity() == 0 {
+                    files.reserve_exact(1);
+                }
+                results.push(ResultRow {
+                    test,
+                    outcome: Outcome::Passed,
+                    duration: Some(1),
+                });
+                files.push((index as i64, FrozenBytes::copy_from(&[0, 255])));
+            }
+            eprintln!(
+                "snapshot capacity: len={len} results={} files={}",
+                results.capacity(),
+                files.capacity()
+            );
+            assert!(results.capacity() + len <= 3 * len);
+            assert!(files.capacity() + len <= 3 * len);
+            assert_eq!(FrozenResults::from_vec(results).len(), len);
+            assert_eq!(FrozenFiles::from_vec(files).len(), len);
+        }
+    }
+
+    #[test]
+    fn test_frozen_binary_paths_share_storage_without_mutable_aliases() {
+        let mut source = vec![0, 255, 128];
+        let frozen = FrozenBytes::copy_from(&source);
+        let shared = frozen.clone();
+        source[0] = 42;
+        assert_eq!(frozen.as_bytes(), &[0, 255, 128]);
+        assert!(std::ptr::eq(
+            frozen.as_bytes().as_ptr(),
+            shared.as_bytes().as_ptr()
+        ));
+    }
+
+    #[test]
+    fn test_merge_remaps_different_local_test_ids_before_comparing_run_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let output = dir.path().join("output");
+        fixture(&first, "same");
+        Connection::open(&first)
+            .unwrap()
+            .execute_batch("UPDATE tests SET name='a'; INSERT INTO tests VALUES (2,'suite','z')")
+            .unwrap();
+        std::fs::copy(&first, &second).unwrap();
+        Connection::open(&second).unwrap().execute_batch("PRAGMA foreign_keys=OFF; UPDATE tests SET id=20 WHERE id=1; UPDATE tests SET id=10 WHERE id=2; UPDATE results SET test_id=20").unwrap();
+        merge(&first, &second, &output).unwrap();
+        let conn = Connection::open(&output).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT t.name FROM results r JOIN tests t ON t.id=r.test_id",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "a"
+        );
+        let keys = conn
+            .prepare("SELECT name FROM tests ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(keys, vec!["a", "z"]);
+    }
+
+    #[test]
+    fn test_merge_same_local_test_id_with_different_semantic_key_is_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let output = dir.path().join("output");
+        fixture(&first, "same");
+        std::fs::copy(&first, &second).unwrap();
+        Connection::open(&second)
+            .unwrap()
+            .execute("UPDATE tests SET name='different'", [])
+            .unwrap();
+        std::fs::write(&output, b"preserved").unwrap();
+        assert!(matches!(
+            merge(&first, &second, &output),
+            Err(SnapshotError::Invalid(
+                "one run identity has conflicting contents"
+            ))
+        ));
+        assert_eq!(std::fs::read(&output).unwrap(), b"preserved");
+    }
+
+    #[test]
+    fn test_dictionary_repeated_names_share_one_frozen_payload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         fixture(&path, "source");
@@ -450,20 +625,43 @@ mod tests {
                 .unwrap();
         }
         drop(conn);
-        assert!(matches!(
-            load_with_budget(&path, 15_000),
-            Err(SnapshotError::Invalid(
-                "expanded snapshot exceeds memory budget"
-            ))
-        ));
-        assert!(load_with_budget(&path, 100_000).is_ok());
+        let data = load(&path).unwrap();
+        assert_eq!(data.tests.iter().count(), 1);
+        let name = data.tests.iter().next().unwrap().name().as_str();
+        assert_eq!(name.len(), 1024);
+        for run in data.runs.iter() {
+            let result = run.results.iter().next().unwrap();
+            let resolved = data.tests.get(result.test).unwrap().name().as_str();
+            assert!(std::ptr::eq(name.as_ptr(), resolved.as_ptr()));
+        }
+        assert!(std::mem::size_of::<ResultRow>() <= 32);
     }
 
     #[test]
-    fn test_budget_arithmetic_exhaustion_rejected() {
-        let mut budget = Budget(usize::MAX);
-        budget.charge(usize::MAX).unwrap();
-        assert!(budget.charge(1).is_err());
+    fn test_unique_dictionary_fields_beyond_former_length_limit_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        fixture(&path, "source");
+        let conn = Connection::open(&path).unwrap();
+        for index in 0..10 {
+            conn.execute(
+                "INSERT INTO tests(suite,name) VALUES ('suite',?1)",
+                [format!("{}-{index}", "x".repeat(65_537))],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let output = dir.path().join("output");
+        snapshot(&path, &output).unwrap();
+        let data = load(&output).unwrap();
+        assert_eq!(data.tests.iter().count(), 11);
+        assert_eq!(
+            data.tests
+                .iter()
+                .filter(|key| key.name().len() > 65_536)
+                .count(),
+            10
+        );
     }
 
     fn fixture(path: &Path, source: &str) {
@@ -658,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_legacy_arbitrary_commit_is_bounded_data_and_preserved() {
+    fn test_snapshot_legacy_arbitrary_commit_is_data_and_preserved() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("input");
         let output = dir.path().join("output");
@@ -685,15 +883,17 @@ mod tests {
         drop(conn);
         Connection::open(&input)
             .unwrap()
-            .execute(
-                "UPDATE runs SET commit_sha=?1",
-                ["x".repeat(MAX_FIELD_BYTES + 1)],
-            )
+            .execute("UPDATE runs SET commit_sha=?1", ["x".repeat(65_537)])
             .unwrap();
-        assert!(matches!(
-            validate(&input),
-            Err(SnapshotError::Invalid("text field exceeds 64 KiB"))
-        ));
+        snapshot(&input, &output).unwrap();
+        assert_eq!(
+            Connection::open(&output)
+                .unwrap()
+                .query_row("SELECT length(commit_sha) FROM runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            65_537
+        );
     }
 
     #[test]
@@ -809,18 +1009,32 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_large_text_rejected() {
+    fn test_large_text_and_binary_paths_preserved_without_arbitrary_length_cap() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         fixture(&path, "test");
         Connection::open(&path)
             .unwrap()
-            .execute(
-                "UPDATE tests SET name=?1",
-                ["x".repeat(MAX_FIELD_BYTES + 1)],
-            )
+            .execute("UPDATE tests SET name=?1", ["x".repeat(65_537)])
             .unwrap();
-        assert!(validate(&path).is_err());
+        let bytes = vec![255u8; 65_537];
+        Connection::open(&path)
+            .unwrap()
+            .execute("UPDATE run_files SET path=?1", [&bytes])
+            .unwrap();
+        let output = dir.path().join("output");
+        snapshot(&path, &output).unwrap();
+        let conn = Connection::open(&output).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT length(name) FROM tests", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            65_537
+        );
+        assert_eq!(
+            conn.query_row("SELECT path FROM run_files", [], |r| r.get::<_, Vec<u8>>(0))
+                .unwrap(),
+            bytes
+        );
     }
 
     #[test]
@@ -912,12 +1126,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_oversized_file_and_corrupt_bytes_rejected() {
+    fn test_valid_sparse_file_beyond_former_size_cap_and_corruption_rejection() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
-        let file = std::fs::File::create(&path).unwrap();
-        file.set_len(MAX_DB_BYTES + 1).unwrap();
-        assert!(matches!(validate(&path), Err(SnapshotError::Invalid(_))));
+        fixture(&path, "synthetic");
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(256 * 1024 * 1024 + 4096).unwrap();
+        validate(&path).unwrap();
         drop(file);
         std::fs::write(&path, b"SQLite format 3\0truncated").unwrap();
         assert!(validate(&path).is_err());

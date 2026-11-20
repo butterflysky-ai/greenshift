@@ -401,10 +401,17 @@ canonical and local history rather than discarding unpublished local runs.
 with access to the destination repository can read that metadata. Use relative
 JUnit paths at ingest when absolute paths should not be published.
 
-History storage outages warn without failing tests; malformed history arguments
+Ordinary history storage errors warn without failing tests; malformed history arguments
 or publish-policy refusals exit 2. A second CAS rejection does not automatically
 recover that run's new results; durable delivery remains separate work. Ctrl-C
 during history transport terminates its Git helpers and returns 130.
+
+**Resource policy:** greenshift imposes no fixed row, byte, field-length or
+expansion cap, so large/frequently tested repositories need no size configuration. An
+untrusted history artifact can therefore exhaust the publisher's memory, disk
+or CPU, even when the test job has a read-only token. Structural validation and
+immutable shared test keys do not prevent resource exhaustion. See the
+[resource policy](docs/design/durable-history.md#resource-policy) for the boundary.
 
 ## Building
 

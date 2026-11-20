@@ -1,4 +1,4 @@
-<!-- design-meta: status=implemented-local-live-forge-verification-pending; last-updated=2026-11-19; phase=implementation -->
+<!-- design-meta: status=implemented-repair-review-pending; last-updated=2026-11-20; phase=implementation -->
 # Durable history
 
 `refs/greenshift/history` is the canonical complete database. Each publication
@@ -34,14 +34,15 @@ local paths/file URLs are also supported; SSH/custom helpers are not. Token
 authentication on other platforms reports unsupported without breaking local
 ingestion/selection. URL-embedded credentials are refused. Git runs in its own
 temporary bare repository, with inherited Git configuration removed, hooks
-disabled, no checkout, and bounded operation duration/output. Tokens do not enter
+disabled, no checkout, and supervised operation duration/diagnostics. History
+payload stdin/stdout is not size-capped. Tokens do not enter
 command arguments or diagnostics.
 
 The wire protocol currently supports SHA-1 Git repositories; a SHA-256 remote
 history identity is refused explicitly rather than treated as a usable snapshot.
-The binary owns Ctrl-C handling only for active history transport: cancellation
-terminates its isolated Git process group and returns 130. Outside transport,
-Ctrl-C keeps normal termination behavior. Library transports install no signal
+The binary installs a process-wide Ctrl-C handler. During active history transport,
+cancellation terminates its isolated Git process group and returns 130. Outside
+transport, Ctrl-C keeps normal termination behavior. Library transports install no signal
 handler. Test-runner listing/build/run children do not inherit
 `GREENSHIFT_HISTORY_TOKEN`.
 
@@ -104,18 +105,50 @@ that policy for CI invocations and requires `--default-branch` there.
 
 The parser accepts only known supported schema versions/application id, disallows extra
 views/triggers/tables/indexes, verifies integrity and foreign keys, checks types,
-IDs/outcomes/durations/ref exclusivity, and caps bytes/rows/field lengths and
-expanded in-memory data. Input connections are read-only and defensive with
+IDs/outcomes/durations/ref exclusivity. Input connections are read-only and defensive with
 untrusted schemas disabled. Export constructs a new canonical database using
 bound values; no input SQL is executed as SQL. Known older schemas are validated
 against their own exact trusted migration-prefix schema before data is projected
 into a fresh current database. Newer unknown versions are refused without
 altering the source or canonical ref. Output replacement is atomic.
 
-Commit strings from existing history remain bounded historical data, including
+Commit strings from existing history remain historical data, including
 arbitrary strings written before commit validation existed. New ingest input
 still uses `CommitId` validation. Historical commit strings are copied using
 bound SQL values, never used as Git command arguments or shell input.
+
+## Resource policy
+
+History is deliberately uncapped by greenshift: there is no application-defined SQLite/file/logical-page,
+row-count, text/path-length, compressed/decompressed payload or application
+allocation limit, and no size knob to tune for large or frequently tested
+repositories. Old history is not pruned. These are not forge/platform limits.
+
+This leaves a resource-exhaustion exposure. A compromised test dependency can
+rewrite the data artifact even when its job token is read-only; structurally
+valid or compressed data can consume the trusted publisher's memory, disk or
+CPU. Commit/blob authentication identifies data, not its resource cost. The
+separate publisher prevents executing test output but is not a resource sandbox.
+This is a documented threat scenario, not a report of an observed incident.
+
+The in-memory snapshot uses an immutable local test dictionary. Results hold
+typed dictionary-local IDs rather than copying suite/name text per result, and
+merging remaps IDs by the complete semantic test key before identity comparison.
+Retained text, binary file paths and completed collections expose read-only APIs;
+construction/remapping uses explicit mutable builders. The dictionary does not
+globally intern every equal string, change the SQLite wire schema or guarantee
+that arbitrarily large history fits finite host resources.
+
+Protocol metadata and operational controls remain: cached raw commit metadata is
+limited to 16 KiB, each Git operation has a 60-second supervision timeout, Git
+stderr has a 1 MiB supervision limit, and SQLite lock waits time out after five
+seconds. None is a lifetime-history row/blob quota. Structural/schema/ref/digest
+checks, owned Git-process cleanup, and atomic staged replacement still apply.
+Validation/build failures before the push leave the canonical ref unchanged;
+ordinary errors clean up owned temporary files. Optional cache I/O failure after
+a successful push does not undo publication. Resource exhaustion that aborts/kills the process is not a
+guarantee of graceful error reporting or destructor cleanup. Parentless refs do
+not promise provider-side garbage collection or bounded physical forge storage.
 
 SQLite migration 4 gives each run a durable 128-bit identity. New runs use SQLite
 random bytes. Legacy identities hash typed run metadata, original local id,

@@ -210,12 +210,9 @@ impl Remote {
         let stdout = tempfile::tempfile().map_err(error)?;
         let stderr = tempfile::tempfile().map_err(error)?;
         // A file-backed stdin removes the pipe write that could block before
-        // the child supervision timeout began. All input is already bounded.
+        // the child supervision timeout began. History payloads have no size cap.
         let mut stdin = tempfile::tempfile().map_err(error)?;
         if let Some(data) = input {
-            if data.len() as u64 > snapshot::MAX_DB_BYTES {
-                return Err(error("git input exceeds history size limit"));
-            }
             stdin.write_all(data).map_err(error)?;
             use std::io::{Seek, SeekFrom};
             stdin.seek(SeekFrom::Start(0)).map_err(error)?;
@@ -288,15 +285,13 @@ impl Remote {
             if started.elapsed() > self.timeout {
                 return Err(error("git operation timed out"));
             }
-            if stdout.metadata().map_err(error)?.len() > snapshot::MAX_DB_BYTES
-                || stderr.metadata().map_err(error)?.len() > 1024 * 1024
-            {
-                return Err(error("git output exceeds size limit"));
+            if stderr.metadata().map_err(error)?.len() > 1024 * 1024 {
+                return Err(error("git diagnostics exceed size limit"));
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        if stdout.metadata().map_err(error)?.len() > snapshot::MAX_DB_BYTES {
-            return Err(error("git output exceeds history size limit"));
+        if stderr.metadata().map_err(error)?.len() > 1024 * 1024 {
+            return Err(error("git diagnostics exceed size limit"));
         }
         use std::io::{Seek, SeekFrom};
         let mut stdout = stdout;
@@ -394,7 +389,10 @@ impl Remote {
             .and_then(|line| line.strip_prefix("tree "))
             .filter(|tree| valid_oid(tree))
             .ok_or_else(|| error("cached commit has no tree"))?;
-        let bytes = bounded_read(&directory.join(BLOB), snapshot::MAX_DB_BYTES)?;
+        let mut bytes = Vec::new();
+        cached_file(&directory.join(BLOB))?
+            .read_to_end(&mut bytes)
+            .map_err(error)?;
         let blob = self.git(["hash-object", "--stdin"], Some(&bytes))?;
         let blob = std::str::from_utf8(&blob).map_err(error)?.trim();
         let expected = self.git(
@@ -538,7 +536,7 @@ fn valid_oid(oid: &str) -> bool {
     oid.len() == 40 && oid.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn bounded_read(path: &Path, cap: u64) -> Result<Vec<u8>, HistoryError> {
+fn cached_file(path: &Path) -> Result<File, HistoryError> {
     // Reject symlinks and special files before opening, then verify the opened
     // handle too. O_NONBLOCK closes the FIFO race between those two checks.
     if !fs::symlink_metadata(path).map_err(error)?.is_file() {
@@ -555,10 +553,16 @@ fn bounded_read(path: &Path, cap: u64) -> Result<Vec<u8>, HistoryError> {
     if !file.metadata().map_err(error)?.is_file() {
         return Err(error("cached history must be a regular file"));
     }
+    Ok(file)
+}
+
+fn bounded_read(path: &Path, cap: u64) -> Result<Vec<u8>, HistoryError> {
+    // Only commit metadata is bounded; the actual history blob is not.
+    let file = cached_file(path)?;
     let mut bytes = Vec::new();
     file.take(cap + 1).read_to_end(&mut bytes).map_err(error)?;
     if bytes.len() as u64 > cap {
-        return Err(error("cached history exceeds size limit"));
+        return Err(error("cached commit exceeds metadata size limit"));
     }
     Ok(bytes)
 }
@@ -586,17 +590,9 @@ fn compress(path: &Path) -> Result<Vec<u8>, HistoryError> {
 }
 
 fn decompress(bytes: &[u8], path: &Path) -> Result<(), HistoryError> {
-    decompress_bounded(bytes, path, snapshot::MAX_DB_BYTES)
-}
-
-fn decompress_bounded(bytes: &[u8], path: &Path, limit: u64) -> Result<(), HistoryError> {
-    let decoder = flate2::read::GzDecoder::new(bytes);
-    let mut bounded = decoder.take(limit + 1);
+    let mut decoder = flate2::read::GzDecoder::new(bytes);
     let mut output = File::create(path).map_err(error)?;
-    let len = std::io::copy(&mut bounded, &mut output).map_err(error)?;
-    if len > limit {
-        return Err(error("decompressed snapshot exceeds size limit"));
-    }
+    std::io::copy(&mut decoder, &mut output).map_err(error)?;
     output.sync_all().map_err(error)
 }
 
@@ -660,22 +656,16 @@ mod tests {
     }
 
     #[test]
-    fn test_decompress_exact_bound_accepts_and_over_bound_or_corrupt_rejects() {
+    fn test_decompress_preserves_payload_and_rejects_corrupt_gzip() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("input");
         let output = dir.path().join("output");
         fs::write(&input, vec![b'x'; 1000]).unwrap();
         let gzip = compress(&input).unwrap();
-        decompress_bounded(&gzip, &output, 1000).unwrap();
+        decompress(&gzip, &output).unwrap();
         assert_eq!(fs::read(&output).unwrap(), vec![b'x'; 1000]);
         assert!(matches!(
-            decompress_bounded(&gzip, &output, 999),
-            Err(HistoryError::Invalid(
-                "decompressed snapshot exceeds size limit"
-            ))
-        ));
-        assert!(matches!(
-            decompress_bounded(b"not a gzip", &output, 1000),
+            decompress(b"not a gzip", &output),
             Err(HistoryError::Io(_))
         ));
     }
