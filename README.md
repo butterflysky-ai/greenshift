@@ -8,7 +8,8 @@ history (`greenshift select`) and writes that choice as a cargo-nextest
 filterset (`greenshift nextest-filter`) or, for any test runner, as JSON
 rich and poor groups of the current tests (`greenshift plan`).
 `greenshift run nextest` does the whole cycle with cargo-nextest: list,
-plan, run and record.
+plan, run and record, and `greenshift init nextest` sets a repository up
+to do it in CI.
 
 ## Ingest
 
@@ -386,6 +387,52 @@ Exit status:
   or recorded.
 - 1 for an error before any test runs, such as listing output that
   greenshift cannot read; 2 for a usage error.
+
+## Set up a repo
+
+```
+greenshift init nextest --release TAG --sha256 HEX [--ci github|forgejo]
+                        [--runs-on LABEL] [--accept-unisolated] [--force]
+```
+
+`init nextest` sets a cargo-nextest repository up to run `greenshift run
+nextest` in CI with [durable history](docs/design/durable-history.md), in
+one step. Commit what it writes as is:
+
+- **The workflow**, `.github/workflows/greenshift.yml` or
+  `.forgejo/workflows/greenshift.yml`: a test job that restores the
+  history, runs the tests and uploads the history as a data artifact, and
+  a separate publisher that publishes it for pushes to the default branch
+  only. `--ci` picks the forge; without it, the one of `.github` and
+  `.forgejo` the repository has. `--runs-on` names the runner label
+  (default `ubuntu-latest` on GitHub, `docker` on Forgejo).
+- **The pin.** The workflow installs the release `--release` names (newer
+  than v0.1.0, which predates `run nextest`) and refuses it, failing the
+  job, unless it matches `--sha256`. Neither has a default: take the
+  checksum from the release's `.sha256` file (see **Install a release**)
+  and check it independently.
+- **JUnit**: `[profile.default.junit] path = "junit.xml"` in
+  `.config/nextest.toml`, added only when nothing there sets that path.
+  The rest of the file is kept as it is.
+
+On Forgejo the workflow is **not isolated**: stock Forgejo gives every
+step, the tests included, a token that can write the repository, and
+ignores `permissions` (see the
+[Forgejo capability gate](docs/design/durable-history.md#forgejo-capability-gate)).
+The file says so at the top, and `init` writes it only with
+`--accept-unisolated`.
+
+It prints what it wrote. A second run with the same options changes
+nothing and says so. A generated file that exists and differs is left
+alone, and then nothing at all is written, unless `--force` is given;
+`--force` never replaces a JUnit path `.config/nextest.toml` already sets.
+To pin a new release, run it again with the new `--release`, `--sha256`
+and `--force`.
+
+Exit status: 0 when the repository is set up, 1 for a file left alone or
+one that cannot be read (such as a `.config/nextest.toml` that is not
+TOML), with nothing written, and 2 for a usage error, such as a missing
+or malformed `--release` or `--sha256`.
 
 ## Durable CI history
 
