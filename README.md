@@ -395,6 +395,13 @@ greenshift init nextest --release TAG --sha256 HEX [--ci github|forgejo]
                         [--runs-on LABEL] [--force]
 ```
 
+For example, to pin v0.2.0 (its `.sha256` file gives this checksum):
+
+```
+greenshift init nextest --release v0.2.0 \
+  --sha256 36a30034902f29885c9763d868aae1ea773ca79ddc710465c025a9f4c524074b
+```
+
 `init nextest` sets a cargo-nextest repository up to run `greenshift run
 nextest` in CI with [durable history](docs/design/durable-history.md), in
 one step. Commit what it writes as is:
