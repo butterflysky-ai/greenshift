@@ -2,7 +2,115 @@
 
 use std::sync::Arc;
 
-use super::{ResultRow, Run};
+use super::dictionary::TestId;
+use super::text::FrozenText;
+use crate::junit::Outcome;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct ResultRow {
+    test: TestId,
+    outcome: Outcome,
+    duration: Option<i64>,
+}
+
+impl ResultRow {
+    pub(super) fn new(test: TestId, outcome: Outcome, duration: Option<i64>) -> Self {
+        Self {
+            test,
+            outcome,
+            duration,
+        }
+    }
+    pub(super) fn test(&self) -> TestId {
+        self.test
+    }
+    pub(super) fn outcome(&self) -> Outcome {
+        self.outcome
+    }
+    pub(super) fn duration(&self) -> Option<i64> {
+        self.duration
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct RunMetadata {
+    history_id: FrozenText,
+    commit: Option<FrozenText>,
+    source: FrozenText,
+    at: FrozenText,
+    partial: i64,
+    branch: Option<FrozenText>,
+    tag: Option<FrozenText>,
+}
+
+impl RunMetadata {
+    pub(super) fn new(
+        history_id: FrozenText,
+        commit: Option<FrozenText>,
+        source: FrozenText,
+        at: FrozenText,
+        partial: i64,
+        branch: Option<FrozenText>,
+        tag: Option<FrozenText>,
+    ) -> Self {
+        Self {
+            history_id,
+            commit,
+            source,
+            at,
+            partial,
+            branch,
+            tag,
+        }
+    }
+    pub(super) fn history_id(&self) -> &FrozenText {
+        &self.history_id
+    }
+    pub(super) fn commit(&self) -> Option<&FrozenText> {
+        self.commit.as_ref()
+    }
+    pub(super) fn source(&self) -> &FrozenText {
+        &self.source
+    }
+    pub(super) fn at(&self) -> &FrozenText {
+        &self.at
+    }
+    pub(super) fn partial(&self) -> i64 {
+        self.partial
+    }
+    pub(super) fn branch(&self) -> Option<&FrozenText> {
+        self.branch.as_ref()
+    }
+    pub(super) fn tag(&self) -> Option<&FrozenText> {
+        self.tag.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct Run {
+    metadata: RunMetadata,
+    files: FrozenFiles,
+    results: FrozenResults,
+}
+
+impl Run {
+    pub(super) fn new(metadata: RunMetadata, files: FrozenFiles, results: FrozenResults) -> Self {
+        Self {
+            metadata,
+            files,
+            results,
+        }
+    }
+    pub(super) fn metadata(&self) -> &RunMetadata {
+        &self.metadata
+    }
+    pub(super) fn files(&self) -> &FrozenFiles {
+        &self.files
+    }
+    pub(super) fn results(&self) -> &FrozenResults {
+        &self.results
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct FrozenBytes(Arc<[u8]>);

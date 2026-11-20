@@ -145,21 +145,24 @@ fn cache_key_and_storage_failure_do_not_fail_cli_and_pr_cannot_publish() {
         .stderr(predicates::str::contains("⚠"));
     let db = dir.path().join("db.sqlite");
     record(&db, "fork");
-    assert_cmd::Command::cargo_bin("greenshift")
-        .unwrap()
-        .env("GITHUB_EVENT_NAME", "pull_request")
-        .args(["history", "publish", "--remote"])
-        .arg(&repo)
-        .arg("--db")
-        .arg(&db)
-        .assert()
-        .code(2)
-        .stderr(predicates::str::contains("refused"));
-    assert!(Remote::new(repo.to_str().unwrap())
-        .unwrap()
-        .head()
-        .unwrap()
-        .is_none());
+    for event in ["pull_request", "pull_request_target"] {
+        assert_cmd::Command::cargo_bin("greenshift")
+            .unwrap()
+            .env("GITHUB_EVENT_NAME", event)
+            .env_remove("GITHUB_ACTIONS")
+            .args(["history", "publish", "--remote"])
+            .arg(&repo)
+            .arg("--db")
+            .arg(&db)
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("refused"));
+        assert!(Remote::new(repo.to_str().unwrap())
+            .unwrap()
+            .head()
+            .unwrap()
+            .is_none());
+    }
 }
 
 #[test]

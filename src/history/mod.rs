@@ -446,7 +446,7 @@ impl Remote {
         stage: tempfile::NamedTempFile,
         db: &Path,
     ) -> Result<(), HistoryError> {
-        self.persist_restore_using(stage, db, create_restore)
+        self.persist_restore_using(stage, db, create_restore, |path| fs::symlink_metadata(path))
     }
 
     fn persist_restore_using(
@@ -454,11 +454,12 @@ impl Remote {
         mut stage: tempfile::NamedTempFile,
         db: &Path,
         mut create: impl FnMut(tempfile::NamedTempFile, &Path) -> Result<File, tempfile::PersistError>,
+        mut inspect: impl FnMut(&Path) -> std::io::Result<fs::Metadata>,
     ) -> Result<(), HistoryError> {
         loop {
             check_restore_destination(db)?;
             self.check_cancelled()?;
-            match fs::symlink_metadata(db) {
+            match inspect(db) {
                 Ok(_) => {
                     return snapshot::restore_existing(db, stage.path(), || {
                         self.cancellation.load(Ordering::SeqCst)
@@ -682,6 +683,68 @@ mod tests {
     }
 
     #[test]
+    fn test_persist_restore_cancelled_missing_destination_stays_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("absent.sqlite");
+        let stage = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        fixture(stage.path(), "canonical-remote");
+        let remote = Remote {
+            scratch: tempfile::tempdir().unwrap(),
+            url: String::new(),
+            token: None,
+            timeout: TIMEOUT,
+            cancellation: Arc::new(AtomicBool::new(true)),
+        };
+        assert!(remote
+            .persist_restore(stage, &destination)
+            .unwrap_err()
+            .is_cancelled());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn test_persist_restore_cancelled_after_missing_path_check_never_creates() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("absent.sqlite");
+        let stage = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        fixture(stage.path(), "canonical-remote");
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let remote = Remote {
+            scratch: tempfile::tempdir().unwrap(),
+            url: String::new(),
+            token: None,
+            timeout: TIMEOUT,
+            cancellation: Arc::clone(&cancellation),
+        };
+        let mut inspected = false;
+        let mut created = false;
+        let result = remote.persist_restore_using(
+            stage,
+            &destination,
+            |stage, path| {
+                created = true;
+                create_restore(stage, path)
+            },
+            |path| {
+                let observed = fs::symlink_metadata(path);
+                assert_eq!(
+                    observed.as_ref().unwrap_err().kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                inspected = true;
+                // An interrupt after the actual path observation must still
+                // prevent the subsequent creation side effect.
+                cancellation.store(true, Ordering::SeqCst);
+                observed
+            },
+        );
+        assert!(inspected);
+        assert!(result.unwrap_err().is_cancelled());
+        assert!(!created);
+        assert!(!destination.exists());
+    }
+
+    #[test]
     fn test_create_restore_collision_retains_stage_then_unions_new_local_database() {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("created.sqlite");
@@ -697,20 +760,25 @@ mod tests {
         };
         let mut attempts = 0;
         remote
-            .persist_restore_using(stage, &destination, |stage, db| {
-                attempts += 1;
-                // An ordinary creator wins after the real missing-path check. The
-                // creation primitive and its caller must retain our stage, then
-                // retry via the existing database transaction instead of replacing.
-                assert!(!db.exists());
-                fixture(db, "new-local");
-                let before = fs::read(db).unwrap();
-                let collision = create_restore(stage, db).unwrap_err();
-                assert_eq!(collision.error.kind(), std::io::ErrorKind::AlreadyExists);
-                assert_eq!(fs::read(db).unwrap(), before);
-                snapshot::validate(collision.file.path()).unwrap();
-                Err(collision)
-            })
+            .persist_restore_using(
+                stage,
+                &destination,
+                |stage, db| {
+                    attempts += 1;
+                    // An ordinary creator wins after the real missing-path check. The
+                    // creation primitive and its caller must retain our stage, then
+                    // retry via the existing database transaction instead of replacing.
+                    assert!(!db.exists());
+                    fixture(db, "new-local");
+                    let before = fs::read(db).unwrap();
+                    let collision = create_restore(stage, db).unwrap_err();
+                    assert_eq!(collision.error.kind(), std::io::ErrorKind::AlreadyExists);
+                    assert_eq!(fs::read(db).unwrap(), before);
+                    snapshot::validate(collision.file.path()).unwrap();
+                    Err(collision)
+                },
+                |path| fs::symlink_metadata(path),
+            )
             .unwrap();
         assert_eq!(attempts, 1);
         let conn = rusqlite::Connection::open(&destination).unwrap();

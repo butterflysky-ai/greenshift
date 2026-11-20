@@ -117,12 +117,11 @@ fn immutable_fixture(body: &str) -> String {
         "#![allow(dead_code,unused_mut,unused_imports)]\n\
          #[path = {text:?}] mod text;\n\
          #[path = {dictionary:?}] mod dictionary;\n\
-         #[derive(Debug,Clone,PartialEq,Eq,Hash)] struct ResultRow;\n\
-         struct Run;\n\
+         mod junit {{ #[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)] pub enum Outcome {{ Passed,Failed,Error,Skipped }} }}\n\
          #[path = {frozen:?}] mod frozen;\n\
          use text::FrozenText;\n\
          use dictionary::{{DictionaryBuilder,TestKey}};\n\
-         use frozen::{{FrozenBytes,FrozenFiles,FrozenResults,FrozenRuns}};\n\
+         use frozen::{{FrozenBytes,FrozenFiles,FrozenResults,FrozenRuns,ResultRow,Run,RunMetadata}};\n\
          fn main() {{\n\
              let mut text = FrozenText::new(\"suite\".to_owned());\n\
              let mut builder = DictionaryBuilder::default();\n\
@@ -134,11 +133,28 @@ fn immutable_fixture(body: &str) -> String {
              assert_eq!(alias.as_bytes(),&[255,0,128]);\n\
              assert!(std::ptr::eq(alias.as_bytes(),bytes.as_bytes()));\n\
              let mut files = FrozenFiles::from_vec(vec![(0,bytes.clone())]);\n\
-             let mut results = FrozenResults::from_vec(vec![ResultRow]);\n\
-             let mut runs = FrozenRuns::from_vec(vec![Run]);\n\
+             let mut result = ResultRow::new(id,junit::Outcome::Passed,Some(12));\n\
+             let mut results = FrozenResults::from_vec(vec![result]);\n\
+             let mut metadata = RunMetadata::new(FrozenText::new(\"0123456789abcdef0123456789abcdef\".to_owned()),Some(text.clone()),text.clone(),text.clone(),0,Some(text.clone()),None);\n\
+             let mut run = Run::new(metadata.clone(),files.clone(),results.clone());\n\
+             let mut runs = FrozenRuns::from_vec(vec![run.clone()]);\n\
              assert_eq!(files.iter().next().unwrap().1.as_bytes(),&[255,0,128]);\n\
              assert_eq!(results.iter().count(),1);\n\
              assert_eq!(runs.iter().count(),1);\n\
+             assert_eq!(result.test(),id);\n\
+             assert_eq!(result.outcome(),junit::Outcome::Passed);\n\
+             assert_eq!(result.duration(),Some(12));\n\
+             assert_eq!(run.metadata(),&metadata);\n\
+             assert_eq!(run.metadata().history_id().as_str(),\"0123456789abcdef0123456789abcdef\");\n\
+             assert_eq!(run.metadata().commit().unwrap().as_str(),\"suite\");\n\
+             assert_eq!(run.metadata().source().as_str(),\"suite\");\n\
+             assert_eq!(run.metadata().at().as_str(),\"suite\");\n\
+             assert_eq!(run.metadata().partial(),0);\n\
+             assert_eq!(run.metadata().branch().unwrap().as_str(),\"suite\");\n\
+             assert!(run.metadata().tag().is_none());\n\
+             assert_eq!(run.files(),&files);\n\
+             assert_eq!(run.results(),&results);\n\
+             assert_eq!(runs.iter().next().unwrap(),&run);\n\
              {body}\n\
          }}\n",
         text = root.join("text.rs").to_str().unwrap(),
@@ -202,8 +218,29 @@ fn immutable_text_and_dictionary_reject_actual_mutation_after_valid_setup() {
             "error[E0616]",
         ),
         ("files.0[0].0=7;", "error[E0616]"),
-        ("results.0[0]=ResultRow;", "error[E0616]"),
-        ("runs.0[0]=Run;", "error[E0616]"),
+        ("results.0[0]=result;", "error[E0616]"),
+        ("runs.0[0]=run.clone();", "error[E0616]"),
+        ("run.metadata=metadata.clone();", "error[E0616]"),
+        ("run.files=files.clone();", "error[E0616]"),
+        ("run.results=results.clone();", "error[E0616]"),
+        ("metadata.history_id=text.clone();", "error[E0616]"),
+        ("metadata.commit=None;", "error[E0616]"),
+        ("metadata.source=text.clone();", "error[E0616]"),
+        ("metadata.at=text.clone();", "error[E0616]"),
+        ("metadata.partial=1;", "error[E0616]"),
+        ("metadata.branch=None;", "error[E0616]"),
+        ("metadata.tag=Some(text.clone());", "error[E0616]"),
+        ("result.test=id;", "error[E0616]"),
+        ("result.outcome=junit::Outcome::Failed;", "error[E0616]"),
+        ("result.duration=None;", "error[E0616]"),
+        ("*run.metadata()=metadata.clone();", "error[E0594]"),
+        ("*run.files()=files.clone();", "error[E0594]"),
+        ("*run.results()=results.clone();", "error[E0594]"),
+        ("*run.metadata().source()=text.clone();", "error[E0594]"),
+        (
+            "*run.results().iter().next().unwrap()=result;",
+            "error[E0594]",
+        ),
     ] {
         let (negative, _) = compile_fixture(body, false);
         let stderr = String::from_utf8_lossy(&negative.stderr);

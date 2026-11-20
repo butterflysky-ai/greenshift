@@ -5,6 +5,7 @@ use std::path::Path;
 
 use rusqlite::{config::DbConfig, params, Connection, OpenFlags};
 
+#[cfg(test)]
 use crate::junit::Outcome;
 use crate::store::{self, Store, APPLICATION_ID, SCHEMA_VERSION};
 use crate::tainted::Tainted;
@@ -14,7 +15,7 @@ mod frozen;
 mod text;
 
 use dictionary::{DictionaryBuilder, TestDictionary, TestId, TestKey};
-use frozen::{FrozenBytes, FrozenFiles, FrozenResults, FrozenRuns};
+use frozen::{FrozenBytes, FrozenFiles, FrozenResults, FrozenRuns, ResultRow, Run, RunMetadata};
 use text::FrozenText;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,15 +38,8 @@ impl From<rusqlite::Error> for SnapshotError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ResultRow {
-    test: TestId,
-    outcome: Outcome,
-    duration: Option<i64>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RunMetadata {
+struct RunMetadataBuilder {
     history_id: FrozenText,
     commit: Option<FrozenText>,
     source: FrozenText,
@@ -55,27 +49,46 @@ struct RunMetadata {
     tag: Option<FrozenText>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Run {
-    metadata: RunMetadata,
-    files: FrozenFiles,
-    results: FrozenResults,
+impl RunMetadataBuilder {
+    fn from_frozen(metadata: &RunMetadata) -> Self {
+        Self {
+            history_id: metadata.history_id().clone(),
+            commit: metadata.commit().cloned(),
+            source: metadata.source().clone(),
+            at: metadata.at().clone(),
+            partial: metadata.partial(),
+            branch: metadata.branch().cloned(),
+            tag: metadata.tag().cloned(),
+        }
+    }
+
+    fn freeze(self) -> RunMetadata {
+        RunMetadata::new(
+            self.history_id,
+            self.commit,
+            self.source,
+            self.at,
+            self.partial,
+            self.branch,
+            self.tag,
+        )
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct RunBuilder {
-    metadata: RunMetadata,
+    metadata: RunMetadataBuilder,
     files: Vec<(i64, FrozenBytes)>,
     results: Vec<ResultRow>,
 }
 
 impl RunBuilder {
     fn freeze(self) -> Run {
-        Run {
-            metadata: self.metadata,
-            files: FrozenFiles::from_vec(self.files),
-            results: FrozenResults::from_vec(self.results),
-        }
+        Run::new(
+            self.metadata.freeze(),
+            FrozenFiles::from_vec(self.files),
+            FrozenResults::from_vec(self.results),
+        )
     }
 }
 
@@ -115,7 +128,7 @@ pub(crate) fn check_sidecars(path: &Path) -> Result<(), SnapshotError> {
             Ok(_) => {
                 return Err(invalid(
                     "snapshot must be standalone: SQLite sidecar exists",
-                ))
+                ));
             }
         }
     }
@@ -130,7 +143,7 @@ fn check_output(path: &Path) -> Result<(), SnapshotError> {
         Ok(_) => {
             return Err(invalid(
                 "snapshot destination must be a regular non-symlink file",
-            ))
+            ));
         }
     }
     // Never remove sidecars: they may belong to a live database. Replacing only
@@ -243,8 +256,12 @@ fn load_connection(conn: &Connection, version: i64) -> Result<Data, SnapshotErro
     let run_sql = match version {
         1 => "SELECT id,commit_sha,source,ingested_at,0,NULL,NULL,NULL FROM runs ORDER BY id",
         2 => "SELECT id,commit_sha,source,ingested_at,partial,NULL,NULL,NULL FROM runs ORDER BY id",
-        3 => "SELECT id,commit_sha,source,ingested_at,partial,branch,tag,NULL FROM runs ORDER BY id",
-        _ => "SELECT id,commit_sha,source,ingested_at,partial,branch,tag,history_id FROM runs ORDER BY id",
+        3 => {
+            "SELECT id,commit_sha,source,ingested_at,partial,branch,tag,NULL FROM runs ORDER BY id"
+        }
+        _ => {
+            "SELECT id,commit_sha,source,ingested_at,partial,branch,tag,history_id FROM runs ORDER BY id"
+        }
     };
     let mut stmt = conn.prepare(run_sql)?;
     let mut rows = stmt.query([])?;
@@ -254,7 +271,7 @@ fn load_connection(conn: &Connection, version: i64) -> Result<Data, SnapshotErro
             Some(identity) => identity,
             None => FrozenText::copy_from(""),
         };
-        let metadata = RunMetadata {
+        let metadata = RunMetadataBuilder {
             history_id,
             commit: optional_text(row, 1)?,
             source: frozen_text(row, 2)?,
@@ -332,11 +349,8 @@ fn load_connection(conn: &Connection, version: i64) -> Result<Data, SnapshotErro
         if run.results.capacity() == 0 {
             run.results.reserve_exact(1);
         }
-        run.results.push(ResultRow {
-            test,
-            outcome: parsed_outcome,
-            duration,
-        });
+        run.results
+            .push(ResultRow::new(test, parsed_outcome, duration));
     }
     if version < 4 {
         for (id, identity) in store::legacy_run_identities(conn)? {
@@ -348,7 +362,7 @@ fn load_connection(conn: &Connection, version: i64) -> Result<Data, SnapshotErro
     }
     for run in runs.values_mut() {
         run.results
-            .sort_by(|a, b| tests.get(a.test).cmp(&tests.get(b.test)));
+            .sort_by(|a, b| tests.get(a.test()).cmp(&tests.get(b.test())));
     }
     Ok(Data {
         tests,
@@ -394,27 +408,28 @@ fn insert_data(conn: &Connection, data: &Data) -> Result<(), SnapshotError> {
     }
     let mut chronological: Vec<_> = data.runs.iter().collect();
     chronological.sort_unstable_by(|a, b| {
-        (&a.metadata.at, &a.metadata.history_id).cmp(&(&b.metadata.at, &b.metadata.history_id))
+        (a.metadata().at(), a.metadata().history_id())
+            .cmp(&(b.metadata().at(), b.metadata().history_id()))
     });
     for run in chronological {
-        let metadata = &run.metadata;
-        conn.execute("INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![metadata.commit.as_ref().map(FrozenText::as_str),metadata.source.as_str(),metadata.at.as_str(),metadata.partial,metadata.branch.as_ref().map(FrozenText::as_str),metadata.tag.as_ref().map(FrozenText::as_str),metadata.history_id.as_str()])?;
+        let metadata = run.metadata();
+        conn.execute("INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![metadata.commit().map(FrozenText::as_str),metadata.source().as_str(),metadata.at().as_str(),metadata.partial(),metadata.branch().map(FrozenText::as_str),metadata.tag().map(FrozenText::as_str),metadata.history_id().as_str()])?;
         let id = conn.last_insert_rowid();
-        for (position, path) in run.files.iter() {
+        for (position, path) in run.files().iter() {
             conn.execute(
                 "INSERT INTO run_files(run_id,position,path) VALUES (?1,?2,?3)",
                 params![id, position, path.as_bytes()],
             )?;
         }
-        for result in run.results.iter() {
+        for result in run.results().iter() {
             data.tests
-                .get(result.test)
+                .get(result.test())
                 .ok_or_else(|| invalid("result test missing from snapshot"))?;
-            let test = i64::try_from(result.test.index() + 1)
+            let test = i64::try_from(result.test().index() + 1)
                 .map_err(|_| invalid("test id exceeds SQLite range"))?;
             conn.execute(
                 "INSERT INTO results(run_id,test_id,outcome,duration_ms) VALUES (?1,?2,?3,?4)",
-                params![id, test, result.outcome.as_str(), result.duration],
+                params![id, test, result.outcome().as_str(), result.duration()],
             )?;
         }
     }
@@ -434,18 +449,18 @@ fn remap_runs(
 ) -> Result<Vec<RunBuilder>, SnapshotError> {
     let mut remapped = Vec::with_capacity(runs.len());
     for run in runs.iter() {
-        let mut results = Vec::with_capacity(run.results.len());
-        for result in run.results.iter() {
+        let mut results = Vec::with_capacity(run.results().len());
+        for result in run.results().iter() {
             let test = *mapping
-                .get(result.test.index())
+                .get(result.test().index())
                 .ok_or_else(|| invalid("result test missing from snapshot"))?;
-            results.push(ResultRow { test, ..*result });
+            results.push(ResultRow::new(test, result.outcome(), result.duration()));
         }
-        results.sort_by(|a, b| dictionary.get(a.test).cmp(&dictionary.get(b.test)));
-        let mut files = Vec::with_capacity(run.files.len());
-        files.extend(run.files.iter().cloned());
+        results.sort_by(|a, b| dictionary.get(a.test()).cmp(&dictionary.get(b.test())));
+        let mut files = Vec::with_capacity(run.files().len());
+        files.extend(run.files().iter().cloned());
         remapped.push(RunBuilder {
-            metadata: run.metadata.clone(),
+            metadata: RunMetadataBuilder::from_frozen(run.metadata()),
             files,
             results,
         });
@@ -501,7 +516,7 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
         for run in incoming {
             match known.get(run.metadata.history_id.as_str()) {
                 Some(existing) if **existing != run => {
-                    return Err(invalid("one run identity has conflicting contents"))
+                    return Err(invalid("one run identity has conflicting contents"));
                 }
                 Some(_) => (),
                 None => additions.push(run),
@@ -700,7 +715,7 @@ mod tests {
                 .unwrap()
                 .runs
                 .iter()
-                .map(|run| run.metadata.history_id.as_str().to_owned())
+                .map(|run| run.metadata().history_id().as_str().to_owned())
                 .collect::<Vec<_>>();
             #[cfg(unix)]
             let inode = {
@@ -710,11 +725,12 @@ mod tests {
             restore_existing(&local, &incoming, || false).unwrap();
             assert_eq!(sources(&local), vec!["legacy", "remote"]);
             let restored = load(&local).unwrap();
-            assert!(before.iter().all(|id| restored.runs.iter().any(|run| run
-                .metadata
-                .history_id
-                .as_str()
-                == id)));
+            assert!(before.iter().all(|id| {
+                restored
+                    .runs
+                    .iter()
+                    .any(|run| run.metadata().history_id().as_str() == id)
+            }));
             let conn = Connection::open(&local).unwrap();
             assert_eq!(checked_connection_version(&conn).unwrap(), SCHEMA_VERSION);
             #[cfg(unix)]
@@ -748,7 +764,16 @@ mod tests {
 
     #[test]
     fn test_frozen_snapshot_layout_and_capacity_receipt() {
-        eprintln!("snapshot layout: TestKey={} TestId={} ResultRow={} RunMetadata={} RunBuilder={} Run={} file_row={}",std::mem::size_of::<TestKey>(),std::mem::size_of::<TestId>(),std::mem::size_of::<ResultRow>(),std::mem::size_of::<RunMetadata>(),std::mem::size_of::<RunBuilder>(),std::mem::size_of::<Run>(),std::mem::size_of::<(i64,FrozenBytes)>());
+        eprintln!(
+            "snapshot layout: TestKey={} TestId={} ResultRow={} RunMetadata={} RunBuilder={} Run={} file_row={}",
+            std::mem::size_of::<TestKey>(),
+            std::mem::size_of::<TestId>(),
+            std::mem::size_of::<ResultRow>(),
+            std::mem::size_of::<RunMetadata>(),
+            std::mem::size_of::<RunBuilder>(),
+            std::mem::size_of::<Run>(),
+            std::mem::size_of::<(i64, FrozenBytes)>()
+        );
         let mut dictionary = DictionaryBuilder::default();
         let test = dictionary.insert(TestKey::new(
             FrozenText::copy_from("suite"),
@@ -764,11 +789,7 @@ mod tests {
                 if files.capacity() == 0 {
                     files.reserve_exact(1);
                 }
-                results.push(ResultRow {
-                    test,
-                    outcome: Outcome::Passed,
-                    duration: Some(1),
-                });
+                results.push(ResultRow::new(test, Outcome::Passed, Some(1)));
                 files.push((index as i64, FrozenBytes::copy_from(&[0, 255])));
             }
             eprintln!(
@@ -876,8 +897,8 @@ mod tests {
         let name = data.tests.iter().next().unwrap().name().as_str();
         assert_eq!(name.len(), 1024);
         for run in data.runs.iter() {
-            let result = run.results.iter().next().unwrap();
-            let resolved = data.tests.get(result.test).unwrap().name().as_str();
+            let result = run.results().iter().next().unwrap();
+            let resolved = data.tests.get(result.test()).unwrap().name().as_str();
             assert!(std::ptr::eq(name.as_ptr(), resolved.as_ptr()));
         }
         assert!(std::mem::size_of::<ResultRow>() <= 32);
@@ -929,16 +950,51 @@ mod tests {
     #[test]
     fn test_validate_extra_schema_and_bad_values_rejected() {
         for (change, expected) in [
-            ("CREATE TABLE extra(value)", "schema does not exactly match this greenshift release"),
-            ("CREATE VIEW extra AS SELECT * FROM tests", "schema does not exactly match this greenshift release"),
-            ("CREATE TRIGGER extra AFTER INSERT ON tests BEGIN DELETE FROM results; END", "schema does not exactly match this greenshift release"),
+            (
+                "CREATE TABLE extra(value)",
+                "schema does not exactly match this greenshift release",
+            ),
+            (
+                "CREATE VIEW extra AS SELECT * FROM tests",
+                "schema does not exactly match this greenshift release",
+            ),
+            (
+                "CREATE TRIGGER extra AFTER INSERT ON tests BEGIN DELETE FROM results; END",
+                "schema does not exactly match this greenshift release",
+            ),
             ("PRAGMA application_id=0", "application id mismatch"),
-            ("PRAGMA user_version=999", "unsupported snapshot schema version"),
-            ("PRAGMA ignore_check_constraints=ON; UPDATE results SET duration_ms=-1", "invalid outcome or duration"),
-            ("PRAGMA foreign_keys=OFF; UPDATE results SET test_id=999", "broken foreign key"),
-            ("PRAGMA foreign_keys=OFF; UPDATE runs SET id=-1; UPDATE results SET run_id=-1; UPDATE run_files SET run_id=-1", "invalid run id, partial flag, or branch/tag"),
-            ("UPDATE runs SET history_id=NULL", "run history id must be 32 lowercase hex digits"),
-            ("UPDATE runs SET history_id='ABCDEF'", "run history id must be 32 lowercase hex digits"),
+            (
+                "PRAGMA user_version=999",
+                "unsupported snapshot schema version",
+            ),
+            (
+                "PRAGMA ignore_check_constraints=ON; UPDATE results SET duration_ms=-1",
+                "invalid outcome or duration",
+            ),
+            (
+                "PRAGMA foreign_keys=OFF; UPDATE results SET test_id=999",
+                "broken foreign key",
+            ),
+            (
+                "PRAGMA foreign_keys=OFF; UPDATE runs SET id=-1; UPDATE results SET run_id=-1; UPDATE run_files SET run_id=-1",
+                "invalid run id, partial flag, or branch/tag",
+            ),
+            (
+                "UPDATE runs SET history_id=NULL",
+                "run history id must be 32 lowercase hex digits",
+            ),
+            (
+                "UPDATE runs SET history_id='ABCDEF'",
+                "run history id must be 32 lowercase hex digits",
+            ),
+            (
+                "UPDATE runs SET history_id='0000000000000000000000000000000A'",
+                "run history id must be 32 lowercase hex digits",
+            ),
+            (
+                "UPDATE runs SET history_id='0000000000000000000000000000000g'",
+                "run history id must be 32 lowercase hex digits",
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("db");
@@ -947,8 +1003,11 @@ mod tests {
                 .unwrap()
                 .execute_batch(change)
                 .unwrap();
-            let result=validate(&path);
-            assert!(matches!(&result, Err(SnapshotError::Invalid(message)) if *message == expected), "wrong rejection for {change}: {result:?}");
+            let result = validate(&path);
+            assert!(
+                matches!(&result, Err(SnapshotError::Invalid(message)) if *message == expected),
+                "wrong rejection for {change}: {result:?}"
+            );
         }
     }
 
