@@ -1041,7 +1041,7 @@ mod tests {
             assert_eq!(std::fs::read(&input).unwrap(), before);
             let upgraded = Store::open_read_only(&output).unwrap().unwrap();
             assert_eq!(upgraded.schema_version().unwrap(), SCHEMA_VERSION);
-            assert_eq!(upgraded.history(&[]).unwrap().runs.len(), 1);
+            assert_eq!(upgraded.history(&[]).unwrap().runs().len(), 1);
         }
     }
 
@@ -1451,7 +1451,7 @@ mod tests {
         drop(Store::open(&input).unwrap());
         snapshot(&input, &output).unwrap();
         let store = Store::open_read_only(&output).unwrap().unwrap();
-        assert!(store.history(&[]).unwrap().runs.is_empty());
+        assert!(store.history(&[]).unwrap().runs().is_empty());
     }
 
     #[test]

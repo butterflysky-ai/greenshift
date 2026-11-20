@@ -275,13 +275,13 @@ impl Project {
         let history = store.history(&[]).unwrap();
         let prefix = format!("{PACKAGE}::");
         history
-            .runs
+            .runs()
             .iter()
             .map(|run| {
-                run.results
+                run.results()
                     .iter()
                     .map(|result| {
-                        let (suite, name) = &history.tests[&result.test_id];
+                        let (suite, name) = &history.tests()[&result.test_id()];
                         let binary = suite.as_raw().strip_prefix(&prefix).expect("a test binary");
                         (binary.to_owned(), name.as_raw().to_owned())
                     })

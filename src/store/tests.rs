@@ -615,23 +615,23 @@ fn run_from(source: &'static str) -> NewRun<'static> {
 /// need not know test ids.
 fn named(history: &History) -> Vec<(i64, String, Vec<Row>)> {
     history
-        .runs
+        .runs()
         .iter()
         .map(|run| {
             let results = run
-                .results
+                .results()
                 .iter()
                 .map(|r| {
-                    let (suite, name) = &history.tests[&r.test_id];
+                    let (suite, name) = &history.tests()[&r.test_id()];
                     (
                         suite.as_raw().to_owned(),
                         name.as_raw().to_owned(),
-                        r.outcome.as_str().to_owned(),
-                        r.duration_ms,
+                        r.outcome().as_str().to_owned(),
+                        r.duration_ms(),
                     )
                 })
                 .collect();
-            (run.id, run.source.clone(), results)
+            (run.id(), run.source().to_owned(), results)
         })
         .collect()
 }
@@ -680,7 +680,11 @@ fn history_reads_every_run_oldest_first_with_its_results() {
         ]
     );
     // Results within a run are in test id order.
-    let ids: Vec<i64> = history.runs[1].results.iter().map(|r| r.test_id).collect();
+    let ids: Vec<i64> = history.runs()[1]
+        .results()
+        .iter()
+        .map(|r| r.test_id())
+        .collect();
     assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
 }
 
@@ -700,9 +704,9 @@ fn history_keeps_only_the_given_sources() {
         store
             .history(&sources)
             .unwrap()
-            .runs
+            .runs()
             .iter()
-            .map(|r| (r.id, r.source.clone()))
+            .map(|r| (r.id(), r.source().to_owned()))
             .collect()
     };
     assert_eq!(runs(&["ci"]), [(1, "ci".into()), (4, "ci".into())]);
@@ -713,13 +717,13 @@ fn history_keeps_only_the_given_sources() {
     assert_eq!(runs(&["absent"]), []);
     assert_eq!(runs(&[]).len(), 4);
     let only_ci = store.history(&["ci".into()]).unwrap();
-    assert!(only_ci.runs.iter().all(|r| r.results.len() == 1));
+    assert!(only_ci.runs().iter().all(|r| r.results().len() == 1));
 }
 
 #[test]
 fn history_of_an_empty_store_is_empty() {
     let store = Store::open_in_memory().unwrap();
-    assert_eq!(store.history(&[]).unwrap().runs, []);
+    assert_eq!(store.history(&[]).unwrap().runs(), []);
 }
 
 #[test]
@@ -1015,7 +1019,7 @@ fn a_version_1_store_is_migrated_and_its_runs_are_not_partial() {
             vec![row("s", "t", "passed", Some(5))]
         )]
     );
-    assert!(!history.runs[0].partial);
+    assert!(!history.runs()[0].partial());
     assert_eq!(run_rows(&store)[0].4, None, "no branch is known");
     assert_eq!(run_rows(&store)[0].5, None, "no tag is known");
     // New runs are written alongside the old one.
@@ -1027,9 +1031,9 @@ fn a_version_1_store_is_migrated_and_its_runs_are_not_partial() {
     let flags: Vec<bool> = store
         .history(&[])
         .unwrap()
-        .runs
+        .runs()
         .iter()
-        .map(|r| r.partial)
+        .map(|r| r.partial())
         .collect();
     assert_eq!(flags, [false, true]);
 }
@@ -1050,7 +1054,7 @@ fn a_read_only_open_reads_a_version_1_store_as_it_is() {
             vec![row("s", "t", "passed", Some(5))]
         )]
     );
-    assert!(!history.runs[0].partial);
+    assert!(!history.runs()[0].partial());
     drop(store);
     assert_eq!(user_version(&path), 1);
 }
@@ -1064,9 +1068,9 @@ fn history_reads_back_whether_each_run_is_partial() {
     let flags: Vec<bool> = store
         .history(&[])
         .unwrap()
-        .runs
+        .runs()
         .iter()
-        .map(|r| r.partial)
+        .map(|r| r.partial())
         .collect();
     assert_eq!(flags, [false, true, false]);
 }
@@ -1211,9 +1215,9 @@ fn a_read_only_open_reads_a_version_2_store_as_it_is() {
     let flags: Vec<bool> = store
         .history(&[])
         .unwrap()
-        .runs
+        .runs()
         .iter()
-        .map(|r| r.partial)
+        .map(|r| r.partial())
         .collect();
     assert_eq!(flags, [false, true]);
     drop(store);

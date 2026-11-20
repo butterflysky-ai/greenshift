@@ -156,16 +156,16 @@ pub fn analyse_among(
     history: &History,
     eligible: impl Fn(&Tainted, &Tainted) -> bool,
 ) -> Option<Analysis> {
-    let full = full_runs(&history.runs);
+    let full = full_runs(history.runs());
     let newest = full.last()?;
 
     // The universe, by suite and name; `index` maps a test id into it.
     let no_name = (Tainted::default(), Tainted::default());
-    let name_of = |id: &i64| history.tests.get(id).unwrap_or(&no_name);
+    let name_of = |id: &i64| history.tests().get(id).unwrap_or(&no_name);
     let mut ids: Vec<i64> = newest
-        .results
+        .results()
         .iter()
-        .map(|r| r.test_id)
+        .map(|r| r.test_id())
         .filter(|id| {
             let (suite, name) = name_of(id);
             eligible(suite, name)
@@ -186,16 +186,16 @@ pub fn analyse_among(
         let mut failing = Vec::new();
         // Whether a test `eligible` left out failed in the run.
         let mut left_out_failed = false;
-        for r in &run.results {
-            let failed = matches!(r.outcome, Outcome::Failed | Outcome::Error);
-            let Some(&i) = index.get(&r.test_id) else {
+        for r in run.results() {
+            let failed = matches!(r.outcome(), Outcome::Failed | Outcome::Error);
+            let Some(&i) = index.get(&r.test_id()) else {
                 if failed && !left_out_failed {
-                    let (suite, name) = name_of(&r.test_id);
+                    let (suite, name) = name_of(&r.test_id());
                     left_out_failed = !eligible(suite, name);
                 }
                 continue;
             };
-            match r.outcome {
+            match r.outcome() {
                 Outcome::Passed => passes[i] += 1,
                 Outcome::Failed | Outcome::Error => failing.push(i),
                 Outcome::Skipped => {}
@@ -213,16 +213,16 @@ pub fn analyse_among(
     // is not a run of the test, so it adds neither a count nor a duration.
     let mut results = vec![0u64; ids.len()];
     let mut latest: Vec<Vec<u64>> = vec![Vec::new(); ids.len()];
-    for run in history.runs.iter().rev() {
-        for r in &run.results {
-            let Some(&i) = index.get(&r.test_id) else {
+    for run in history.runs().iter().rev() {
+        for r in run.results() {
+            let Some(&i) = index.get(&r.test_id()) else {
                 continue;
             };
-            if r.outcome == Outcome::Skipped {
+            if r.outcome() == Outcome::Skipped {
                 continue;
             }
             results[i] += 1;
-            if let Some(ms) = r.duration_ms {
+            if let Some(ms) = r.duration_ms() {
                 if latest[i].len() < MEDIAN_OF {
                     // 0 ms counts as 1 ms, so nothing divides by zero.
                     latest[i].push(ms.max(1) as u64);
@@ -265,13 +265,13 @@ pub fn analyse_among(
 /// result count among the [`FULL_WINDOW`] full runs before it.
 fn full_runs(runs: &[StoredRun]) -> Vec<&StoredRun> {
     let mut full: Vec<&StoredRun> = Vec::new();
-    for run in runs.iter().filter(|run| !run.partial) {
-        let count = run.results.len() as u64;
+    for run in runs.iter().filter(|run| !run.partial()) {
+        let count = run.results().len() as u64;
         let largest = full
             .iter()
             .rev()
             .take(FULL_WINDOW)
-            .map(|r| r.results.len() as u64)
+            .map(|r| r.results().len() as u64)
             .max();
         let (num, den) = FULL_SHARE;
         if largest.is_none_or(|largest| count * den >= largest * num) {

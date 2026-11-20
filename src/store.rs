@@ -47,6 +47,12 @@ use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtensio
 use crate::junit::{Outcome, TestCase};
 use crate::tainted::Tainted;
 
+mod history_builder;
+mod history_data;
+
+pub use history_builder::{HistoryBuilder, StoredRunBuilder};
+pub use history_data::{History, StoredResult, StoredRun};
+
 /// The default store location, relative to the working directory.
 pub const DEFAULT_PATH: &str = ".greenshift/history.sqlite";
 
@@ -338,35 +344,6 @@ pub struct Recorded {
     pub results: usize,
 }
 
-/// One stored result, as read back by [`Store::history`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StoredResult {
-    /// `tests.id`; [`History::tests`] names it.
-    pub test_id: i64,
-    pub outcome: Outcome,
-    pub duration_ms: Option<i64>,
-}
-
-/// One stored run and its results, as read back by [`Store::history`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredRun {
-    pub id: i64,
-    pub source: String,
-    /// Recorded as holding only part of the suite; see [`NewRun::partial`].
-    pub partial: bool,
-    /// The run's results, by test id.
-    pub results: Vec<StoredResult>,
-}
-
-/// The runs and results [`Store::history`] read.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct History {
-    /// Oldest first, by run id.
-    pub runs: Vec<StoredRun>,
-    /// Suite and name of every test, by test id.
-    pub tests: HashMap<i64, (Tainted, Tainted)>,
-}
-
 /// An open, migrated history store.
 #[derive(Debug)]
 pub struct Store {
@@ -654,13 +631,13 @@ impl Store {
         // A version 1 store, opened read-only, has no `partial` column:
         // its runs were all recorded as whole.
         let partial = if self.version >= 2 { "u.partial" } else { "0" };
-        let mut runs: Vec<StoredRun> = tx
+        let mut runs: Vec<StoredRunBuilder> = tx
             .prepare(&format!(
                 "SELECT u.id, u.source, {partial} FROM runs u {filter} ORDER BY u.id"
             ))
             .and_then(|mut stmt| {
                 stmt.query_map(params_from_iter(sources), |r| {
-                    Ok(StoredRun {
+                    Ok(StoredRunBuilder {
                         id: r.get(0)?,
                         source: r.get(1)?,
                         partial: r.get(2)?,
@@ -688,14 +665,7 @@ impl Store {
                             format!("unknown outcome \"{outcome}\"").into(),
                         )
                     })?;
-                    Ok((
-                        r.get(0)?,
-                        StoredResult {
-                            test_id: r.get(1)?,
-                            outcome,
-                            duration_ms: r.get(3)?,
-                        },
-                    ))
+                    Ok((r.get(0)?, StoredResult::new(r.get(1)?, outcome, r.get(3)?)))
                 })?
                 .collect()
             })
@@ -723,7 +693,11 @@ impl Store {
                 run.results.push(result);
             }
         }
-        Ok(History { runs, tests })
+        Ok(HistoryBuilder {
+            runs: runs.into_iter().map(StoredRunBuilder::build).collect(),
+            tests,
+        }
+        .build())
     }
 }
 
