@@ -25,9 +25,14 @@ fn generated(forge: &str, sha256: &str, extra: &[&str]) -> Value {
     let path = dir
         .path()
         .join(format!(".{forge}/workflows/greenshift.yml"));
+    yaml(&path)
+}
+
+/// The YAML file at `path`, as JSON.
+fn yaml(path: &std::path::Path) -> Value {
     let output = Command::new("yq")
         .args(["-o=json", "."])
-        .arg(&path)
+        .arg(path)
         .output()
         .expect("mikefarah yq installed as for cache_guard tests");
     assert!(
@@ -64,17 +69,29 @@ fn assert_publisher_separation(workflow: &Value) {
         assert!(!step["run"].as_str().unwrap_or("").contains("cargo"));
     }
     assert!(workflow["env"]["GREENSHIFT_HISTORY_TOKEN"].is_null());
-    for job in ["test", "publish"] {
+    // Exactly the greenshift steps that read or write the history get
+    // the token.
+    for (job, with_token) in [
+        (
+            "test",
+            &["Resolve canonical cache key", "Run tests and export data"][..],
+        ),
+        ("publish", &["Validate, merge and publish"]),
+    ] {
         assert!(workflow["jobs"][job]["env"]["GREENSHIFT_HISTORY_TOKEN"].is_null());
-        for step in steps(workflow, job) {
-            if !step["env"]["GREENSHIFT_HISTORY_TOKEN"].is_null() {
+        let given: Vec<&str> = steps(workflow, job)
+            .iter()
+            .filter(|step| !step["env"]["GREENSHIFT_HISTORY_TOKEN"].is_null())
+            .map(|step| {
                 assert!(step["run"].as_str().unwrap().contains("greenshift"));
                 assert_eq!(
                     step["env"]["GREENSHIFT_HISTORY_TOKEN"],
                     "${{ github.token }}"
                 );
-            }
-        }
+                step["name"].as_str().unwrap()
+            })
+            .collect();
+        assert_eq!(given, with_token, "{job}");
     }
     let checkout = steps(workflow, "test")
         .iter()
@@ -136,9 +153,15 @@ fn github_keeps_the_reference_trust_boundary() {
 }
 
 /// Run the install step's script of `job`, with `curl` replaced by one
-/// that writes `binary` where the real one would write the download, and
-/// return whether it succeeded and what it installed.
-fn install(workflow: &Value, job: &str, binary: &[u8]) -> (bool, Option<Vec<u8>>) {
+/// that writes `binary` where the real one would write the download (or,
+/// when `curl_fails`, fails partway through it), and return whether it
+/// succeeded and what it installed.
+fn install(
+    workflow: &Value,
+    job: &str,
+    binary: &[u8],
+    curl_fails: bool,
+) -> (bool, Option<Vec<u8>>) {
     let script = step(workflow, job, "Install pinned greenshift release")["run"]
         .as_str()
         .unwrap()
@@ -149,7 +172,7 @@ fn install(workflow: &Value, job: &str, binary: &[u8]) -> (bool, Option<Vec<u8>>
     let payload = dir.path().join("payload");
     std::fs::write(&payload, binary).unwrap();
     let urls = dir.path().join("urls");
-    fake_curl(&bin, &payload, &urls);
+    fake_curl(&bin, &payload, &urls, curl_fails);
     let temp = dir.path().join("runner-temp");
     std::fs::create_dir(&temp).unwrap();
     let path = format!(
@@ -198,16 +221,31 @@ fn install(workflow: &Value, job: &str, binary: &[u8]) -> (bool, Option<Vec<u8>>
 
 /// An executable `curl` in `bin` that writes `payload` where the real one
 /// would write the download, and appends each URL it is given to `urls`.
-/// Like the real one with --fail, it fails without an --output.
-fn fake_curl(bin: &std::path::Path, payload: &std::path::Path, urls: &std::path::Path) {
+/// Like the real one with --fail, it fails without an --output. When
+/// `fails`, it writes part of the download and then fails as the real one
+/// does on a broken transfer: exit 22, removing the partial file only if
+/// given --remove-on-error.
+fn fake_curl(
+    bin: &std::path::Path,
+    payload: &std::path::Path,
+    urls: &std::path::Path,
+    fails: bool,
+) {
     let curl = bin.join("curl");
+    let finish = if fails {
+        "head -c 3 {payload} > \"$out\"\n[[ -z $remove ]] || rm -f \"$out\"\nexit 22\n"
+    } else {
+        "cp {payload} \"$out\"\n"
+    }
+    .replace("{payload}", &format!("{payload:?}"));
     std::fs::write(
         &curl,
         format!(
-            "#!/usr/bin/env bash\nout=\nwhile [[ $# -gt 0 ]]; do\n  \
+            "#!/usr/bin/env bash\nout=\nremove=\nwhile [[ $# -gt 0 ]]; do\n  \
              case $1 in\n    --output) out=$2; shift ;;\n    \
+             --remove-on-error) remove=1 ;;\n    \
              https://*) echo \"$1\" >> {urls:?} ;;\n  esac\n  \
-             shift\ndone\n[[ -n $out ]] || exit 22\ncp {payload:?} \"$out\"\n"
+             shift\ndone\n[[ -n $out ]] || exit 22\n{finish}"
         ),
     )
     .unwrap();
@@ -234,12 +272,50 @@ fn the_install_step_fails_closed_on_a_checksum_mismatch() {
     for forge in forges() {
         let workflow = generated(forge, &pinned, &[]);
         for job in ["test", "publish"] {
-            let (ok, installed) = install(&workflow, job, binary);
+            let (ok, installed) = install(&workflow, job, binary, false);
             assert!(ok, "{forge} {job}: the matching binary is installed");
             assert_eq!(installed.as_deref(), Some(&binary[..]));
-            let (ok, installed) = install(&workflow, job, b"tampered");
+            let (ok, installed) = install(&workflow, job, b"tampered", false);
             assert!(!ok, "{forge} {job}: a mismatch fails the step");
             assert_eq!(installed, None, "{forge} {job}: nothing is installed");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_broken_download_fails_the_install_step_and_leaves_nothing() {
+    let binary = b"#!/bin/sh\necho pretend greenshift\n";
+    for forge in forges() {
+        let workflow = generated(forge, &sha256_hex(binary), &[]);
+        for job in ["test", "publish"] {
+            // install() asserts that nothing but an installed binary is left.
+            let (ok, installed) = install(&workflow, job, binary, true);
+            assert!(!ok, "{forge} {job}: a broken download fails the step");
+            assert_eq!(installed, None, "{forge} {job}: nothing is installed");
+        }
+    }
+}
+
+#[test]
+fn the_pin_reaches_the_workflow_as_the_strings_given() {
+    // A checksum of decimal digits only, or digits around one `e`, is a
+    // number if written bare.
+    let digits = "1".repeat(64);
+    let exponent = format!("0e{}", "0".repeat(62));
+    for sha256 in [digits, exponent] {
+        for forge in forges() {
+            let workflow = generated(forge, &sha256, &[]);
+            assert_eq!(
+                workflow["env"]["GREENSHIFT_SHA256"],
+                Value::String(sha256.clone()),
+                "{forge}"
+            );
+            assert_eq!(
+                workflow["env"]["GREENSHIFT_RELEASE"],
+                Value::String(RELEASE.into()),
+                "{forge}"
+            );
         }
     }
 }
@@ -308,7 +384,12 @@ fn words(text: &str) -> String {
 fn the_forgejo_header_quotes_the_capability_gate_as_the_design_says_it() {
     let root = env!("CARGO_MANIFEST_DIR");
     let doc = std::fs::read_to_string(format!("{root}/docs/design/durable-history.md")).unwrap();
-    let doc = words(&doc.replace('`', "").replace("**", ""));
+    // Only the section the header names.
+    let (_, gate) = doc
+        .split_once("\n## Forgejo capability gate\n")
+        .expect("the design has the section");
+    let gate = gate.split("\n## ").next().unwrap();
+    let doc = words(&gate.replace('`', "").replace("**", ""));
     let dir = tempfile::tempdir().unwrap();
     assert_cmd::Command::cargo_bin("greenshift")
         .unwrap()
@@ -346,29 +427,146 @@ fn the_forgejo_header_quotes_the_capability_gate_as_the_design_says_it() {
             "not in the design: {paragraph:?}"
         );
     }
-    // Whole sentences, none dropped from the first paragraph.
+    // Whole sentences, none dropped from either paragraph.
     assert!(
         quoted[0].ends_with("read-only-test-job guarantee."),
         "{:?}",
         quoted[0]
     );
+    assert!(doc.starts_with(&quoted[0]), "{:?}", quoted[0]);
+    assert!(
+        quoted[1].ends_with("is offered as isolated."),
+        "{:?}",
+        quoted[1]
+    );
+}
+
+/// Each `uses` of a step in `workflow`'s jobs, as (action, commit).
+fn pins(workflow: &Value) -> Vec<(String, String)> {
+    workflow["jobs"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .flat_map(|job| steps(workflow, job))
+        .filter_map(|step| step["uses"].as_str())
+        .map(|uses| {
+            let (action, rev) = uses.rsplit_once('@').unwrap();
+            (action.to_owned(), rev.to_owned())
+        })
+        .collect()
+}
+
+/// The `cargo install ... cargo-nextest` command of `workflow`'s test job.
+fn nextest_install(workflow: &Value) -> String {
+    steps(workflow, "test")
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .find(|run| run.contains("cargo-nextest"))
+        .expect("the test job installs cargo-nextest")
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn the_pins_are_the_reference_workflows() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let reference = yaml(std::path::Path::new(&format!(
+        "{root}/examples/durable-history.github.yml"
+    )));
+    let reference_pins = pins(&reference);
+    for forge in forges() {
+        let workflow = generated(forge, &"a".repeat(64), &[]);
+        assert_eq!(
+            nextest_install(&workflow),
+            nextest_install(&reference),
+            "{forge}"
+        );
+        let mut compared = 0;
+        for (action, rev) in pins(&workflow) {
+            // Forgejo's mirror of GitHub's actions is the same repository
+            // at the same commits; its forks of the artifact actions have
+            // no counterpart in the reference.
+            let action = action
+                .strip_prefix("https://data.forgejo.org/")
+                .unwrap_or(&action);
+            if action.starts_with("https://code.forgejo.org/forgejo/") {
+                continue;
+            }
+            let expected: Vec<&String> = reference_pins
+                .iter()
+                .filter(|(name, _)| name == action)
+                .map(|(_, rev)| rev)
+                .collect();
+            assert!(
+                !expected.is_empty(),
+                "{forge}: {action} is not in the reference"
+            );
+            assert!(
+                expected.iter().all(|pinned| **pinned == rev),
+                "{forge}: {action}@{rev}, the reference pins {expected:?}"
+            );
+            compared += 1;
+        }
+        let want = if *forge == "github" { 5 } else { 3 };
+        assert_eq!(
+            compared, want,
+            "{forge}: every corresponding action compared"
+        );
+    }
+}
+
+/// What running the Forgejo test job's Rust step did.
+#[cfg(unix)]
+struct RustStep {
+    ok: bool,
+    /// Each URL fetched, one per line.
+    urls: String,
+    /// Whether the downloaded rustup-init was run.
+    ran: bool,
+    /// What the step appended to `$GITHUB_PATH`.
+    github_path: String,
+    /// The `$HOME` it ran with.
+    home: std::path::PathBuf,
 }
 
 /// Run the Forgejo test job's Rust step with a PATH that has only the
 /// tools it needs, `cargo` among them when `with_cargo`, and a `curl`
-/// that downloads `payload`; return whether it succeeded, the URLs it
-/// fetched, and whether the download was run.
+/// that downloads `payload`. When `pin_payload`, the step's pinned
+/// checksum is replaced with `payload`'s, standing in for the published
+/// rustup-init; `cargo_home` is `$CARGO_HOME`, if any.
 #[cfg(unix)]
-fn install_rust(with_cargo: bool, payload: &[u8]) -> (bool, String, bool) {
+fn install_rust(
+    with_cargo: bool,
+    payload: &[u8],
+    pin_payload: bool,
+    cargo_home: Option<&str>,
+) -> RustStep {
     let workflow = generated("forgejo", &"a".repeat(64), &[]);
-    let script = step(&workflow, "test", "Install Rust when the runner has none")["run"]
+    let mut script = step(&workflow, "test", "Install Rust when the runner has none")["run"]
         .as_str()
         .unwrap()
         .to_owned();
+    if pin_payload {
+        let pin = script
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("rustup_sha256="))
+            .expect("the step pins rustup-init's checksum")
+            .to_owned();
+        script = script.replace(&pin, &sha256_hex(payload));
+    }
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
-    for tool in ["bash", "sha256sum", "rm", "chmod", "env", "cp", "touch"] {
+    for tool in [
+        "bash",
+        "sha256sum",
+        "rm",
+        "chmod",
+        "env",
+        "cp",
+        "touch",
+        "head",
+    ] {
         let found = Command::new("bash")
             .args(["-c", &format!("command -v {tool}")])
             .output()
@@ -386,44 +584,67 @@ fn install_rust(with_cargo: bool, payload: &[u8]) -> (bool, String, bool) {
     let download = dir.path().join("payload");
     std::fs::write(&download, payload).unwrap();
     let urls = dir.path().join("urls");
-    fake_curl(&bin, &download, &urls);
+    fake_curl(&bin, &download, &urls, false);
     let temp = dir.path().join("runner-temp");
     std::fs::create_dir(&temp).unwrap();
-    let status = Command::new(bin.join("bash"))
-        .args(["--noprofile", "--norc", "-c", &script])
+    let home = dir.path().join("home");
+    let github_path = dir.path().join("github-path");
+    let mut cmd = Command::new(bin.join("bash"));
+    cmd.args(["--noprofile", "--norc", "-c", &script])
         .env_clear()
         .env("PATH", &bin)
+        .env("HOME", &home)
         .env("RUNNER_TEMP", &temp)
         .env("RAN", &ran)
-        .env("GITHUB_PATH", dir.path().join("github-path"))
-        .status()
-        .unwrap();
+        .env("GITHUB_PATH", &github_path);
+    if let Some(cargo_home) = cargo_home {
+        cmd.env("CARGO_HOME", cargo_home);
+    }
+    let status = cmd.status().unwrap();
     let leftovers: Vec<_> = std::fs::read_dir(&temp).unwrap().collect();
     assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
-    (
-        status.success(),
-        std::fs::read_to_string(&urls).unwrap_or_default(),
-        ran.exists(),
-    )
+    RustStep {
+        ok: status.success(),
+        urls: std::fs::read_to_string(&urls).unwrap_or_default(),
+        ran: ran.exists(),
+        github_path: std::fs::read_to_string(&github_path).unwrap_or_default(),
+        home,
+    }
 }
 
 #[cfg(unix)]
 #[test]
 fn the_rust_step_uses_the_runners_cargo_and_otherwise_installs_only_a_matching_rustup() {
     let rustup = b"#!/usr/bin/env bash\ntouch \"$RAN\"\n";
-    let (ok, urls, ran) = install_rust(true, rustup);
+    let url =
+        "https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init\n";
+    let present = install_rust(true, rustup, false, None);
     assert!(
-        ok && urls.is_empty() && !ran,
+        present.ok && present.urls.is_empty() && !present.ran,
         "cargo present: nothing fetched"
     );
-    let (ok, urls, ran) = install_rust(false, rustup);
+    assert!(present.github_path.is_empty(), "and PATH left as it is");
+    let mismatch = install_rust(false, rustup, false, None);
     assert!(
-        !ok,
+        !mismatch.ok,
         "a rustup-init that does not match the pin fails the step"
     );
-    assert!(!ran, "and is never run");
+    assert!(!mismatch.ran, "and is never run");
+    assert!(mismatch.github_path.is_empty());
+    assert_eq!(mismatch.urls, url);
+    let matching = install_rust(false, rustup, true, None);
+    assert!(matching.ok, "a matching rustup-init is installed");
+    assert!(matching.ran, "and run");
+    assert_eq!(matching.urls, url);
     assert_eq!(
-        urls,
-        "https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init\n"
+        matching.github_path,
+        format!("{}/.cargo/bin\n", matching.home.display()),
+        "and cargo's directory is put on PATH for later steps"
+    );
+    let elsewhere = install_rust(false, rustup, true, Some("/opt/cargo"));
+    assert!(elsewhere.ok && elsewhere.ran);
+    assert_eq!(
+        elsewhere.github_path, "/opt/cargo/bin\n",
+        "$CARGO_HOME wins"
     );
 }

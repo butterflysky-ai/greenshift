@@ -34,14 +34,16 @@
 # Forgejo's artifact and cache actions differ from GitHub's: the artifact
 # steps use Forgejo's own forks, as stock v4 refuses to run here. Check a
 # first run on your instance; missing history, cache or artifacts warn and
-# never fail the job.
+# never fail the job. Actions are named by full URL, not resolved against
+# the instance's DEFAULT_ACTIONS_URL, so that each pinned commit is looked
+# up in the repository it was pinned from, whatever that setting names.
 name: greenshift
 
 on: [push, pull_request]
 
 env:
-  GREENSHIFT_RELEASE: v0.2.0
-  GREENSHIFT_SHA256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  GREENSHIFT_RELEASE: 'v0.2.0'
+  GREENSHIFT_SHA256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
   HISTORY_REMOTE: ${{ github.server_url }}/${{ github.repository }}.git
 
 jobs:
@@ -61,6 +63,7 @@ jobs:
             { echo "::error::GREENSHIFT_SHA256 is not a SHA-256 checksum"; exit 1; }
           bin="$RUNNER_TEMP/greenshift"
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --remove-on-error \
             "https://github.com/paceheart/greenshift/releases/download/$GREENSHIFT_RELEASE/greenshift-$GREENSHIFT_RELEASE-x86_64-unknown-linux-musl" \
             --output "$bin.download"
           # Fail closed: only a binary matching the pinned checksum is installed.
@@ -94,14 +97,18 @@ jobs:
           fi
           # Forgejo's default runner image has no Rust: install it with rustup,
           # pinned by version and checksum. rustup then follows the repository's
-          # rust-toolchain.toml, if it has one.
+          # rust-toolchain.toml, if it has one. The SHA-256 is of the
+          # x86_64-unknown-linux-gnu rustup-init, as static.rust-lang.org publishes it.
+          rustup_version=1.29.3
+          rustup_sha256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
           init="$RUNNER_TEMP/rustup-init"
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            "https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init" \
+            --remove-on-error \
+            "https://static.rust-lang.org/rustup/archive/$rustup_version/x86_64-unknown-linux-gnu/rustup-init" \
             --output "$init"
-          if ! printf '%s  %s\n' "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55" "$init" | sha256sum --check --strict; then
+          if ! printf '%s  %s\n' "$rustup_sha256" "$init" | sha256sum --check --strict; then
             rm -f "$init"
-            echo "::error::rustup-init 1.29.3 does not match its pinned SHA-256; not installed"
+            echo "::error::rustup-init $rustup_version does not match its pinned SHA-256; not installed"
             exit 1
           fi
           chmod +x "$init"
@@ -153,6 +160,7 @@ jobs:
             { echo "::error::GREENSHIFT_SHA256 is not a SHA-256 checksum"; exit 1; }
           bin="$RUNNER_TEMP/greenshift"
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --remove-on-error \
             "https://github.com/paceheart/greenshift/releases/download/$GREENSHIFT_RELEASE/greenshift-$GREENSHIFT_RELEASE-x86_64-unknown-linux-musl" \
             --output "$bin.download"
           # Fail closed: only a binary matching the pinned checksum is installed.

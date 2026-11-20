@@ -3,12 +3,15 @@
 //!
 //! A backend (only [`nextest`] so far) says which files it wants and with
 //! what content ([`Want`]); this module decides what to do with each
-//! against what is already on disk ([`decide`]), and then writes, all or
-//! nothing: a file that exists and differs is left alone unless `--force`
-//! is given, and while one is left alone, none is written. A path
-//! through a symlink is never read or written, and every file is staged before any is put
-//! in place. A second run with the same inputs finds every file as it
-//! would write it and changes nothing.
+//! against what is already on disk ([`decide`]), and then writes them: a
+//! file that exists and differs is left alone unless `--force` is given,
+//! and while one is left alone, none is written. A path through a symlink
+//! that is there when `init` looks is never read or written. Every file is
+//! staged beside its place before any is renamed into it, so none is left
+//! half written and one that cannot be staged stops all of them; renaming
+//! is not undone, so were a later rename to fail, earlier ones would stay.
+//! A second run with the same inputs finds every file as it would write it
+//! and changes nothing.
 //!
 //! What gets pinned is the greenshift release the workflow downloads,
 //! by tag and SHA-256 ([`Release`], [`Sha256`]). Neither has a default: a
@@ -17,6 +20,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::ValueEnum;
@@ -48,13 +52,6 @@ impl Forge {
         }
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
-            Forge::Github => "github",
-            Forge::Forgejo => "forgejo",
-        }
-    }
-
     /// The runner label jobs use unless `--runs-on` is given: GitHub's
     /// hosted Ubuntu runner, and the label a Forgejo runner registers by
     /// default.
@@ -69,12 +66,19 @@ impl Forge {
     }
 }
 
-/// The forge to write for: `given`, or else the one whose directory
-/// ([`Forge::dir`]) `root` has, when exactly one does.
-pub fn detect_forge(given: Option<Forge>, root: &Path) -> Result<Forge, String> {
-    if let Some(forge) = given {
-        return Ok(forge);
+impl fmt::Display for Forge {
+    /// The name `--ci` takes for it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = self
+            .to_possible_value()
+            .expect("no forge is skipped from --ci");
+        f.write_str(value.get_name())
     }
+}
+
+/// The forge whose directory ([`Forge::dir`]) `root` has, when exactly
+/// one does.
+pub fn detect_forge(root: &Path) -> Result<Forge, String> {
     let found: Vec<Forge> = [Forge::Github, Forge::Forgejo]
         .into_iter()
         .filter(|forge| root.join(forge.dir()).is_dir())
@@ -103,44 +107,44 @@ impl Release {
     }
 }
 
-impl fmt::Display for Release {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.tag)
-    }
+/// Why a `--release` was refused. Neither message repeats the value: clap
+/// names it already.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ReleaseError {
+    #[error("expected a release tag such as v1.2.3")]
+    Shape,
+    #[error(
+        "too old: v{}.{}.{} and earlier have neither `run nextest` nor durable \
+         history; pin a later release",
+        LAST_RELEASE_WITHOUT_HISTORY.0,
+        LAST_RELEASE_WITHOUT_HISTORY.1,
+        LAST_RELEASE_WITHOUT_HISTORY.2
+    )]
+    TooOld,
 }
 
 impl std::str::FromStr for Release {
-    type Err = String;
+    type Err = ReleaseError;
 
     /// `vMAJOR.MINOR.PATCH`, each a decimal number with no leading zero,
     /// newer than [`LAST_RELEASE_WITHOUT_HISTORY`]. Pre-releases are
     /// refused, as the generated workflow refuses them.
-    fn from_str(text: &str) -> Result<Release, String> {
-        let shape = || {
-            format!(
-                "expected a release tag such as v1.2.3, not {}",
-                Tainted::raw(text)
-            )
-        };
-        let numbers = text.strip_prefix('v').ok_or_else(shape)?;
+    fn from_str(text: &str) -> Result<Release, ReleaseError> {
+        let numbers = text.strip_prefix('v').ok_or(ReleaseError::Shape)?;
         let parts: Vec<&str> = numbers.split('.').collect();
         let [major, minor, patch] = parts[..] else {
-            return Err(shape());
+            return Err(ReleaseError::Shape);
         };
-        let number = |part: &str| -> Result<u64, String> {
+        let number = |part: &str| -> Result<u64, ReleaseError> {
             let digits = !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
             if !digits || (part.len() > 1 && part.starts_with('0')) {
-                return Err(shape());
+                return Err(ReleaseError::Shape);
             }
-            part.parse().map_err(|_| shape())
+            part.parse().map_err(|_| ReleaseError::Shape)
         };
         let version = (number(major)?, number(minor)?, number(patch)?);
         if version <= LAST_RELEASE_WITHOUT_HISTORY {
-            let (a, b, c) = LAST_RELEASE_WITHOUT_HISTORY;
-            return Err(format!(
-                "{text} is too old: v{a}.{b}.{c} and earlier have neither `run nextest` \
-                 nor durable history; pin a later release"
-            ));
+            return Err(ReleaseError::TooOld);
         }
         Ok(Release {
             tag: text.to_owned(),
@@ -159,18 +163,19 @@ impl Sha256 {
     }
 }
 
-impl std::str::FromStr for Sha256 {
-    type Err = String;
+/// Why a `--sha256` was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("expected a SHA-256 checksum: 64 hex digits, as the release's .sha256 file gives it")]
+pub struct Sha256Error;
 
-    fn from_str(text: &str) -> Result<Sha256, String> {
+impl std::str::FromStr for Sha256 {
+    type Err = Sha256Error;
+
+    fn from_str(text: &str) -> Result<Sha256, Sha256Error> {
         if text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
             Ok(Sha256(text.to_ascii_lowercase()))
         } else {
-            Err(
-                "expected a SHA-256 checksum: 64 hex digits, as the release's \
-                 .sha256 file gives it"
-                    .into(),
-            )
+            Err(Sha256Error)
         }
     }
 }
@@ -186,16 +191,15 @@ impl RunnerLabel {
     }
 }
 
-impl fmt::Display for RunnerLabel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+/// Why a `--runs-on` was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("expected a runner label of at most 256 letters, digits, '.', '_', '-' and ':'")]
+pub struct RunnerLabelError;
 
 impl std::str::FromStr for RunnerLabel {
-    type Err = String;
+    type Err = RunnerLabelError;
 
-    fn from_str(text: &str) -> Result<RunnerLabel, String> {
+    fn from_str(text: &str) -> Result<RunnerLabel, RunnerLabelError> {
         let ok = !text.is_empty()
             && text.len() <= 256
             && text
@@ -204,33 +208,31 @@ impl std::str::FromStr for RunnerLabel {
         if ok {
             Ok(RunnerLabel(text.to_owned()))
         } else {
-            Err(
-                "expected a runner label of at most 256 letters, digits, '.', '_', '-' and ':'"
-                    .into(),
-            )
+            Err(RunnerLabelError)
         }
     }
 }
 
-/// A file a backend wants, relative to the repository root.
+/// A file a backend wants, relative to the repository root, with exactly
+/// this content: written if missing; if present and different, replaced
+/// only with `--force`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Want {
-    /// Exactly this content: written if missing; if present and
-    /// different, replaced only with `--force`.
-    Generated { path: PathBuf, content: String },
+pub struct Want {
+    pub path: PathBuf,
+    pub content: String,
 }
 
 /// What `init` does with one wanted file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Write `content`; `verb` says how (`wrote`, `overwrote`, ...).
+    /// Write `content`, in place of a file that is there when `replaces`.
     Write {
         path: PathBuf,
         content: String,
-        verb: &'static str,
+        replaces: bool,
     },
-    /// Nothing to do: already as wanted, for the reason given.
-    Unchanged { path: PathBuf, why: String },
+    /// Nothing to do: the file is already as wanted.
+    Unchanged { path: PathBuf },
     /// The file exists and differs, and `--force` was not given.
     Conflict { path: PathBuf },
 }
@@ -239,36 +241,32 @@ pub enum Action {
 pub fn decide(root: &Path, wants: Vec<Want>, force: bool) -> anyhow::Result<Vec<Action>> {
     wants
         .into_iter()
-        .map(|want| match want {
-            Want::Generated { path, content } => {
-                let existing = read_existing(root, &path)?;
-                Ok(match existing {
-                    None => Action::Write {
-                        path,
-                        content,
-                        verb: "wrote",
-                    },
-                    Some(text) if text == content => Action::Unchanged {
-                        path,
-                        why: "is already up to date".into(),
-                    },
-                    Some(_) if force => Action::Write {
-                        path,
-                        content,
-                        verb: "overwrote",
-                    },
-                    Some(_) => Action::Conflict { path },
-                })
-            }
+        .map(|Want { path, content }| {
+            let existing = read_existing(root, &path)?;
+            Ok(match existing {
+                None => Action::Write {
+                    path,
+                    content,
+                    replaces: false,
+                },
+                Some(bytes) if bytes == content.as_bytes() => Action::Unchanged { path },
+                Some(_) if force => Action::Write {
+                    path,
+                    content,
+                    replaces: true,
+                },
+                Some(_) => Action::Conflict { path },
+            })
         })
         .collect()
 }
 
-/// The text of the file at `path` under `root`, or `None` if there is
+/// The bytes of the file at `path` under `root`, or `None` if there is
 /// none. A symlink at `path`, or on the way to it from `root`, is an
 /// error: `init` neither reads what it points to into the repository nor
 /// replaces it.
-pub fn read_existing(root: &Path, path: &Path) -> anyhow::Result<Option<String>> {
+pub fn read_existing(root: &Path, path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    let could_not_read = || format!("could not read {}", Tainted::from(path));
     let mut at = root.to_owned();
     for part in path.components() {
         at.push(part);
@@ -279,26 +277,32 @@ pub fn read_existing(root: &Path, path: &Path) -> anyhow::Result<Option<String>>
             ),
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
-            Err(err) => {
-                return Err(err).with_context(|| format!("could not read {}", Tainted::from(path)))
-            }
+            Err(err) => return Err(err).with_context(could_not_read),
         }
     }
-    let full = root.join(path);
-    let path = full.as_path();
-    match std::fs::read(path) {
-        Ok(bytes) => String::from_utf8(bytes)
-            .map(Some)
-            .with_context(|| format!("{} is not UTF-8; left alone", Tainted::from(path))),
+    match std::fs::read(root.join(path)) {
+        Ok(bytes) => Ok(Some(bytes)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("could not read {}", Tainted::from(path))),
+        Err(err) => Err(err).with_context(could_not_read),
     }
 }
 
+/// A wanted file ready to put in place, or already there.
+enum Ready<'a> {
+    Write {
+        path: &'a Path,
+        replaces: bool,
+        file: tempfile::NamedTempFile,
+    },
+    Unchanged {
+        path: &'a Path,
+    },
+}
+
 /// Carry out `actions` under `root`, saying what happened to each on
-/// stdout, and return the exit status: 0, or 1 with nothing written when
-/// any is a [`Action::Conflict`], each named on stderr.
-pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<u8> {
+/// stdout, and return the exit status: success, or 1 with nothing written
+/// when any is a [`Action::Conflict`], each named on stderr.
+pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<ExitCode> {
     let conflicts: Vec<&Path> = actions
         .iter()
         .filter_map(|action| match action {
@@ -315,46 +319,59 @@ pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<u8> {
             );
         }
         eprintln!("greenshift: nothing written");
-        return Ok(1);
+        return Ok(ExitCode::from(1));
     }
     // Stage every file first, so that one that cannot be written leaves
     // every other one as it was.
-    let mut staged = Vec::new();
-    for action in actions {
-        if let Action::Write { path, content, .. } = action {
-            let file = stage(&root.join(path), content).with_context(|| {
-                format!(
-                    "could not write {}; nothing written",
-                    Tainted::from(path.as_path())
-                )
-            })?;
-            staged.push(file);
-        }
-    }
-    let mut staged = staged.into_iter();
+    let ready = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Write {
+                path,
+                content,
+                replaces,
+            } => Some(
+                stage(&root.join(path), content)
+                    .with_context(|| {
+                        format!(
+                            "could not write {}; nothing written",
+                            Tainted::from(path.as_path())
+                        )
+                    })
+                    .map(|file| Ready::Write {
+                        path,
+                        replaces: *replaces,
+                        file,
+                    }),
+            ),
+            Action::Unchanged { path } => Some(Ok(Ready::Unchanged { path })),
+            Action::Conflict { .. } => None,
+        })
+        .collect::<anyhow::Result<Vec<Ready>>>()?;
     let mut changed = false;
-    for action in actions {
-        match action {
-            Action::Write { path, verb, .. } => {
-                let file = staged.next().expect("one staged file per write");
+    for item in ready {
+        match item {
+            Ready::Write {
+                path,
+                replaces,
+                file,
+            } => {
                 file.persist(root.join(path))
                     .map_err(|err| err.error)
-                    .with_context(|| {
-                        format!("could not write {}", Tainted::from(path.as_path()))
-                    })?;
-                println!("greenshift: {verb} {}", Tainted::from(path.as_path()));
+                    .with_context(|| format!("could not write {}", Tainted::from(path)))?;
+                let verb = if replaces { "overwrote" } else { "wrote" };
+                println!("greenshift: {verb} {}", Tainted::from(path));
                 changed = true;
             }
-            Action::Unchanged { path, why } => {
-                println!("greenshift: {} {why}", Tainted::from(path.as_path()));
+            Ready::Unchanged { path } => {
+                println!("greenshift: {} is already up to date", Tainted::from(path));
             }
-            Action::Conflict { .. } => unreachable!("conflicts return above"),
         }
     }
     if !changed {
         println!("greenshift: nothing to change; the repository is already set up");
     }
-    Ok(0)
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `content` in a temporary file beside `path`, creating its directory,

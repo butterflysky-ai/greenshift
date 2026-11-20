@@ -5,6 +5,7 @@ set -euo pipefail
   { echo "::error::GREENSHIFT_SHA256 is not a SHA-256 checksum"; exit 1; }
 bin="$RUNNER_TEMP/greenshift"
 curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  --remove-on-error \
   "https://github.com/paceheart/greenshift/releases/download/$GREENSHIFT_RELEASE/greenshift-$GREENSHIFT_RELEASE-x86_64-unknown-linux-musl" \
   --output "$bin.download"
 # Fail closed: only a binary matching the pinned checksum is installed.

@@ -12,9 +12,12 @@
 #   the tests, and uploads the history, new run included, as a data
 #   artifact.
 # - publish: pushes to the default branch only, never pull requests. A
-#   fresh runner with the only write token: it checks nothing out and
+#   job of its own with the only write token: it checks nothing out and
 #   runs no test code, only the pinned, checksummed greenshift, which
-#   validates the artifact, merges it into the ref and publishes it.
+#   validates the artifact, merges it into the ref and publishes it. The
+#   runner is fresh on GitHub's hosted runners and ephemeral self-hosted
+#   ones; on a self-hosted runner that is kept between jobs, what the
+#   tests leave on it is there when the publisher runs.
 #
 # A missing history, cache or artifact warns and never fails the job;
 # only the tests decide that.
@@ -31,8 +34,8 @@ permissions:
   contents: read
 
 env:
-  GREENSHIFT_RELEASE: @RELEASE@
-  GREENSHIFT_SHA256: @SHA256@
+  GREENSHIFT_RELEASE: '@RELEASE@'
+  GREENSHIFT_SHA256: '@SHA256@'
   HISTORY_REMOTE: ${{ github.server_url }}/${{ github.repository }}.git
 
 jobs:
@@ -97,7 +100,7 @@ jobs:
     env:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
-      # Fresh runner: no repository checkout or code supplied by the test job.
+      # No repository checkout or code supplied by the test job.
       - name: Install pinned greenshift release
         shell: bash
         run: |

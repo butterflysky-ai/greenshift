@@ -18,6 +18,13 @@ const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 
 const GITHUB_WORKFLOW: &str = ".github/workflows/greenshift.yml";
 
+/// Each forge, as `--ci` names it, with where its workflow goes and the
+/// golden file it matches.
+const FORGES: [(&str, &str, &str); 2] = [
+    ("github", GITHUB_WORKFLOW, "init-nextest-github.yml"),
+    ("forgejo", FORGEJO_WORKFLOW, "init-nextest-forgejo.yml"),
+];
+
 fn greenshift(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("greenshift").expect("binary builds");
     cmd.current_dir(dir);
@@ -172,24 +179,30 @@ fn mode(path: &Path) -> u32 {
 #[test]
 fn written_files_get_ordinary_modes_and_rewritten_ones_keep_theirs() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let fresh = fresh_mode(dir.path());
-    init(dir.path(), &["--ci", "github"]).assert().success();
-    assert_eq!(
-        mode(&dir.path().join(GITHUB_WORKFLOW)),
-        fresh,
-        "a new file gets the mode any new file would"
-    );
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), GITHUB_WORKFLOW, "# mine\n");
-    let workflow = dir.path().join(GITHUB_WORKFLOW);
-    let kept = if fresh == 0o640 { 0o600 } else { 0o640 };
-    std::fs::set_permissions(&workflow, std::fs::Permissions::from_mode(kept)).unwrap();
-    init(dir.path(), &["--ci", "github", "--force"])
-        .assert()
-        .success();
-    assert_golden(&workflow, "init-nextest-github.yml");
-    assert_eq!(mode(&workflow), kept, "the rewritten file keeps its mode");
+    for (forge, path, golden_name) in FORGES {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = fresh_mode(dir.path());
+        init(dir.path(), &["--ci", forge]).assert().success();
+        assert_eq!(
+            mode(&dir.path().join(path)),
+            fresh,
+            "{forge}: a new file gets the mode any new file would"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), path, "# mine\n");
+        let workflow = dir.path().join(path);
+        let kept = if fresh == 0o640 { 0o600 } else { 0o640 };
+        std::fs::set_permissions(&workflow, std::fs::Permissions::from_mode(kept)).unwrap();
+        init(dir.path(), &["--ci", forge, "--force"])
+            .assert()
+            .success();
+        assert_golden(&workflow, golden_name);
+        assert_eq!(
+            mode(&workflow),
+            kept,
+            "{forge}: the rewritten file keeps its mode"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -200,19 +213,23 @@ fn a_symlink_on_the_way_to_a_file_is_never_followed_or_replaced() {
     std::fs::write(&secret, "[registry]\ntoken = \"secret\"\n").unwrap();
     std::fs::create_dir(outside.path().join("workflows")).unwrap();
     // A symlinked file, and a symlinked directory on the way to one, at
-    // each level.
-    for (link, target) in [
-        (GITHUB_WORKFLOW, secret.clone()),
-        (".github/workflows", outside.path().join("workflows")),
-        (".github", outside.path().to_owned()),
-    ] {
+    // each level, for each forge.
+    let mut cases = Vec::new();
+    for (forge, path, _) in FORGES {
+        let workflows = path.strip_suffix("/greenshift.yml").unwrap();
+        let top = workflows.strip_suffix("/workflows").unwrap();
+        cases.push((forge, path, secret.clone()));
+        cases.push((forge, workflows, outside.path().join("workflows")));
+        cases.push((forge, top, outside.path().to_owned()));
+    }
+    for (forge, link, target) in cases {
         let dir = tempfile::tempdir().unwrap();
         let at = dir.path().join(link);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(target, &at).unwrap();
         let outside_before = snapshot(outside.path());
         for force in [false, true] {
-            let mut cmd = init(dir.path(), &["--ci", "github"]);
+            let mut cmd = init(dir.path(), &["--ci", forge]);
             if force {
                 cmd.arg("--force");
             }
@@ -260,31 +277,28 @@ fn a_file_that_cannot_be_written_means_none_is_written() {
 
 #[test]
 fn an_existing_different_workflow_is_left_alone_without_force() {
-    let dir = tempfile::tempdir().unwrap();
-    let workflow = dir.path().join(GITHUB_WORKFLOW);
-    std::fs::create_dir_all(workflow.parent().unwrap()).unwrap();
-    std::fs::write(&workflow, "# mine\n").unwrap();
-    let before = snapshot(dir.path());
-    init(dir.path(), &["--ci", "github"])
-        .assert()
-        .code(1)
-        .stderr(predicate::str::contains(GITHUB_WORKFLOW))
-        .stderr(predicate::str::contains("--force"));
-    assert_eq!(snapshot(dir.path()), before, "nothing is written");
+    for (forge, path, _) in FORGES {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), path, "# mine\n");
+        let before = snapshot(dir.path());
+        init(dir.path(), &["--ci", forge])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(path))
+            .stderr(predicate::str::contains("--force"));
+        assert_eq!(snapshot(dir.path()), before, "{forge}: nothing is written");
+    }
 }
 
 #[test]
 fn force_overwrites_the_workflow() {
-    let dir = tempfile::tempdir().unwrap();
-    let workflow = dir.path().join(GITHUB_WORKFLOW);
-    std::fs::create_dir_all(workflow.parent().unwrap()).unwrap();
-    std::fs::write(&workflow, "# mine\n").unwrap();
-    let out = stdout_of(&mut init(dir.path(), &["--ci", "github", "--force"]));
-    assert!(
-        out.contains(&format!("overwrote {GITHUB_WORKFLOW}")),
-        "{out}"
-    );
-    assert_golden(&workflow, "init-nextest-github.yml");
+    for (forge, path, golden_name) in FORGES {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), path, "# mine\n");
+        let out = stdout_of(&mut init(dir.path(), &["--ci", forge, "--force"]));
+        assert!(out.contains(&format!("overwrote {path}")), "{forge}: {out}");
+        assert_golden(&dir.path().join(path), golden_name);
+    }
 }
 
 #[test]
@@ -427,16 +441,6 @@ fn a_nextest_toml_is_left_byte_for_byte_and_none_is_created() {
     }
 }
 
-#[test]
-fn a_conflict_anywhere_means_nothing_is_written_anywhere() {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), GITHUB_WORKFLOW, "# mine\n");
-    write(dir.path(), "README.md", "# mine too\n");
-    let before = snapshot(dir.path());
-    init(dir.path(), &["--ci", "github"]).assert().code(1);
-    assert_eq!(snapshot(dir.path()), before);
-}
-
 const FORGEJO_WORKFLOW: &str = ".forgejo/workflows/greenshift.yml";
 
 #[test]
@@ -478,4 +482,89 @@ fn forgejo_is_found_from_the_repository_and_is_idempotent() {
     assert!(out.contains("nothing to change"), "{out}");
     assert!(out.contains("not isolated"), "{out}");
     assert_eq!(snapshot(dir.path()), before);
+}
+
+#[test]
+fn force_replaces_an_existing_workflow_that_is_not_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let workflow = dir.path().join(GITHUB_WORKFLOW);
+    std::fs::create_dir_all(workflow.parent().unwrap()).unwrap();
+    std::fs::write(&workflow, b"\xff\xfe").unwrap();
+    let out = stdout_of(&mut init(dir.path(), &["--ci", "github", "--force"]));
+    assert!(
+        out.contains(&format!("overwrote {GITHUB_WORKFLOW}")),
+        "{out}"
+    );
+    assert_golden(&workflow, "init-nextest-github.yml");
+}
+
+#[test]
+fn an_existing_workflow_that_is_not_utf8_is_a_conflict_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), GITHUB_WORKFLOW, "");
+    std::fs::write(dir.path().join(GITHUB_WORKFLOW), b"\xff\xfe").unwrap();
+    let before = snapshot(dir.path());
+    let out = init(dir.path(), &["--ci", "github"]).assert().code(1);
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(&format!("greenshift: {GITHUB_WORKFLOW} exists and differs")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert_eq!(snapshot(dir.path()), before);
+}
+
+#[test]
+fn a_directory_where_the_workflow_goes_is_named_as_given_and_nothing_is_written() {
+    for force in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(GITHUB_WORKFLOW)).unwrap();
+        let mut cmd = init(dir.path(), &["--ci", "github"]);
+        if force {
+            cmd.arg("--force");
+        }
+        let out = cmd.assert().code(1);
+        let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+        assert!(stderr.contains(GITHUB_WORKFLOW), "{stderr}");
+        assert!(
+            !stderr.contains("./"),
+            "a relative path, as elsewhere: {stderr}"
+        );
+        assert!(
+            dir.path().join(GITHUB_WORKFLOW).is_dir(),
+            "force={force}: the directory is kept"
+        );
+        assert!(
+            snapshot(dir.path()).is_empty(),
+            "force={force}: nothing written"
+        );
+    }
+}
+
+#[test]
+fn a_rejected_release_is_named_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = greenshift(dir.path())
+        .args(["init", "nextest", "--ci", "github", "--release", "v9.9"])
+        .args(["--sha256", SHA256])
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert_eq!(stderr.matches("v9.9").count(), 1, "{stderr}");
+}
+
+#[test]
+fn a_github_file_that_is_not_a_directory_does_not_name_the_forge() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".github"), "").unwrap();
+    init(dir.path(), &[])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("found neither"));
+    std::fs::create_dir(dir.path().join(".forgejo")).unwrap();
+    let out = stdout_of(&mut init(dir.path(), &[]));
+    assert!(
+        out.contains("found .forgejo, so writing for forgejo"),
+        "{out}"
+    );
 }

@@ -12,9 +12,12 @@
 #   the tests, and uploads the history, new run included, as a data
 #   artifact.
 # - publish: pushes to the default branch only, never pull requests. A
-#   fresh runner with the only write token: it checks nothing out and
+#   job of its own with the only write token: it checks nothing out and
 #   runs no test code, only the pinned, checksummed greenshift, which
-#   validates the artifact, merges it into the ref and publishes it.
+#   validates the artifact, merges it into the ref and publishes it. The
+#   runner is fresh on GitHub's hosted runners and ephemeral self-hosted
+#   ones; on a self-hosted runner that is kept between jobs, what the
+#   tests leave on it is there when the publisher runs.
 #
 # A missing history, cache or artifact warns and never fails the job;
 # only the tests decide that.
@@ -31,8 +34,8 @@ permissions:
   contents: read
 
 env:
-  GREENSHIFT_RELEASE: v0.2.0
-  GREENSHIFT_SHA256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  GREENSHIFT_RELEASE: 'v0.2.0'
+  GREENSHIFT_SHA256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
   HISTORY_REMOTE: ${{ github.server_url }}/${{ github.repository }}.git
 
 jobs:
@@ -54,6 +57,7 @@ jobs:
             { echo "::error::GREENSHIFT_SHA256 is not a SHA-256 checksum"; exit 1; }
           bin="$RUNNER_TEMP/greenshift"
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --remove-on-error \
             "https://github.com/paceheart/greenshift/releases/download/$GREENSHIFT_RELEASE/greenshift-$GREENSHIFT_RELEASE-x86_64-unknown-linux-musl" \
             --output "$bin.download"
           # Fail closed: only a binary matching the pinned checksum is installed.
@@ -113,7 +117,7 @@ jobs:
     env:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
-      # Fresh runner: no repository checkout or code supplied by the test job.
+      # No repository checkout or code supplied by the test job.
       - name: Install pinned greenshift release
         shell: bash
         run: |
@@ -124,6 +128,7 @@ jobs:
             { echo "::error::GREENSHIFT_SHA256 is not a SHA-256 checksum"; exit 1; }
           bin="$RUNNER_TEMP/greenshift"
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --remove-on-error \
             "https://github.com/paceheart/greenshift/releases/download/$GREENSHIFT_RELEASE/greenshift-$GREENSHIFT_RELEASE-x86_64-unknown-linux-musl" \
             --output "$bin.download"
           # Fail closed: only a binary matching the pinned checksum is installed.

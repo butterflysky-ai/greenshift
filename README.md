@@ -460,8 +460,9 @@ canonical and local history rather than discarding unpublished local runs.
 `run_files`, which may contain workstation usernames in absolute paths. Everyone
 with access to the destination repository can read that metadata. Use relative
 JUnit paths at `greenshift ingest` when absolute paths should not be published;
-`run nextest` records the paths of its own JUnit files, in a temporary
-directory.
+`run nextest` records the absolute paths of its own JUnit files, in a
+fresh directory under `$TMPDIR` (or `/tmp`), so they carry a user name only
+if `$TMPDIR` does.
 
 Ordinary history storage errors warn without failing tests; malformed history arguments
 or publish-policy refusals exit 2. A second CAS rejection does not automatically

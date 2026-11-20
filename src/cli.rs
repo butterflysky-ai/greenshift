@@ -520,20 +520,19 @@ pub fn run_with_control(control: &TransportControl) -> anyhow::Result<ExitCode> 
 /// `root`; see [`crate::init`].
 pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::Result<ExitCode> {
     use crate::init::{self, Forge};
-    let forge = match init::detect_forge(args.ci, root) {
-        Ok(forge) => forge,
-        Err(why) => {
-            eprintln!("greenshift: usage error: {why}");
-            return Ok(ExitCode::from(2));
-        }
+    let forge = match args.ci {
+        Some(forge) => forge,
+        None => match init::detect_forge(root) {
+            Ok(forge) => {
+                println!("greenshift: found {}, so writing for {forge}", forge.dir());
+                forge
+            }
+            Err(why) => {
+                eprintln!("greenshift: usage error: {why}");
+                return Ok(ExitCode::from(2));
+            }
+        },
     };
-    if args.ci.is_none() {
-        println!(
-            "greenshift: found {}, so writing for {}",
-            forge.dir(),
-            forge.name()
-        );
-    }
     if forge == Forge::Forgejo {
         println!(
             "greenshift: note: the Forgejo workflow is not isolated: every step, the tests \
@@ -552,7 +551,7 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
     };
     let wants = init::nextest::wants(&settings);
     let actions = init::decide(root, wants, args.force)?;
-    Ok(ExitCode::from(init::apply(root, &actions)?))
+    init::apply(root, &actions)
 }
 
 fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<ExitCode> {

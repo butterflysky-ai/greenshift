@@ -7,14 +7,8 @@ use std::path::{Path, PathBuf};
 use super::{Forge, Release, RunnerLabel, Sha256, Want};
 
 /// The cargo-nextest version the workflow installs, as the durable-history
-/// reference workflow pins it.
-pub const NEXTEST_VERSION: &str = "0.9.143";
-
-/// The rustup the Forgejo workflow installs Rust with when the runner has
-/// none, and the SHA-256 of its x86_64-unknown-linux-gnu `rustup-init`, as
-/// static.rust-lang.org publishes it (checked against the download).
-pub const RUSTUP_VERSION: &str = "1.29.3";
-pub const RUSTUP_SHA256: &str = "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55";
+/// reference workflow pins it (a test holds them together).
+const NEXTEST_VERSION: &str = "0.9.143";
 
 /// What the workflow is made from.
 #[derive(Debug, Clone)]
@@ -35,7 +29,7 @@ pub fn workflow_path(forge: Forge) -> PathBuf {
 /// workflow. `run nextest` has nextest write JUnit to files of its own, so
 /// the repository's `.config/nextest.toml` needs nothing and is left alone.
 pub fn wants(settings: &Settings<'_>) -> Vec<Want> {
-    vec![Want::Generated {
+    vec![Want {
         path: workflow_path(settings.forge),
         content: workflow(settings),
     }]
@@ -50,15 +44,14 @@ pub fn workflow(settings: &Settings<'_>) -> String {
     fill(template, settings)
 }
 
-/// `template` with its `@NAME@` placeholders filled in.
+/// `template` with its `@NAME@` placeholders filled in. The scripts it
+/// splices in have none of their own.
 fn fill(template: &str, settings: &Settings<'_>) -> String {
     let install = indent(include_str!("nextest/install.sh"), 10);
     let install_rust = indent(include_str!("nextest/install-rust.sh"), 10);
     template
         .replace("@INSTALL@\n", &install)
         .replace("@INSTALL_RUST@\n", &install_rust)
-        .replace("@RUSTUP@", RUSTUP_VERSION)
-        .replace("@RUSTUP_SHA256@", RUSTUP_SHA256)
         .replace("@RELEASE@", settings.release.as_str())
         .replace("@SHA256@", settings.sha256.as_str())
         .replace("@RUNS_ON@", settings.runs_on.as_str())
@@ -98,7 +91,9 @@ mod tests {
             let text = workflow(&settings);
             // Any `@NAME@` left, whether or not `fill` knows the name.
             let parts: Vec<&str> = text.split('@').collect();
-            let between = &parts[1..parts.len().saturating_sub(1).max(1)];
+            // Every piece with an `@` on both sides; `split` yields at
+            // least one piece, so `len() - 1` cannot underflow.
+            let between = parts.get(1..parts.len() - 1).unwrap_or(&[]);
             let left: Vec<&&str> = between
                 .iter()
                 .filter(|name| {
@@ -110,5 +105,11 @@ mod tests {
                 .collect();
             assert!(left.is_empty(), "{forge:?}: {left:?}");
         }
+    }
+
+    #[test]
+    fn indent_pads_every_line_but_leaves_blank_ones_empty() {
+        assert_eq!(indent("a\n\n  b\n", 2), "  a\n\n    b\n");
+        assert_eq!(indent("", 2), "");
     }
 }
