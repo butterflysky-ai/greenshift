@@ -255,3 +255,176 @@ fn runs_on_names_the_runner() {
     assert_eq!(text.matches("runs-on: ubuntu-24.04").count(), 2, "{text}");
     assert!(!text.contains("ubuntu-latest"));
 }
+
+const NEXTEST_TOML: &str = ".config/nextest.toml";
+
+/// The JUnit path `.config/nextest.toml` in `dir` gives the default
+/// profile, as nextest would read it.
+fn junit_path(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(NEXTEST_TOML)).unwrap();
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    doc.get("profile")?
+        .get("default")?
+        .get("junit")?
+        .get("path")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn write(dir: &Path, path: &str, text: &str) {
+    let path = dir.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+#[test]
+fn a_missing_nextest_toml_is_written_with_the_junit_stanza() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = stdout_of(&mut init(dir.path(), &["--ci", "github"]));
+    assert!(out.contains(&format!("wrote {NEXTEST_TOML}")), "{out}");
+    assert_eq!(junit_path(dir.path()).as_deref(), Some("junit.xml"));
+}
+
+#[test]
+fn an_existing_junit_stanza_is_left_alone_even_with_force() {
+    for force in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = "# mine\n[profile.default.junit]\npath = \"results/junit.xml\"\n";
+        write(dir.path(), NEXTEST_TOML, mine);
+        let mut cmd = init(dir.path(), &["--ci", "github"]);
+        if force {
+            cmd.arg("--force");
+        }
+        let out = stdout_of(&mut cmd);
+        assert!(
+            out.contains(&format!("{NEXTEST_TOML} already sets")),
+            "{out}"
+        );
+        let text = std::fs::read_to_string(dir.path().join(NEXTEST_TOML)).unwrap();
+        assert_eq!(text, mine, "force={force}");
+    }
+}
+
+#[test]
+fn the_stanza_is_added_to_a_nextest_toml_without_one_keeping_the_rest() {
+    let cases = [
+        "# Our nextest settings.\n[profile.ci]\nfail-fast = false # keep going\n\n\
+         [[profile.default.overrides]]\nfilter = 'test(slow)'\nslow-timeout = \"5m\"\n",
+        "[profile.default]\nretries = 2\n",
+        "[profile.default.junit]\nstore-success-output = true\n",
+        "profile.default.retries = 1\n",
+        "",
+    ];
+    for mine in cases {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), NEXTEST_TOML, mine);
+        let out = stdout_of(&mut init(dir.path(), &["--ci", "github"]));
+        assert!(
+            out.contains(&format!("added the JUnit stanza to {NEXTEST_TOML}")),
+            "{mine:?}: {out}"
+        );
+        assert_eq!(
+            junit_path(dir.path()).as_deref(),
+            Some("junit.xml"),
+            "{mine:?}"
+        );
+        let text = std::fs::read_to_string(dir.path().join(NEXTEST_TOML)).unwrap();
+        for line in mine.lines() {
+            assert!(text.contains(line), "{mine:?}: lost {line:?} in\n{text}");
+        }
+        let mut expected = leaves(mine);
+        expected.insert("profile.default.junit.path".into(), "\"junit.xml\"".into());
+        assert_eq!(
+            leaves(&text),
+            expected,
+            "{mine:?}: changed beyond the stanza"
+        );
+        // And a second run leaves it be.
+        let again = snapshot(dir.path());
+        init(dir.path(), &["--ci", "github"]).assert().success();
+        assert_eq!(snapshot(dir.path()), again, "{mine:?}");
+    }
+}
+
+/// Every value in the TOML `text`, by its dotted key, as TOML writes it.
+/// Arrays of tables are keyed by index.
+fn leaves(text: &str) -> std::collections::BTreeMap<String, String> {
+    fn walk(
+        prefix: &str,
+        item: &toml_edit::Item,
+        out: &mut std::collections::BTreeMap<String, String>,
+    ) {
+        let key = |k: &str| {
+            if prefix.is_empty() {
+                k.to_owned()
+            } else {
+                format!("{prefix}.{k}")
+            }
+        };
+        if let Some(table) = item.as_table_like() {
+            for (k, v) in table.iter() {
+                walk(&key(k), v, out);
+            }
+        } else if let Some(array) = item.as_array_of_tables() {
+            for (at, table) in array.iter().enumerate() {
+                for (k, v) in table.iter() {
+                    walk(&format!("{prefix}[{at}].{k}"), v, out);
+                }
+            }
+        } else if let Some(value) = item.as_value() {
+            out.insert(
+                prefix.to_owned(),
+                value.clone().decorated("", "").to_string(),
+            );
+        }
+    }
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    let mut out = std::collections::BTreeMap::new();
+    walk("", doc.as_item(), &mut out);
+    out
+}
+
+#[test]
+fn a_nextest_toml_that_cannot_be_read_as_toml_is_never_touched() {
+    for force in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), NEXTEST_TOML, "[profile.default\nnot toml");
+        let before = snapshot(dir.path());
+        let mut cmd = init(dir.path(), &["--ci", "github"]);
+        if force {
+            cmd.arg("--force");
+        }
+        cmd.assert()
+            .code(1)
+            .stderr(predicate::str::contains(NEXTEST_TOML));
+        assert_eq!(snapshot(dir.path()), before, "force={force}");
+    }
+}
+
+#[test]
+fn a_junit_setting_of_the_wrong_shape_is_never_touched() {
+    for mine in [
+        "[profile.default]\njunit = \"junit.xml\"\n",
+        "profile = 3\n",
+        "[profile.default.junit]\npath = 7\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), NEXTEST_TOML, mine);
+        let before = snapshot(dir.path());
+        init(dir.path(), &["--ci", "github", "--force"])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(NEXTEST_TOML));
+        assert_eq!(snapshot(dir.path()), before, "{mine:?}");
+    }
+}
+
+#[test]
+fn a_conflict_anywhere_means_nothing_is_written_anywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), GITHUB_WORKFLOW, "# mine\n");
+    write(dir.path(), NEXTEST_TOML, "[profile.ci]\nretries = 1\n");
+    let before = snapshot(dir.path());
+    init(dir.path(), &["--ci", "github"]).assert().code(1);
+    assert_eq!(snapshot(dir.path()), before);
+}
