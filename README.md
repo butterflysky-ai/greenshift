@@ -60,6 +60,39 @@ greenshift ingest target/nextest/default/junit.xml \
   of several when another wrote no JUnit, say. `select` never counts a
   partial run as full, whatever its size; its results still count towards
   `--min-runs`.
+- Imports are idempotent per report: the key is SHA-256 of its exact bytes
+  together with the normalized textual `--commit`. Paths and file order do
+  not enter the key; repeated identical files in one invocation count once.
+  Byte-different XML is distinct even when its parsed tests are equal.
+  Without `--commit`, all imports share one unknown-commit namespace.
+  Abbreviated and full commit strings remain distinct; no Git lookup occurs.
+- When every report is new, all files form one run. When every report was
+  already imported, greenshift reports `already recorded` without adding
+  another observation or changing the original grouping, time or metadata.
+  Changed source/partial/branch/tag metadata produces a warning and retains
+  the first values: a retry cannot upgrade a partial run to full. When only
+  some reports are already present, the whole import fails with an overlap
+  error rather than double-counting old reports or dropping unseen ones.
+- Grouping is first-recorded, not regrouped on replay. Importing A then B
+  separately, then A+B, keeps two runs; fresh A+B makes one. Importing A
+  then A+B conflicts; A+B then A is an already-present subset. Subset or
+  spanning-group replays check membership only: per-report contributions
+  cannot be recovered from aggregate results, so aggregate equivalence is
+  not independently verified. Exact-group replays with disagreeing stored
+  results fail. Report fingerprints supplied by a transported database are
+  producer claims, not proof a test executed or unavailable XML was genuine.
+- `ingest` imports reports; it does not infer new executions. The CI helper
+  `scripts/record-history.sh` follows these same import rules, so separate CI
+  executions with identical report bytes and commit can be retries. First-class
+  `run nextest` records every actual execution separately, even with identical
+  reports. Older history has no raw report fingerprints and stays unkeyed;
+  its first new keyed import may coexist with an equivalent legacy observation.
+- Keyed imports require schema 5. Use schema-5-capable importer and trusted
+  publisher binaries together; older binaries reject newer stores. Do not
+  downgrade or strip the membership table to make an old publisher accept it.
+  Membership survives snapshot export, merge and restore. Publication keeps
+  the remote destination's grouping/provenance; restore into an existing store
+  keeps the local destination's. Partial-overlap failures leave history intact.
 - greenshift's messages show what was given on the command line (paths,
   and in usage errors a rejected value or an unexpected argument or
   subcommand) with control characters and backslashes escaped as in

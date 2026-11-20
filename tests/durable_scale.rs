@@ -56,6 +56,7 @@ fn independently_migrated_legacy_copies_keep_the_same_durable_run_identity() {
             "INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id)
                  SELECT commit_sha,source,ingested_at,partial,branch,tag,lower(hex(randomblob(16))) FROM runs;
              INSERT INTO results SELECT 2,test_id,outcome,duration_ms FROM results;
+             DROP TABLE report_memberships;
              DROP INDEX runs_by_history_id;
              ALTER TABLE runs DROP COLUMN history_id;
              PRAGMA user_version=3;",

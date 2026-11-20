@@ -962,7 +962,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join("legacy");
         fixture(&database, "legacy");
-        rusqlite::Connection::open(&database).unwrap().execute_batch("DROP INDEX runs_by_history_id; ALTER TABLE runs DROP COLUMN history_id; PRAGMA user_version=3;").unwrap();
+        rusqlite::Connection::open(&database).unwrap().execute_batch("DROP TABLE report_memberships; DROP INDEX runs_by_history_id; ALTER TABLE runs DROP COLUMN history_id; PRAGMA user_version=3;").unwrap();
         let remote = remote_repository(&dir.path().join("remote.git"));
         let blob = remote
             .git(
@@ -1007,6 +1007,53 @@ mod tests {
         );
         assert_eq!(
             conn.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_publish_keyed_import_transport_restore_retains_replay_identity() {
+        use crate::report_key::{ReportKey, ReportKeySet};
+        use crate::store::{ImportAcknowledgement, NewRun, Store};
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("source");
+        let xml = r#"<testsuite name="gears"><testcase name="turns"/></testsuite>"#;
+        let report = crate::junit::parse_str(xml).unwrap();
+        let keys = ReportKeySet::new([ReportKey::from_bytes(None, xml.as_bytes())]).unwrap();
+        let run = NewRun {
+            commit: None,
+            source: "transport-fixture",
+            files: &[],
+            partial: false,
+            branch: None,
+            tag: None,
+        };
+        let mut store = Store::open(&database).unwrap();
+        store.record_import(&run, &keys, report.cases()).unwrap();
+        drop(store);
+        let remote = remote_repository(&dir.path().join("remote.git"));
+        remote.publish(&database, None).unwrap();
+        let restored = dir.path().join("restored");
+        remote.restore(&restored, None).unwrap();
+        let mut store = Store::open(&restored).unwrap();
+        assert!(matches!(
+            store.record_import(&run, &keys, report.cases()).unwrap(),
+            ImportAcknowledgement::AlreadyPresent { .. }
+        ));
+        drop(store);
+        remote.publish(&restored, None).unwrap();
+        let fresh = dir.path().join("fresh");
+        remote.restore(&fresh, None).unwrap();
+        let conn = rusqlite::Connection::open(&fresh).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM runs", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM report_memberships", [], |r| r
+                .get::<_, i64>(0))
                 .unwrap(),
             1
         );

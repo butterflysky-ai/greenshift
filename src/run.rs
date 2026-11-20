@@ -268,7 +268,7 @@ fn record(options: &RunOptions, backend: &str, junit: &[PathBuf]) {
         branch: options.branch.clone(),
         tag: options.tag.clone(),
     };
-    if let Err(err) = cli::ingest(&args) {
+    if let Err(err) = cli::record_execution(&args) {
         cli::show_error(&err);
     }
 }
