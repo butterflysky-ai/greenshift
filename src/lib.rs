@@ -9,6 +9,7 @@
 //! outside the program so that it prints escaped.
 
 pub mod cli;
+pub mod history;
 pub mod junit;
 pub mod nextest;
 pub mod plan;

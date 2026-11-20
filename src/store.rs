@@ -103,10 +103,116 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE runs ADD COLUMN branch TEXT;
     ALTER TABLE runs ADD COLUMN tag TEXT CHECK (branch IS NULL OR tag IS NULL);
     "#,
+    // 4: identity independent of a SQLite file's local row ids, for snapshot merge.
+    r#"
+    ALTER TABLE runs ADD COLUMN history_id TEXT;
+    CREATE UNIQUE INDEX runs_by_history_id ON runs(history_id);
+    "#,
 ];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
+
+/// Construct only trusted schema SQL, for exact-version snapshot admission.
+/// This connection contains no caller data and never opens an input database.
+pub(crate) fn canonical_schema(version: i64) -> Result<Connection, StoreError> {
+    let path = Tainted::raw(":memory:");
+    if !(1..=SCHEMA_VERSION).contains(&version) {
+        return Err(StoreError::BadVersion {
+            path,
+            found: version,
+        });
+    }
+    let conn = Connection::open_in_memory().map_err(sqlite_err(&path))?;
+    for sql in MIGRATIONS.iter().take(version as usize) {
+        conn.execute_batch(sql).map_err(sqlite_err(&path))?;
+    }
+    conn.pragma_update(None, "application_id", APPLICATION_ID)
+        .map_err(sqlite_err(&path))?;
+    conn.pragma_update(None, "user_version", version)
+        .map_err(sqlite_err(&path))?;
+    Ok(conn)
+}
+
+// Two separately migrated copies of the same legacy DB must retain the same
+// run identities. Include local id to preserve identical repeated legacy runs;
+// content distinguishes unrelated runs whose local ids happen to coincide.
+fn identify_legacy_runs(conn: &Connection) -> rusqlite::Result<()> {
+    for (id, identity) in legacy_run_identities(conn)? {
+        conn.execute(
+            "UPDATE runs SET history_id=?1 WHERE id=?2",
+            params![identity, id],
+        )?;
+    }
+    Ok(())
+}
+
+// The v1 hash encoding, including SQL bytes and original local ids, is a durable
+// format. Snapshot callers first admit the exact known schema and typed data.
+pub(crate) fn legacy_run_identities(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
+    use sha2::{Digest, Sha256};
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let run_sql = match version {
+        1 => "SELECT id,commit_sha,source,ingested_at,0,NULL,NULL FROM runs ORDER BY id",
+        2 => "SELECT id,commit_sha,source,ingested_at,partial,NULL,NULL FROM runs ORDER BY id",
+        _ => "SELECT id,commit_sha,source,ingested_at,partial,branch,tag FROM runs ORDER BY id",
+    };
+    let mut runs = conn.prepare(run_sql)?;
+    let mut rows = runs.query([])?;
+    let mut identities = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let mut digest = Sha256::new();
+        digest.update(b"greenshift-legacy-run-v1\0");
+        hash_row(&mut digest, row, 7)?;
+        for (sql, columns) in [
+            ("SELECT position,path FROM run_files WHERE run_id=?1 ORDER BY position", 2),
+            ("SELECT t.suite,t.name,r.outcome,r.duration_ms FROM results r JOIN tests t ON t.id=r.test_id WHERE r.run_id=?1 ORDER BY t.suite,t.name", 4),
+        ] {
+            digest.update(sql.as_bytes());
+            let mut statement = conn.prepare(sql)?;
+            let mut child_rows = statement.query([id])?;
+            while let Some(child_row) = child_rows.next()? {
+                hash_row(&mut digest, child_row, columns)?;
+            }
+        }
+        identities.push((id, format!("{:x}", digest.finalize())[..32].to_owned()));
+    }
+    Ok(identities)
+}
+
+fn hash_row(
+    digest: &mut sha2::Sha256,
+    row: &rusqlite::Row<'_>,
+    columns: usize,
+) -> rusqlite::Result<()> {
+    use rusqlite::types::ValueRef;
+    use sha2::Digest;
+    digest.update(b"row\0");
+    for column in 0..columns {
+        match row.get_ref(column)? {
+            ValueRef::Null => digest.update([0]),
+            ValueRef::Integer(value) => {
+                digest.update([1]);
+                digest.update(value.to_le_bytes());
+            }
+            ValueRef::Real(value) => {
+                digest.update([2]);
+                digest.update(value.to_bits().to_le_bytes());
+            }
+            ValueRef::Text(value) | ValueRef::Blob(value) => {
+                digest.update([if matches!(row.get_ref(column)?, ValueRef::Text(_)) {
+                    3
+                } else {
+                    4
+                }]);
+                digest.update((value.len() as u64).to_le_bytes());
+                digest.update(value);
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Why the store could not be opened or written.
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +251,8 @@ pub enum StoreError {
     },
     #[error("history store {path} has schema version {found}, which no greenshift writes")]
     BadVersion { path: Tainted, found: i64 },
+    #[error("history store {path} has an invalid durable run identity")]
+    InvalidHistoryId { path: Tainted },
     #[error(
         "\"{path}\" is SQLite's special name for a private in-memory database, not a file; pass a real path"
     )]
@@ -432,6 +540,9 @@ impl Store {
         }
         for (from, sql) in MIGRATIONS.iter().enumerate().skip(found as usize) {
             tx.execute_batch(sql).map_err(&sqlite)?;
+            if from == 3 {
+                identify_legacy_runs(&tx).map_err(&sqlite)?;
+            }
             if from == 0 {
                 // Stamp the store exactly once, from the one constant that
                 // Store::open's own gate above compares against.
@@ -440,6 +551,13 @@ impl Store {
             }
             tx.pragma_update(None, "user_version", from as i64 + 1)
                 .map_err(&sqlite)?;
+        }
+        let invalid_ids: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE history_id IS NULL OR typeof(history_id) != 'text' OR length(history_id) != 32 OR history_id GLOB '*[^0-9a-f]*')",
+            [], |row| row.get(0),
+        ).map_err(&sqlite)?;
+        if invalid_ids {
+            return Err(StoreError::InvalidHistoryId { path: path.clone() });
         }
         tx.commit().map_err(&sqlite)
     }
@@ -461,8 +579,8 @@ impl Store {
         let sqlite = sqlite_err(path);
         let tx = self.conn.transaction().map_err(&sqlite)?;
         tx.execute(
-            "INSERT INTO runs (commit_sha, source, partial, branch, tag)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO runs (commit_sha, source, partial, branch, tag, history_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, lower(hex(randomblob(16))))",
             params![
                 run.commit.map(CommitId::as_str),
                 run.source,
@@ -629,7 +747,7 @@ fn refuse_memory_path(path: &Path) -> Result<(), StoreError> {
 /// database. Anchoring such a path at `./` makes SQLite read it as the
 /// plain file name it is. Other paths are passed as given, so SQLite's
 /// own error text names the path the user typed.
-fn as_plain_file(path: &Path) -> std::borrow::Cow<'_, Path> {
+pub(crate) fn as_plain_file(path: &Path) -> std::borrow::Cow<'_, Path> {
     if path.as_os_str().as_encoded_bytes().starts_with(b"file:") {
         std::borrow::Cow::Owned(Path::new(".").join(path))
     } else {
@@ -638,7 +756,7 @@ fn as_plain_file(path: &Path) -> std::borrow::Cow<'_, Path> {
 }
 
 /// The outcome stored as `text`, if it is one.
-fn stored_outcome(text: &str) -> Option<Outcome> {
+pub(crate) fn stored_outcome(text: &str) -> Option<Outcome> {
     [
         Outcome::Passed,
         Outcome::Failed,

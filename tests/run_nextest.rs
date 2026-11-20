@@ -21,6 +21,11 @@ fn harness(names: &[&str]) -> String {
         r#"const NAMES: &[&str] = &{names:?};
 
 fn main() {{
+    if std::env::var_os("DENY_HISTORY_TOKEN").is_some()
+        && std::env::var_os("GREENSHIFT_HISTORY_TOKEN").is_some() {{
+        eprintln!("test child inherited history credential");
+        std::process::exit(42);
+    }}
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--list") {{
         if !args.iter().any(|a| a == "--ignored") {{
@@ -200,6 +205,83 @@ fn every_test(failed: &[&str]) -> Vec<(String, String, String)> {
 
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn history_credential_is_absent_from_listing_and_running_test_children() {
+    let project = Project::new();
+    let out = project.run_in_env(
+        &[],
+        &[],
+        &[
+            (
+                "GREENSHIFT_HISTORY_TOKEN",
+                "invented-test-history-credential",
+            ),
+            ("DENY_HISTORY_TOKEN", "1"),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(project.runs()[0].results.len(), 5);
+    assert!(!stderr(&out).contains("invented-test-history-credential"));
+}
+
+#[test]
+fn durable_restore_failure_still_runs_all_tests_and_exports_failed_results() {
+    let p = Project::new();
+    let artifact = p.dir.path().join("publish.sqlite");
+    let out = p.run(
+        &[
+            "--history-remote",
+            "/nonexistent/history.git",
+            "--history-artifact",
+            artifact.to_str().unwrap(),
+            "--",
+            "--no-fail-fast",
+        ],
+        &["gamma"],
+    );
+    assert_eq!(out.status.code(), Some(100), "{}", stderr(&out));
+    assert!(stderr(&out).contains('⚠'));
+    greenshift::history::snapshot::validate(&artifact).unwrap();
+    let conn = Connection::open(artifact).unwrap();
+    let (total, failed): (i64, i64) = conn
+        .query_row(
+            "SELECT count(*),sum(outcome='failed') FROM results",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((total, failed), (5, 1));
+}
+
+#[test]
+fn durable_ref_restored_before_plan_in_real_run() {
+    let p = Project::new();
+    assert!(p.run(&[], &[]).status.success());
+    let repo = p.dir.path().join("remote.git");
+    assert!(std::process::Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&repo)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let remote = greenshift::history::Remote::new(repo.to_str().unwrap()).unwrap();
+    remote.publish(&p.db, None).unwrap();
+    std::fs::remove_file(&p.db).unwrap();
+    let out = p.run(
+        &[
+            "--history-remote",
+            repo.to_str().unwrap(),
+            "--min-runs",
+            "1",
+        ],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.runs().len(), 2);
+    assert!(!stderr(&out).contains("no history: run the full suite"));
 }
 
 #[test]

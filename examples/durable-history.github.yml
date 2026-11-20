@@ -1,0 +1,131 @@
+# Reference only: copy to .github/workflows/history.yml after a release with
+# these commands is available. The caller pins that release and its checksum.
+name: Durable test history
+on:
+  workflow_call:
+    inputs:
+      release:
+        type: string
+        required: true
+      sha256:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RELEASE: ${{ inputs.release }}
+      SHA256: ${{ inputs.sha256 }}
+      HISTORY_REMOTE: ${{ github.server_url }}/${{ github.repository }}.git
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install pinned greenshift release
+        shell: bash
+        run: |
+          [[ "$RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://github.com/paceheart/greenshift/releases/download/$RELEASE/greenshift-$RELEASE-x86_64-unknown-linux-musl" \
+            --output "$RUNNER_TEMP/greenshift"
+          printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/greenshift" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/greenshift"
+      - name: Resolve canonical cache key
+        id: history
+        env:
+          GREENSHIFT_HISTORY_TOKEN: ${{ github.token }}
+        run: echo "key=$("$RUNNER_TEMP/greenshift" history cache-key --remote "$HISTORY_REMOTE")" >> "$GITHUB_OUTPUT"
+      - name: Restore fast copy
+        id: cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .greenshift/cache
+          key: ${{ steps.history.outputs.key }}
+      - name: Install cargo-nextest
+        run: cargo install --locked cargo-nextest --version 0.9.143
+      - name: Run tests and export data
+        env:
+          GREENSHIFT_HISTORY_TOKEN: ${{ github.token }}
+        run: |
+          "$RUNNER_TEMP/greenshift" run nextest --history-remote "$HISTORY_REMOTE" \
+            --history-cache-dir .greenshift/cache --history-artifact .greenshift/publish.sqlite \
+            --commit "$GITHUB_SHA" -- --no-fail-fast
+      - name: Upload SQLite data only
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: greenshift-history
+          path: .greenshift/publish.sqlite
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 1
+      - name: Report cache degradation
+        if: ${{ !cancelled() && steps.cache.outcome == 'failure' }}
+        run: echo '::warning::⚠ History cache unavailable; canonical git history remains the source'
+  publish:
+    needs: test
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: greenshift-history-publish
+      cancel-in-progress: false
+    env:
+      RELEASE: ${{ inputs.release }}
+      SHA256: ${{ inputs.sha256 }}
+      HISTORY_REMOTE: ${{ github.server_url }}/${{ github.repository }}.git
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      # Fresh runner: no repository checkout or code supplied by the test job.
+      - name: Install pinned greenshift release
+        shell: bash
+        run: |
+          [[ "$RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://github.com/paceheart/greenshift/releases/download/$RELEASE/greenshift-$RELEASE-x86_64-unknown-linux-musl" \
+            --output "$RUNNER_TEMP/greenshift"
+          printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/greenshift" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/greenshift"
+      - name: Download SQLite data
+        id: artifact
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: greenshift-history
+          path: data
+      - name: Validate, merge and publish
+        id: save
+        if: ${{ steps.artifact.outcome == 'success' }}
+        env:
+          GREENSHIFT_HISTORY_TOKEN: ${{ github.token }}
+        run: |
+          oid=$("$RUNNER_TEMP/greenshift" history publish --remote "$HISTORY_REMOTE" \
+            --db data/publish.sqlite --cache-dir .greenshift/cache --default-branch "$DEFAULT_BRANCH")
+          if [[ "$oid" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+            echo "key=greenshift-history-$oid" >> "$GITHUB_OUTPUT"
+          else
+            echo '::warning::⚠ History was not published; no cache copy will be saved'
+          fi
+      - name: Save fast copy
+        id: cache
+        if: ${{ steps.save.outputs.key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .greenshift/cache
+          key: ${{ steps.save.outputs.key }}
+      - name: Report cache degradation
+        if: ${{ !cancelled() && steps.cache.outcome == 'failure' }}
+        run: echo '::warning::⚠ History cache save failed; durable ref was published independently'
+      - name: Report missing history artifact
+        if: ${{ !cancelled() && steps.artifact.outcome == 'failure' }}
+        run: echo '::warning::⚠ No history artifact available; keeping the canonical ref unchanged'
