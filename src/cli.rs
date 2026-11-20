@@ -113,6 +113,51 @@ pub enum Command {
     Run(RunArgs),
     /// Restore or publish durable history, or print its immutable cache key.
     History(HistoryArgs),
+    /// Set the repository up to run its tests with greenshift in CI: write
+    /// the CI workflow, pinned to a greenshift release, and what the test
+    /// runner needs. Changes nothing that exists unless --force is given.
+    Init(InitArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    #[command(subcommand)]
+    pub backend: InitBackend,
+}
+
+/// The test runners `init` sets a repository up for.
+#[derive(Debug, Subcommand)]
+pub enum InitBackend {
+    /// Set up `greenshift run nextest`, with cargo-nextest.
+    Nextest(InitNextestArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InitNextestArgs {
+    /// The forge to write the CI workflow for. Default: the one whose
+    /// directory (.github or .forgejo) the repository has.
+    #[arg(long, value_enum, value_name = "FORGE")]
+    pub ci: Option<crate::init::Forge>,
+
+    /// The greenshift release the workflow installs, such as v0.2.0. It
+    /// needs `run nextest` and durable history, so it is newer than v0.1.0.
+    #[arg(long, value_name = "TAG", required = true)]
+    pub release: crate::init::Release,
+
+    /// The release binary's SHA-256, from the release's .sha256 file,
+    /// checked independently. The workflow refuses a binary that does not
+    /// match it.
+    #[arg(long, value_name = "HEX", required = true)]
+    pub sha256: crate::init::Sha256,
+
+    /// The runner label the jobs run on. Default: ubuntu-latest on GitHub,
+    /// docker on Forgejo.
+    #[arg(long, value_name = "LABEL", value_parser = crate::init::runner_label)]
+    pub runs_on: Option<String>,
+
+    /// Replace generated files that exist and differ.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -465,7 +510,43 @@ pub fn run_with_control(control: &TransportControl) -> anyhow::Result<ExitCode> 
             Backend::Nextest(args) => run_nextest_with_control(&args, control),
         },
         Command::History(args) => history(&args, control),
+        Command::Init(args) => match args.backend {
+            InitBackend::Nextest(args) => init_nextest(&args, std::path::Path::new(".")),
+        },
     }
+}
+
+/// Write what `greenshift run nextest` needs in CI into the repository at
+/// `root`; see [`crate::init`].
+pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::Result<ExitCode> {
+    use crate::init::{self, Forge};
+    let forge = match init::detect_forge(args.ci, root) {
+        Ok(forge) => forge,
+        Err(why) => {
+            eprintln!("greenshift: usage error: {why}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    if forge == Forge::Forgejo {
+        eprintln!("greenshift: usage error: --ci forgejo is not supported yet");
+        return Ok(ExitCode::from(2));
+    }
+    if args.ci.is_none() {
+        println!(
+            "greenshift: found {}, so writing for {}",
+            forge.dir(),
+            forge.name()
+        );
+    }
+    let settings = init::nextest::Settings {
+        forge,
+        release: &args.release,
+        sha256: &args.sha256,
+        runs_on: args.runs_on.as_deref().unwrap_or(forge.default_runner()),
+    };
+    let wants = init::nextest::wants(root, &settings)?;
+    let actions = init::decide(root, wants, args.force)?;
+    Ok(ExitCode::from(init::apply(root, &actions)?))
 }
 
 fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<ExitCode> {
