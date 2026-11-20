@@ -3,10 +3,7 @@ use crate::select::{Class, Line};
 use crate::tainted::Tainted;
 
 fn id(suite: &str, name: &str) -> InventoryTest {
-    InventoryTest {
-        suite: Tainted::raw(suite),
-        name: Tainted::raw(name),
-    }
+    InventoryTest::new(Tainted::raw(suite), Tainted::raw(name))
 }
 
 /// Stored tests, as `select`'s lines borrow them.
@@ -33,7 +30,7 @@ impl Stored {
 fn ids(tests: &[&InventoryTest]) -> Vec<(String, String)> {
     tests
         .iter()
-        .map(|t| (t.suite.as_raw().to_owned(), t.name.as_raw().to_owned()))
+        .map(|t| (t.suite().as_raw().to_owned(), t.name().as_raw().to_owned()))
         .collect()
 }
 
@@ -46,7 +43,7 @@ fn pairs(tests: &[(&str, &str)]) -> Vec<(String, String)> {
 
 /// Every inventory test is in exactly one group, and nothing else is.
 fn assert_partition(plan: &Plan<'_>, inventory: &[InventoryTest]) {
-    let planned: Vec<&InventoryTest> = plan.rich.iter().chain(&plan.poor).copied().collect();
+    let planned: Vec<&InventoryTest> = plan.rich().iter().chain(plan.poor()).copied().collect();
     let mut seen = ids(&planned);
     seen.sort();
     let mut want = ids(&inventory.iter().collect::<Vec<_>>());
@@ -62,7 +59,7 @@ fn parses_json_lines() {
                 {\"name\": \"back\\\\slash\", \"suite\": \"\"}\r\n\
                 {\"suite\":\"s\",\"name\":\"uni \\u00fc \u{2713}\",\"extra\":1}";
     assert_eq!(
-        parse_inventory(text).unwrap(),
+        parse_inventory(text).unwrap().as_slice(),
         [
             id("s", "a, b (c)"),
             id("", r"back\slash"),
@@ -73,8 +70,8 @@ fn parses_json_lines() {
 
 #[test]
 fn an_empty_inventory_has_no_tests() {
-    assert_eq!(parse_inventory("").unwrap(), []);
-    assert_eq!(parse_inventory("\n \n").unwrap(), []);
+    assert_eq!(parse_inventory("").unwrap().as_slice(), []);
+    assert_eq!(parse_inventory("\n \n").unwrap().as_slice(), []);
 }
 
 #[test]
@@ -120,10 +117,10 @@ fn poor_is_the_poor_lines_in_the_inventory_and_rich_is_the_rest() {
     // Rich in pick order, then the rest in inventory order; poor in
     // select's order.
     assert_eq!(
-        ids(&plan.rich),
+        ids(plan.rich()),
         pairs(&[("s", "picked"), ("s", "fresh"), ("s", "under_observed")])
     );
-    assert_eq!(ids(&plan.poor), pairs(&[("s", "steady"), ("s", "slow")]));
+    assert_eq!(ids(plan.poor()), pairs(&[("s", "steady"), ("s", "slow")]));
     assert_partition(&plan, &inventory);
 }
 
@@ -146,7 +143,7 @@ fn rich_picks_keep_select_s_pick_order() {
     let lines = stored.lines();
     let plan = plan(&lines, &inventory);
     assert_eq!(
-        ids(&plan.rich),
+        ids(plan.rich()),
         pairs(&[
             ("s", "m_pick"),
             ("s", "z_pick"),
@@ -154,7 +151,7 @@ fn rich_picks_keep_select_s_pick_order() {
             ("s", "fresh")
         ])
     );
-    assert_eq!(ids(&plan.poor), pairs(&[("s", "steady")]));
+    assert_eq!(ids(plan.poor()), pairs(&[("s", "steady")]));
     assert_partition(&plan, &inventory);
 }
 
@@ -169,8 +166,8 @@ fn stored_tests_not_in_the_inventory_are_left_out() {
     let inventory = [id("s", "kept")];
     let lines = stored.lines();
     let plan = plan(&lines, &inventory);
-    assert!(plan.rich.is_empty());
-    assert_eq!(ids(&plan.poor), pairs(&[("s", "kept")]));
+    assert!(plan.rich().is_empty());
+    assert_eq!(ids(plan.poor()), pairs(&[("s", "kept")]));
     assert_partition(&plan, &inventory);
 }
 
@@ -178,8 +175,8 @@ fn stored_tests_not_in_the_inventory_are_left_out() {
 fn with_no_lines_every_test_is_rich() {
     let inventory = [id("s", "a"), id("", "b")];
     let plan = plan(&[], &inventory);
-    assert_eq!(ids(&plan.rich), pairs(&[("s", "a"), ("", "b")]));
-    assert!(plan.poor.is_empty());
+    assert_eq!(ids(plan.rich()), pairs(&[("s", "a"), ("", "b")]));
+    assert!(plan.poor().is_empty());
     assert_partition(&plan, &inventory);
 }
 
@@ -189,8 +186,8 @@ fn a_test_listed_twice_is_planned_once() {
     let inventory = [id("s", "p"), id("s", "r"), id("s", "p"), id("s", "r")];
     let lines = stored.lines();
     let plan = plan(&lines, &inventory);
-    assert_eq!(ids(&plan.rich), pairs(&[("s", "r")]));
-    assert_eq!(ids(&plan.poor), pairs(&[("s", "p")]));
+    assert_eq!(ids(plan.rich()), pairs(&[("s", "r")]));
+    assert_eq!(ids(plan.poor()), pairs(&[("s", "p")]));
     assert_partition(&plan, &inventory);
 }
 
@@ -199,7 +196,7 @@ fn an_empty_inventory_plans_nothing() {
     let stored = Stored::new(&[(Class::Rich, "s", "a"), (Class::Poor, "s", "b")]);
     let lines = stored.lines();
     let plan = plan(&lines, &[]);
-    assert!(plan.rich.is_empty() && plan.poor.is_empty());
+    assert!(plan.rich().is_empty() && plan.poor().is_empty());
     assert_eq!(
         plan.to_json(HistoryState::Ok),
         r#"{"history":"ok","rich":[],"poor":[]}"#
@@ -236,8 +233,8 @@ fn names_are_matched_and_written_raw() {
     let inventory: Vec<InventoryTest> = odd.iter().map(|&(s, n)| id(s, n)).collect();
     let lines = stored.lines();
     let plan = plan(&lines, &inventory);
-    assert!(plan.rich.is_empty());
-    assert_eq!(ids(&plan.poor), pairs(&odd));
+    assert!(plan.rich().is_empty());
+    assert_eq!(ids(plan.poor()), pairs(&odd));
     let json = plan.to_json(HistoryState::Ok);
     assert_eq!(read_group(&json, "poor"), pairs(&odd));
     assert!(!json.contains('\u{1b}'), "{json}");
@@ -292,8 +289,8 @@ fn a_test_is_its_suite_and_name_not_its_name_alone() {
     let inventory = [id("t", "same"), id("s", "same"), id("t", "pick")];
     let lines = stored.lines();
     let plan = plan(&lines, &inventory);
-    assert_eq!(ids(&plan.rich), pairs(&[("t", "same"), ("t", "pick")]));
-    assert_eq!(ids(&plan.poor), pairs(&[("s", "same")]));
+    assert_eq!(ids(plan.rich()), pairs(&[("t", "same"), ("t", "pick")]));
+    assert_eq!(ids(plan.poor()), pairs(&[("s", "same")]));
     assert_partition(&plan, &inventory);
 }
 
@@ -339,5 +336,5 @@ fn every_invisible_character_is_escaped_and_reads_back() {
 #[test]
 fn a_repeated_member_takes_its_last_value() {
     let text = r#"{"suite":"s","name":"first","name":"last","suite":"t"}"#;
-    assert_eq!(parse_inventory(text).unwrap(), [id("t", "last")]);
+    assert_eq!(parse_inventory(text).unwrap().as_slice(), [id("t", "last")]);
 }

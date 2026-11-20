@@ -306,7 +306,7 @@ pub fn batches(terms: &[String], max: usize) -> Vec<String> {
 pub fn filtersets(tests: &[&InventoryTest], max: usize) -> Vec<String> {
     let terms: Vec<String> = tests
         .iter()
-        .map(|test| crate::nextest::term(test.suite.as_raw(), test.name.as_raw()))
+        .map(|test| crate::nextest::term(test.suite().as_raw(), test.name().as_raw()))
         .collect();
     if terms.is_empty() {
         return vec![crate::nextest::any_of([])];

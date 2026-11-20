@@ -19,7 +19,7 @@ use std::process::{ExitCode, ExitStatus};
 use anyhow::Context;
 
 use crate::cli::{self, IngestArgs, RunOptions};
-use crate::plan::InventoryTest;
+use crate::plan::{Inventory, InventoryTest};
 use crate::select::Class;
 use crate::tainted::Tainted;
 
@@ -38,10 +38,18 @@ pub struct Invocation {
 }
 
 /// What a backend's listing found.
+///
+/// ```compile_fail
+/// use greenshift::run::Listed;
+/// let mut listed = Listed::Tests(Default::default());
+/// if let Listed::Tests(inventory) = &mut listed {
+///     inventory.clear();
+/// }
+/// ```
 #[derive(Debug)]
 pub enum Listed {
     /// The tests that would run now, in the runner's order.
-    Tests(Vec<InventoryTest>),
+    Tests(Inventory),
     /// The listing failed, with this exit status; the runner has said why
     /// on stderr.
     Failed(u8),
@@ -131,7 +139,7 @@ pub(crate) fn run_with_control(
         eprintln!("greenshift: running every test as rich");
     }
     let mut invocations = Vec::new();
-    for (class, group) in planned_groups(&groups.rich, &groups.poor) {
+    for (class, group) in planned_groups(groups.rich(), groups.poor()) {
         invocations.extend(backend.invocations(class, group, &dir)?);
     }
     let codes: Vec<u8> = invocations.iter().map(execute).collect();
@@ -151,17 +159,19 @@ pub(crate) fn run_with_control(
 
 /// The groups to run, in order: rich, then poor, each only if it has a
 /// test, or rich alone, empty, when neither has one.
+///
+/// ```compile_fail
+/// let mut groups = greenshift::run::planned_groups(&[], &[]);
+/// groups.as_mut_slice().reverse();
+/// ```
 pub fn planned_groups<'g, 't>(
     rich: &'g [&'t InventoryTest],
     poor: &'g [&'t InventoryTest],
-) -> Vec<(Class, &'g [&'t InventoryTest])> {
-    if rich.is_empty() && poor.is_empty() {
-        return vec![(Class::Rich, rich)];
-    }
+) -> impl Iterator<Item = (Class, &'g [&'t InventoryTest])> {
+    let empty = rich.is_empty() && poor.is_empty();
     [(Class::Rich, rich), (Class::Poor, poor)]
         .into_iter()
-        .filter(|(_, group)| !group.is_empty())
-        .collect()
+        .filter(move |(class, group)| !group.is_empty() || (empty && *class == Class::Rich))
 }
 
 /// Write the invocation's setup files and run it, its output going to

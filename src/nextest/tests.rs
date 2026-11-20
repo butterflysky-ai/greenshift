@@ -170,14 +170,17 @@ const BINARIES_ONLY: &str = r#"{"rust-build-meta":{"target-directory":"/t"},"rus
 #[test]
 fn binary_ids_from_a_full_or_binaries_only_listing() {
     assert_eq!(
-        binary_ids(FULL_LIST).unwrap(),
-        bins(&["greenshift", "greenshift::cli"])
+        binary_ids(FULL_LIST).unwrap().as_set(),
+        &bins(&["greenshift", "greenshift::cli"])
     );
     assert_eq!(
-        binary_ids(BINARIES_ONLY).unwrap(),
-        bins(&["greenshift", "greenshift::bin/greenshift"])
+        binary_ids(BINARIES_ONLY).unwrap().as_set(),
+        &bins(&["greenshift", "greenshift::bin/greenshift"])
     );
-    assert_eq!(binary_ids(r#"{"rust-binaries":{}}"#).unwrap(), bins(&[]));
+    assert_eq!(
+        binary_ids(r#"{"rust-binaries":{}}"#).unwrap().as_set(),
+        &bins(&[])
+    );
 }
 
 #[test]
@@ -198,7 +201,10 @@ fn binary_ids_refuses_anything_else() {
 #[test]
 fn a_full_listing_names_its_binaries_tests() {
     let listing = listing(FULL_LIST).unwrap();
-    assert_eq!(listing.binaries, bins(&["greenshift", "greenshift::cli"]));
+    assert_eq!(
+        listing.binaries().as_set(),
+        &bins(&["greenshift", "greenshift::cli"])
+    );
     assert!(listing.has("greenshift", "cli::tests::ingest_options"));
     assert!(!listing.has("greenshift", "cli::tests::gone"));
     // A listed binary with no tests has none to keep.
@@ -211,7 +217,7 @@ fn a_full_listing_names_its_binaries_tests() {
 #[test]
 fn a_binaries_only_listing_keeps_every_test_of_its_binaries() {
     let listing = listing(BINARIES_ONLY).unwrap();
-    assert!(listing.tests.is_empty());
+    assert!(listing.tests().is_empty());
     assert!(listing.has("greenshift", "any::name"));
     assert!(!listing.has("gone", "any::name"));
 }
@@ -237,7 +243,7 @@ fn a_binary_a_full_listing_skipped_keeps_every_test() {
 fn raw(tests: &[crate::plan::InventoryTest]) -> Vec<(&str, &str)> {
     tests
         .iter()
-        .map(|t| (t.suite.as_raw(), t.name.as_raw()))
+        .map(|t| (t.suite().as_raw(), t.name().as_raw()))
         .collect()
 }
 

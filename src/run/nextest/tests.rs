@@ -253,10 +253,7 @@ fn a_term_longer_than_the_limit_is_a_batch_alone() {
 }
 
 fn test(suite: &str, name: &str) -> InventoryTest {
-    InventoryTest {
-        suite: Tainted::raw(suite),
-        name: Tainted::raw(name),
-    }
+    InventoryTest::new(Tainted::raw(suite), Tainted::raw(name))
 }
 
 #[test]
