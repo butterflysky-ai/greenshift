@@ -232,7 +232,7 @@ fn the_install_step_fails_closed_on_a_checksum_mismatch() {
     let binary = b"#!/bin/sh\necho pretend greenshift\n";
     let pinned = sha256_hex(binary);
     for forge in forges() {
-        let workflow = generated(forge, &pinned, extra_for(forge));
+        let workflow = generated(forge, &pinned, &[]);
         for job in ["test", "publish"] {
             let (ok, installed) = install(&workflow, job, binary);
             assert!(ok, "{forge} {job}: the matching binary is installed");
@@ -249,17 +249,9 @@ fn forges() -> &'static [&'static str] {
     &["github", "forgejo"]
 }
 
-/// The arguments `init nextest --ci forge` needs beyond the pin.
-fn extra_for(forge: &str) -> &'static [&'static str] {
-    match forge {
-        "forgejo" => &["--accept-unisolated"],
-        _ => &[],
-    }
-}
-
 #[test]
 fn forgejo_keeps_the_publisher_apart_but_claims_no_permissions() {
-    let workflow = generated("forgejo", &"a".repeat(64), &["--accept-unisolated"]);
+    let workflow = generated("forgejo", &"a".repeat(64), &[]);
     assert_publisher_separation(&workflow);
     // Forgejo ignores `permissions`; writing them would claim an
     // isolation the test job does not have.
@@ -295,9 +287,7 @@ fn every_runner_label_reaches_the_workflow_as_that_string() {
         "ubuntu-24.04",
     ] {
         for forge in forges() {
-            let mut extra = extra_for(forge).to_vec();
-            extra.extend(["--runs-on", label]);
-            let workflow = generated(forge, &"a".repeat(64), &extra);
+            let workflow = generated(forge, &"a".repeat(64), &["--runs-on", label]);
             for job in ["test", "publish"] {
                 assert_eq!(
                     workflow["jobs"][job]["runs-on"],
@@ -323,7 +313,7 @@ fn the_forgejo_header_quotes_the_capability_gate_as_the_design_says_it() {
     assert_cmd::Command::cargo_bin("greenshift")
         .unwrap()
         .current_dir(dir.path())
-        .args(["init", "nextest", "--ci", "forgejo", "--accept-unisolated"])
+        .args(["init", "nextest", "--ci", "forgejo"])
         .args(["--release", RELEASE, "--sha256", &"a".repeat(64)])
         .assert()
         .success();
@@ -370,7 +360,7 @@ fn the_forgejo_header_quotes_the_capability_gate_as_the_design_says_it() {
 /// fetched, and whether the download was run.
 #[cfg(unix)]
 fn install_rust(with_cargo: bool, payload: &[u8]) -> (bool, String, bool) {
-    let workflow = generated("forgejo", &"a".repeat(64), &["--accept-unisolated"]);
+    let workflow = generated("forgejo", &"a".repeat(64), &[]);
     let script = step(&workflow, "test", "Install Rust when the runner has none")["run"]
         .as_str()
         .unwrap()

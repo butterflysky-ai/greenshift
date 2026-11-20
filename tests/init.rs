@@ -88,6 +88,7 @@ fn github_writes_the_golden_workflow_and_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let out = stdout_of(&mut init(dir.path(), &["--ci", "github"]));
     assert!(out.contains(&format!("wrote {GITHUB_WORKFLOW}")), "{out}");
+    assert!(!out.contains("not isolated"), "{out}");
     assert_golden(&dir.path().join(GITHUB_WORKFLOW), "init-nextest-github.yml");
 }
 
@@ -395,10 +396,7 @@ fn write(dir: &Path, path: &str, text: &str) {
 
 #[test]
 fn a_nextest_toml_is_left_byte_for_byte_and_none_is_created() {
-    for forge in [
-        &["--ci", "github"][..],
-        &["--ci", "forgejo", "--accept-unisolated"],
-    ] {
+    for forge in [&["--ci", "github"][..], &["--ci", "forgejo"]] {
         let dir = tempfile::tempdir().unwrap();
         let out = stdout_of(&mut init(dir.path(), forge));
         assert!(!dir.path().join(".config").exists(), "{forge:?}");
@@ -442,24 +440,17 @@ fn a_conflict_anywhere_means_nothing_is_written_anywhere() {
 const FORGEJO_WORKFLOW: &str = ".forgejo/workflows/greenshift.yml";
 
 #[test]
-fn forgejo_needs_the_token_limitation_accepted_and_otherwise_writes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    init(dir.path(), &["--ci", "forgejo"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("--accept-unisolated"))
-        .stderr(predicate::str::contains("write access"));
-    assert!(snapshot(dir.path()).is_empty());
-}
-
-#[test]
 fn forgejo_writes_the_golden_workflow_and_says_it_is_not_isolated() {
     let dir = tempfile::tempdir().unwrap();
-    let out = stdout_of(&mut init(
-        dir.path(),
-        &["--ci", "forgejo", "--accept-unisolated"],
-    ));
+    let out = stdout_of(&mut init(dir.path(), &["--ci", "forgejo"]));
     assert!(out.contains(&format!("wrote {FORGEJO_WORKFLOW}")), "{out}");
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains("not isolated"))
+            .count(),
+        1,
+        "{out}"
+    );
     assert!(!dir.path().join(NEXTEST_TOML).exists());
     assert!(!dir.path().join(".github").exists());
     let workflow = dir.path().join(FORGEJO_WORKFLOW);
@@ -476,23 +467,15 @@ fn forgejo_writes_the_golden_workflow_and_says_it_is_not_isolated() {
 fn forgejo_is_found_from_the_repository_and_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".forgejo")).unwrap();
-    let out = stdout_of(&mut init(dir.path(), &["--accept-unisolated"]));
+    let out = stdout_of(&mut init(dir.path(), &[]));
     assert!(
         out.contains("found .forgejo, so writing for forgejo"),
         "{out}"
     );
     assert!(dir.path().join(FORGEJO_WORKFLOW).is_file());
     let before = snapshot(dir.path());
-    let out = stdout_of(&mut init(dir.path(), &["--accept-unisolated"]));
+    let out = stdout_of(&mut init(dir.path(), &[]));
     assert!(out.contains("nothing to change"), "{out}");
+    assert!(out.contains("not isolated"), "{out}");
     assert_eq!(snapshot(dir.path()), before);
-}
-
-#[test]
-fn accepting_the_forgejo_limitation_is_refused_for_github() {
-    let dir = tempfile::tempdir().unwrap();
-    init(dir.path(), &["--ci", "github", "--accept-unisolated"])
-        .assert()
-        .code(2);
-    assert!(snapshot(dir.path()).is_empty());
 }

@@ -155,13 +155,6 @@ pub struct InitNextestArgs {
     #[arg(long, value_name = "LABEL")]
     pub runs_on: Option<crate::init::RunnerLabel>,
 
-    /// Write the Forgejo workflow although it cannot be isolated: stock
-    /// Forgejo gives every step a token with write access to the
-    /// repository, so the tests can write the history ref too. Required
-    /// with --ci forgejo.
-    #[arg(long)]
-    pub accept_unisolated: bool,
-
     /// Replace generated files that exist and differ.
     #[arg(long)]
     pub force: bool,
@@ -534,31 +527,17 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
             return Ok(ExitCode::from(2));
         }
     };
-    match (forge, args.accept_unisolated) {
-        (Forge::Forgejo, false) => {
-            eprintln!(
-                "greenshift: usage error: the Forgejo workflow is not isolated: stock Forgejo \
-                 gives every step, the tests included, a token with write access to the \
-                 repository outside fork pull requests, and ignores `permissions` (see \
-                 \"Forgejo capability gate\" in greenshift's docs/design/durable-history.md). \
-                 Give --accept-unisolated to write it anyway."
-            );
-            return Ok(ExitCode::from(2));
-        }
-        (Forge::Github, true) => {
-            eprintln!(
-                "greenshift: usage error: --accept-unisolated is for --ci forgejo; \
-                 the GitHub workflow is isolated"
-            );
-            return Ok(ExitCode::from(2));
-        }
-        (Forge::Github, false) | (Forge::Forgejo, true) => {}
-    }
     if args.ci.is_none() {
         println!(
             "greenshift: found {}, so writing for {}",
             forge.dir(),
             forge.name()
+        );
+    }
+    if forge == Forge::Forgejo {
+        println!(
+            "greenshift: note: the Forgejo workflow is not isolated: every step, the tests \
+             included, gets a token that can write the repository (see the top of the file)"
         );
     }
     let runs_on = args

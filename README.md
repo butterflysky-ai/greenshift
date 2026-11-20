@@ -392,7 +392,7 @@ Exit status:
 
 ```
 greenshift init nextest --release TAG --sha256 HEX [--ci github|forgejo]
-                        [--runs-on LABEL] [--accept-unisolated] [--force]
+                        [--runs-on LABEL] [--force]
 ```
 
 `init nextest` sets a cargo-nextest repository up to run `greenshift run
@@ -422,8 +422,7 @@ On Forgejo the workflow is **not isolated**: stock Forgejo gives every
 step, the tests included, a token that can write the repository, and
 ignores `permissions` (see the
 [Forgejo capability gate](docs/design/durable-history.md#forgejo-capability-gate)).
-The file says so at the top, and `init` writes it only with
-`--accept-unisolated`.
+The file says so at the top, and `init` says so when it runs.
 
 The workflow publishes the history to `refs/greenshift/history`, whole
 and never pruned, where anyone who can read the repository can read it:

@@ -34,7 +34,7 @@ pub const LAST_RELEASE_WITHOUT_HISTORY: (u64, u64, u64) = (0, 1, 0);
 pub enum Forge {
     /// GitHub Actions: a read-only test job and a separate publisher.
     Github,
-    /// Forgejo Actions. Not isolated: see `--accept-unisolated`.
+    /// Forgejo Actions. Not isolated: the workflow says so at its top.
     Forgejo,
 }
 
