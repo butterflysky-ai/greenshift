@@ -5,7 +5,8 @@ use std::path::Path;
 
 use rusqlite::{config::DbConfig, params, Connection, OpenFlags};
 
-use crate::store::{Store, APPLICATION_ID, SCHEMA_VERSION};
+use crate::junit::Outcome;
+use crate::store::{self, Store, APPLICATION_ID, SCHEMA_VERSION};
 use crate::tainted::Tainted;
 
 /// Maximum uncompressed snapshot size.
@@ -37,7 +38,7 @@ impl From<rusqlite::Error> for SnapshotError {
 struct ResultRow {
     suite: String,
     name: String,
-    outcome: String,
+    outcome: Outcome,
     duration: Option<i64>,
 }
 
@@ -84,7 +85,7 @@ fn schema(conn: &Connection) -> Result<Vec<SchemaObject>, SnapshotError> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn check_sidecars(path: &Path) -> Result<(), SnapshotError> {
+pub(crate) fn check_sidecars(path: &Path) -> Result<(), SnapshotError> {
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
@@ -117,14 +118,14 @@ fn check_output(path: &Path) -> Result<(), SnapshotError> {
     check_sidecars(path)
 }
 
-fn open_checked(path: &Path) -> Result<Connection, SnapshotError> {
+fn open_checked(path: &Path) -> Result<(Connection, i64), SnapshotError> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.len() > MAX_DB_BYTES {
         return Err(invalid("expected a regular SQLite file at most 256 MiB"));
     }
     check_sidecars(path)?;
     let conn = Connection::open_with_flags(
-        path,
+        store::as_plain_file(path),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -144,13 +145,13 @@ fn open_checked(path: &Path) -> Result<Connection, SnapshotError> {
     }
     let app: i32 = conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if app != APPLICATION_ID || version != SCHEMA_VERSION {
-        return Err(invalid("application id or schema version mismatch"));
+    if app != APPLICATION_ID {
+        return Err(invalid("application id mismatch"));
     }
-    let temp = tempfile::tempdir()?;
-    let canonical = temp.path().join("schema.sqlite");
-    drop(Store::open(&canonical)?);
-    let expected = Connection::open_with_flags(&canonical, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if !(1..=SCHEMA_VERSION).contains(&version) {
+        return Err(invalid("unsupported snapshot schema version"));
+    }
+    let expected = store::canonical_schema(version)?;
     if schema(&conn)? != schema(&expected)? {
         return Err(invalid(
             "schema does not exactly match this greenshift release",
@@ -175,7 +176,7 @@ fn open_checked(path: &Path) -> Result<Connection, SnapshotError> {
     {
         return Err(invalid("broken foreign key"));
     }
-    Ok(conn)
+    Ok((conn, version))
 }
 
 fn field(text: &str) -> Result<(), SnapshotError> {
@@ -191,7 +192,7 @@ fn load(path: &Path) -> Result<Data, SnapshotError> {
 }
 
 fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, SnapshotError> {
-    let conn = open_checked(path)?;
+    let (conn, version) = open_checked(path)?;
     // Account expanded names as well as row storage before copying them. A
     // compact SQLite table can share a long name across millions of results.
     // The row allowance includes vector spare capacity and map-node overhead;
@@ -215,14 +216,18 @@ fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, Snapshot
         tests.insert(id, (suite, name));
     }
     let mut runs = BTreeMap::new();
-    let mut stmt = conn.prepare(
-        "SELECT id,commit_sha,source,ingested_at,partial,branch,tag,history_id FROM runs ORDER BY id",
-    )?;
+    let run_sql = match version {
+        1 => "SELECT id,commit_sha,source,ingested_at,0,NULL,NULL,NULL FROM runs ORDER BY id",
+        2 => "SELECT id,commit_sha,source,ingested_at,partial,NULL,NULL,NULL FROM runs ORDER BY id",
+        3 => "SELECT id,commit_sha,source,ingested_at,partial,branch,tag,NULL FROM runs ORDER BY id",
+        _ => "SELECT id,commit_sha,source,ingested_at,partial,branch,tag,history_id FROM runs ORDER BY id",
+    };
+    let mut stmt = conn.prepare(run_sql)?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
         let run = Run {
-            history_id: row.get(7)?,
+            history_id: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
             commit: row.get(1)?,
             source: row.get(2)?,
             at: row.get(3)?,
@@ -236,11 +241,12 @@ fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, Snapshot
         {
             return Err(invalid("invalid run id, partial flag, or branch/tag"));
         }
-        if run.history_id.len() != 32
-            || !run
-                .history_id
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        if version >= 4
+            && (run.history_id.len() != 32
+                || !run
+                    .history_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
         {
             return Err(invalid("run history id must be 32 lowercase hex digits"));
         }
@@ -287,9 +293,9 @@ fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, Snapshot
         let test_id: i64 = row.get(1)?;
         let outcome: String = row.get(2)?;
         let duration: Option<i64> = row.get(3)?;
-        if !["passed", "failed", "error", "skipped"].contains(&outcome.as_str())
-            || duration.is_some_and(|d| d < 0)
-        {
+        let parsed_outcome = store::stored_outcome(&outcome)
+            .ok_or_else(|| invalid("invalid outcome or duration"))?;
+        if duration.is_some_and(|d| d < 0) {
             return Err(invalid("invalid outcome or duration"));
         }
         let (suite, name) = tests.get(&test_id).ok_or_else(|| invalid("unknown test"))?;
@@ -303,9 +309,21 @@ fn load_with_budget(path: &Path, expanded_bytes: usize) -> Result<Data, Snapshot
             .push(ResultRow {
                 suite: suite.clone(),
                 name: name.clone(),
-                outcome,
+                outcome: parsed_outcome,
                 duration,
             });
+    }
+    if version < 4 {
+        budget.charge(
+            runs.len()
+                .checked_mul(2 * (std::mem::size_of::<(i64, String)>() + 32))
+                .ok_or_else(|| invalid("expanded snapshot exceeds memory budget"))?,
+        )?;
+        for (id, identity) in store::legacy_run_identities(&conn)? {
+            runs.get_mut(&id)
+                .ok_or_else(|| invalid("legacy identity has no run"))?
+                .history_id = identity;
+        }
     }
     for run in runs.values_mut() {
         run.results
@@ -331,7 +349,7 @@ fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
     std::fs::create_dir_all(parent)?;
     let temporary = tempfile::NamedTempFile::new_in(parent)?;
     drop(Store::open(temporary.path())?);
-    let mut conn = Connection::open(temporary.path())?;
+    let mut conn = Connection::open(store::as_plain_file(temporary.path()))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     let tx = conn.transaction()?;
     let mut test_ids = HashMap::new();
@@ -346,7 +364,9 @@ fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
             entry.insert(tx.last_insert_rowid());
         }
     }
-    for run in &data.runs {
+    let mut chronological: Vec<_> = data.runs.iter().collect();
+    chronological.sort_unstable_by(|a, b| (&a.at, &a.history_id).cmp(&(&b.at, &b.history_id)));
+    for run in chronological {
         tx.execute("INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![run.commit,run.source,run.at,run.partial,run.branch,run.tag,run.history_id])?;
         let id = tx.last_insert_rowid();
         for (position, path) in &run.files {
@@ -361,7 +381,7 @@ fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
                 .ok_or_else(|| invalid("result test missing from snapshot"))?;
             tx.execute(
                 "INSERT INTO results(run_id,test_id,outcome,duration_ms) VALUES (?1,?2,?3,?4)",
-                params![id, test, result.outcome, result.duration],
+                params![id, test, result.outcome.as_str(), result.duration],
             )?;
         }
     }
@@ -464,17 +484,17 @@ mod tests {
 
     #[test]
     fn test_validate_extra_schema_and_bad_values_rejected() {
-        for change in [
-            "CREATE TABLE extra(value)",
-            "CREATE VIEW extra AS SELECT * FROM tests",
-            "CREATE TRIGGER extra AFTER INSERT ON tests BEGIN DELETE FROM results; END",
-            "PRAGMA application_id=0",
-            "PRAGMA user_version=999",
-            "PRAGMA ignore_check_constraints=ON; UPDATE results SET duration_ms=-1",
-            "PRAGMA foreign_keys=OFF; UPDATE results SET test_id=999",
-            "PRAGMA foreign_keys=OFF; UPDATE runs SET id=-1",
-            "UPDATE runs SET history_id=NULL",
-            "UPDATE runs SET history_id='ABCDEF'",
+        for (change, expected) in [
+            ("CREATE TABLE extra(value)", "schema does not exactly match this greenshift release"),
+            ("CREATE VIEW extra AS SELECT * FROM tests", "schema does not exactly match this greenshift release"),
+            ("CREATE TRIGGER extra AFTER INSERT ON tests BEGIN DELETE FROM results; END", "schema does not exactly match this greenshift release"),
+            ("PRAGMA application_id=0", "application id mismatch"),
+            ("PRAGMA user_version=999", "unsupported snapshot schema version"),
+            ("PRAGMA ignore_check_constraints=ON; UPDATE results SET duration_ms=-1", "invalid outcome or duration"),
+            ("PRAGMA foreign_keys=OFF; UPDATE results SET test_id=999", "broken foreign key"),
+            ("PRAGMA foreign_keys=OFF; UPDATE runs SET id=-1; UPDATE results SET run_id=-1; UPDATE run_files SET run_id=-1", "invalid run id, partial flag, or branch/tag"),
+            ("UPDATE runs SET history_id=NULL", "run history id must be 32 lowercase hex digits"),
+            ("UPDATE runs SET history_id='ABCDEF'", "run history id must be 32 lowercase hex digits"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("db");
@@ -483,8 +503,242 @@ mod tests {
                 .unwrap()
                 .execute_batch(change)
                 .unwrap();
-            assert!(validate(&path).is_err(), "accepted {change}");
+            let result=validate(&path);
+            assert!(matches!(&result, Err(SnapshotError::Invalid(message)) if *message == expected), "wrong rejection for {change}: {result:?}");
         }
+    }
+
+    fn historical_fixture(path: &Path, version: i64) {
+        let conn = store::canonical_schema(version).unwrap();
+        conn.execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+            .unwrap();
+        let output = Connection::open(path).unwrap();
+        output.execute("INSERT INTO runs(id,source,ingested_at) VALUES (9,'legacy','2020-01-01T00:00:00.000Z')",[]).unwrap();
+        output
+            .execute("INSERT INTO tests VALUES (4,'suite','test')", [])
+            .unwrap();
+        output
+            .execute("INSERT INTO results VALUES (9,4,'passed',12)", [])
+            .unwrap();
+        output
+            .execute("INSERT INTO run_files VALUES (9,0,x'00ff')", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn test_snapshot_supported_historical_schemas_upgrade_without_input_mutation() {
+        for version in 1..SCHEMA_VERSION {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("input");
+            let output = dir.path().join("output");
+            historical_fixture(&input, version);
+            let before = std::fs::read(&input).unwrap();
+            validate(&input).unwrap();
+            snapshot(&input, &output).unwrap();
+            assert_eq!(std::fs::read(&input).unwrap(), before);
+            let upgraded = Store::open_read_only(&output).unwrap().unwrap();
+            assert_eq!(upgraded.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(upgraded.history(&[]).unwrap().runs.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_snapshot_copy_contract_covers_every_canonical_table_and_column() {
+        let conn = store::canonical_schema(SCHEMA_VERSION).unwrap();
+        let mut tables: Vec<_> = schema(&conn)
+            .unwrap()
+            .into_iter()
+            .filter(|object| object.0 == "table")
+            .map(|object| object.1)
+            .collect();
+        tables.sort();
+        assert_eq!(tables, vec!["results", "run_files", "runs", "tests"]);
+        for (table, expected) in [
+            (
+                "runs",
+                vec![
+                    "id",
+                    "commit_sha",
+                    "source",
+                    "ingested_at",
+                    "partial",
+                    "branch",
+                    "tag",
+                    "history_id",
+                ],
+            ),
+            ("tests", vec!["id", "suite", "name"]),
+            (
+                "results",
+                vec!["run_id", "test_id", "outcome", "duration_ms"],
+            ),
+            ("run_files", vec!["run_id", "position", "path"]),
+        ] {
+            let columns = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                columns, expected,
+                "snapshot copy contract must cover new fields in {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_snapshot_legacy_trigger_and_future_version_reject_without_writes() {
+        for (change, expected) in [
+            (
+                "CREATE TRIGGER attack AFTER UPDATE ON runs BEGIN DELETE FROM tests; END",
+                "schema does not exactly match this greenshift release",
+            ),
+            (
+                "PRAGMA user_version=999",
+                "unsupported snapshot schema version",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("input");
+            let output = dir.path().join("output");
+            historical_fixture(&input, 3);
+            Connection::open(&input)
+                .unwrap()
+                .execute_batch(change)
+                .unwrap();
+            let before = std::fs::read(&input).unwrap();
+            std::fs::write(&output, b"untouched").unwrap();
+            assert!(
+                matches!(snapshot(&input,&output),Err(SnapshotError::Invalid(message)) if message==expected)
+            );
+            assert_eq!(std::fs::read(&input).unwrap(), before);
+            assert_eq!(std::fs::read(&output).unwrap(), b"untouched");
+        }
+    }
+
+    #[test]
+    fn test_snapshot_legacy_identity_v1_golden_bytes_and_store_migration_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let snapshot = dir.path().join("snapshot");
+        historical_fixture(&input, 3);
+        super::snapshot(&input, &snapshot).unwrap();
+        let identity = |path: &Path| {
+            Connection::open(path)
+                .unwrap()
+                .query_row("SELECT history_id FROM runs", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+        };
+        // Independent SHA-256 oracle over the fixed v1 typed encoding of the
+        // fixture (original id9, NULL commit, legacy source/time/files/results).
+        assert_eq!(identity(&snapshot), "29823b29db8f0d9396909bc519396cd2");
+        drop(Store::open(&input).unwrap());
+        assert_eq!(identity(&input), identity(&snapshot));
+    }
+
+    #[test]
+    fn test_store_open_invalid_history_identity_refused_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        fixture(&input, "source");
+        Connection::open(&input)
+            .unwrap()
+            .execute("UPDATE runs SET history_id=NULL", [])
+            .unwrap();
+        let before = std::fs::read(&input).unwrap();
+        assert!(matches!(
+            Store::open(&input),
+            Err(store::StoreError::InvalidHistoryId { .. })
+        ));
+        assert_eq!(std::fs::read(&input).unwrap(), before);
+    }
+
+    #[test]
+    fn test_snapshot_legacy_arbitrary_commit_is_bounded_data_and_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        historical_fixture(&input, 3);
+        let legacy = "legacy ref; $(not-a-command)\nHEAD";
+        Connection::open(&input)
+            .unwrap()
+            .execute("UPDATE runs SET commit_sha=?1", [legacy])
+            .unwrap();
+        snapshot(&input, &output).unwrap();
+        let conn = Connection::open(&output).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT commit_sha FROM runs", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            legacy
+        );
+        assert_eq!(
+            conn.query_row("SELECT length(history_id) FROM runs", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            32
+        );
+        drop(conn);
+        Connection::open(&input)
+            .unwrap()
+            .execute(
+                "UPDATE runs SET commit_sha=?1",
+                ["x".repeat(MAX_FIELD_BYTES + 1)],
+            )
+            .unwrap();
+        assert!(matches!(
+            validate(&input),
+            Err(SnapshotError::Invalid("text field exceeds 64 KiB"))
+        ));
+    }
+
+    #[test]
+    fn test_merge_orders_runs_chronologically_then_by_identity_in_both_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let early = dir.path().join("early");
+        let late = dir.path().join("late");
+        let forward = dir.path().join("forward");
+        let reverse = dir.path().join("reverse");
+        fixture(&early, "early");
+        fixture(&late, "late");
+        Connection::open(&early).unwrap().execute("UPDATE runs SET ingested_at='2020-01-01T00:00:00.000Z',history_id='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",[]).unwrap();
+        Connection::open(&late).unwrap().execute_batch("UPDATE runs SET ingested_at='2021-01-01T00:00:00.000Z',history_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; INSERT INTO runs(source,ingested_at,history_id) VALUES ('tie','2021-01-01T00:00:00.000Z','00000000000000000000000000000000')").unwrap();
+        Connection::open(&late).unwrap().execute_batch("INSERT INTO tests VALUES (2,'suite','new-case'); INSERT INTO results VALUES (1,2,'failed',4)").unwrap();
+        merge(&early, &late, &forward).unwrap();
+        merge(&late, &early, &reverse).unwrap();
+        let order = |path: &Path| {
+            let conn = Connection::open(path).unwrap();
+            let order = conn
+                .prepare("SELECT source FROM runs ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            order
+        };
+        assert_eq!(order(&forward), vec!["early", "tie", "late"]);
+        assert_eq!(order(&reverse), order(&forward));
+        let analyse = |path: &Path| {
+            crate::select::analyse(
+                &Store::open_read_only(path)
+                    .unwrap()
+                    .unwrap()
+                    .history(&[])
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let forward_selection = analyse(&forward);
+        assert!(forward_selection
+            .tests
+            .iter()
+            .any(|test| test.name.as_raw() == "new-case"));
+        assert_eq!(analyse(&reverse), forward_selection);
     }
 
     #[test]

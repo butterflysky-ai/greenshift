@@ -4,15 +4,17 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
 use tempfile::TempDir;
-
-use crate::tainted::Tainted;
 
 pub mod snapshot;
 
@@ -23,11 +25,88 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Failure to transport or validate history. Callers decide whether to warn.
 #[derive(Debug, thiserror::Error)]
-#[error("history: {0}")]
-pub struct HistoryError(Tainted);
+pub enum HistoryError {
+    #[error("history operation cancelled")]
+    Cancelled,
+    #[error("history configuration: {0}")]
+    Usage(&'static str),
+    #[error("history: {0}")]
+    Invalid(&'static str),
+    #[error("history I/O: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("history text: {0}")]
+    Utf8(#[from] std::str::Utf8Error),
+    #[error(transparent)]
+    Snapshot(#[from] snapshot::SnapshotError),
+    #[error(transparent)]
+    Store(#[from] crate::store::StoreError),
+    #[error("history: git operation failed ({status})")]
+    Git {
+        status: ExitStatus,
+        lease_rejected: bool,
+    },
+}
 
-fn error(message: impl std::fmt::Display) -> HistoryError {
-    HistoryError(Tainted::raw(message.to_string()))
+impl HistoryError {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
+    }
+    /// Configuration mistakes are usage errors, unlike unavailable storage.
+    pub fn is_usage(&self) -> bool {
+        matches!(self, Self::Usage(_))
+    }
+}
+
+impl From<&'static str> for HistoryError {
+    fn from(message: &'static str) -> Self {
+        Self::Invalid(message)
+    }
+}
+
+impl From<tempfile::PersistError> for HistoryError {
+    fn from(error: tempfile::PersistError) -> Self {
+        Self::Io(error.error)
+    }
+}
+
+fn error(cause: impl Into<HistoryError>) -> HistoryError {
+    cause.into()
+}
+
+/// Validate syntax without filesystem or network access. Local plain paths are
+/// passed to Git only after canonicalization by [`Remote::new`].
+pub fn validate_remote_argument(url: &str) -> Result<(), HistoryError> {
+    let invalid = |message| HistoryError::Usage(message);
+    if url.is_empty() || url.starts_with('-') || url.chars().any(char::is_control) {
+        return Err(invalid("invalid history remote"));
+    }
+    let windows_drive = cfg!(windows)
+        && url.as_bytes().get(1) == Some(&b':')
+        && url
+            .as_bytes()
+            .get(2)
+            .is_some_and(|b| matches!(b, b'/' | b'\\'));
+    if url.contains("://")
+        && !["https://", "http://", "file://"]
+            .iter()
+            .any(|prefix| url.starts_with(prefix))
+    {
+        return Err(invalid("unsupported history remote protocol"));
+    }
+    if !url.contains("://") && url.contains(':') && !windows_drive {
+        return Err(invalid("unsupported history remote syntax"));
+    }
+    if let Some((_, authority)) = url.split_once("://") {
+        if authority
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .contains('@')
+        {
+            return Err(invalid("history remote must not embed credentials"));
+        }
+    }
+    Ok(())
 }
 
 /// One isolated git transport, with no repository checkout or inherited hooks.
@@ -36,6 +115,7 @@ pub struct Remote {
     url: String,
     token: Option<SecretString>,
     timeout: Duration,
+    cancellation: Arc<AtomicBool>,
 }
 
 // A git operation owns the entire helper process group, not just its immediate
@@ -67,37 +147,24 @@ impl Remote {
     /// HTTPS, unauthenticated HTTP, and local git remotes are supported. Tokens are optional,
     /// supplied only through GREENSHIFT_HISTORY_TOKEN, never command arguments.
     pub fn new(url: &str) -> Result<Self, HistoryError> {
-        if url.is_empty() || url.starts_with('-') || url.chars().any(char::is_control) {
-            return Err(error("invalid history remote"));
+        Self::new_cancellable(url, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// The caller owns interruption policy. This library never installs signal
+    /// handlers; cancellation drops the owned Git process group at the next poll.
+    pub fn new_cancellable(url: &str, cancellation: Arc<AtomicBool>) -> Result<Self, HistoryError> {
+        if cancellation.load(Ordering::SeqCst) {
+            return Err(HistoryError::Cancelled);
         }
-        if url.contains("://")
-            && !["https://", "http://", "file://"]
-                .iter()
-                .any(|prefix| url.starts_with(prefix))
-        {
-            return Err(error("unsupported history remote protocol"));
-        }
-        if !url.contains("://") && url.contains(':') {
-            return Err(error("unsupported history remote syntax"));
-        }
-        // URL-embedded credentials would reach git diagnostics. Require the
-        // dedicated secret environment variable instead.
-        if let Some((_, authority)) = url.split_once("://") {
-            if authority
-                .split('/')
-                .next()
-                .unwrap_or_default()
-                .contains('@')
-            {
-                return Err(error("history remote must not embed credentials"));
-            }
-        }
+        validate_remote_argument(url)?;
         let token = std::env::var("GREENSHIFT_HISTORY_TOKEN")
             .ok()
             .filter(|s| !s.is_empty())
             .map(SecretString::from);
         if token.is_some() && url.starts_with("http://") {
-            return Err(error("history token authentication requires HTTPS"));
+            return Err(HistoryError::Usage(
+                "history token authentication requires HTTPS",
+            ));
         }
         let url = if !url.contains("://") {
             fs::canonicalize(url)
@@ -112,6 +179,7 @@ impl Remote {
             url,
             token,
             timeout: TIMEOUT,
+            cancellation,
         };
         remote.git(["init", "--bare", "."], None)?;
         Ok(remote)
@@ -122,9 +190,37 @@ impl Remote {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.check_cancelled()?;
+        self.git_program(OsStr::new("git"), args, input)
+    }
+
+    // An explicit process boundary permits fault injection without changing a
+    // process-global PATH or exposing a configurable executable to CI data.
+    fn git_program<I, S>(
+        &self,
+        program: &OsStr,
+        args: I,
+        input: Option<&[u8]>,
+    ) -> Result<Vec<u8>, HistoryError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.check_cancelled()?;
         let stdout = tempfile::tempfile().map_err(error)?;
         let stderr = tempfile::tempfile().map_err(error)?;
-        let mut cmd = Command::new("git");
+        // A file-backed stdin removes the pipe write that could block before
+        // the child supervision timeout began. All input is already bounded.
+        let mut stdin = tempfile::tempfile().map_err(error)?;
+        if let Some(data) = input {
+            if data.len() as u64 > snapshot::MAX_DB_BYTES {
+                return Err(error("git input exceeds history size limit"));
+            }
+            stdin.write_all(data).map_err(error)?;
+            use std::io::{Seek, SeekFrom};
+            stdin.seek(SeekFrom::Start(0)).map_err(error)?;
+        }
+        let mut cmd = Command::new(program);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -142,6 +238,8 @@ impl Remote {
             .env("XDG_CONFIG_HOME", self.scratch.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("SSH_ASKPASS")
+            .env_remove("SSH_ASKPASS_REQUIRE")
             .env("GIT_AUTHOR_NAME", "greenshift")
             .env("GIT_AUTHOR_EMAIL", "greenshift@localhost")
             .env("GIT_COMMITTER_NAME", "greenshift")
@@ -155,7 +253,7 @@ impl Remote {
                 "http.followRedirects=false",
             ])
             .args(args)
-            .stdin(Stdio::piped())
+            .stdin(Stdio::from(stdin))
             .stdout(stdout.try_clone().map_err(error)?)
             .stderr(stderr.try_clone().map_err(error)?);
         if let Some(token) = &self.token {
@@ -176,25 +274,14 @@ impl Remote {
                 ));
             }
         }
+        self.check_cancelled()?;
         let mut process = GitChild {
             child: cmd.spawn().map_err(error)?,
             complete: false,
         };
-        if let Some(data) = input {
-            if let Err(err) = process
-                .child
-                .stdin
-                .take()
-                .ok_or_else(|| error("git stdin missing"))?
-                .write_all(data)
-            {
-                return Err(error(err));
-            }
-        } else {
-            drop(process.child.stdin.take());
-        }
         let started = Instant::now();
         let status = loop {
+            self.check_cancelled()?;
             if let Some(status) = process.child.try_wait().map_err(error)? {
                 break status;
             }
@@ -208,11 +295,6 @@ impl Remote {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        if !status.success() {
-            // Never echo git diagnostics: a remote can reflect credentials.
-            return Err(error(format!("git operation failed ({status})")));
-        }
-        process.complete = true;
         if stdout.metadata().map_err(error)?.len() > snapshot::MAX_DB_BYTES {
             return Err(error("git output exceeds history size limit"));
         }
@@ -221,24 +303,56 @@ impl Remote {
         stdout.seek(SeekFrom::Start(0)).map_err(error)?;
         let mut output = Vec::new();
         stdout.read_to_end(&mut output).map_err(error)?;
+        if !status.success() {
+            // Inspect only a narrow porcelain status. Never retain or display
+            // raw diagnostics, because a remote can reflect credentials.
+            let lease_rejected = std::str::from_utf8(&output).ok().is_some_and(|output| {
+                output.lines().any(|line| {
+                    line.starts_with("!\t")
+                        && (line.ends_with("\t[rejected] (stale info)")
+                            || line.ends_with("\t[remote rejected] (failed to update ref)")
+                            || line.ends_with("\t[remote rejected] (incorrect old value provided)")
+                            || line.ends_with("\t[remote rejected] (reference already exists)"))
+                })
+            });
+            return Err(HistoryError::Git {
+                status,
+                lease_rejected,
+            });
+        }
+        process.complete = true;
         Ok(output)
+    }
+
+    fn check_cancelled(&self) -> Result<(), HistoryError> {
+        if self.cancellation.load(Ordering::SeqCst) {
+            Err(HistoryError::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 
     /// Exact current ref identity, used as the stock cache action's key.
     pub fn head(&self) -> Result<Option<String>, HistoryError> {
         let bytes = self.git(["ls-remote", "--refs", &self.url, HISTORY_REF], None)?;
         let text = std::str::from_utf8(&bytes).map_err(error)?;
-        if text.is_empty() {
-            return Ok(None);
+        let mut found = None;
+        for line in text.lines() {
+            let Some((oid, reference)) = line.split_once('\t') else {
+                continue;
+            };
+            if reference != HISTORY_REF {
+                continue;
+            }
+            if oid.len() == 64 {
+                return Err(error("SHA-256 history remotes are not supported"));
+            }
+            if !valid_oid(oid) || found.is_some() {
+                return Err(error("invalid remote history identity"));
+            }
+            found = Some(oid.to_owned());
         }
-        let (oid, reference) = text
-            .trim_end()
-            .split_once('\t')
-            .ok_or_else(|| error("invalid remote ref response"))?;
-        if reference != HISTORY_REF || !valid_oid(oid) {
-            return Err(error("invalid remote history identity"));
-        }
-        Ok(Some(oid.to_owned()))
+        Ok(found)
     }
 
     fn fetch(&self, oid: &str) -> Result<(), HistoryError> {
@@ -307,12 +421,30 @@ impl Remote {
             .unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(error)?;
         let stage = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
-        let hit = cache.is_some_and(|dir| self.cached(dir, &oid, stage.path()).is_ok());
+        let hit = cache.is_some_and(|dir| match self.cached(dir, &oid, stage.path()) {
+            Ok(()) => true,
+            Err(err) => {
+                if dir.join(&oid).symlink_metadata().is_ok() {
+                    eprintln!("greenshift: ⚠ cached history rejected: {err}");
+                }
+                false
+            }
+        });
         if !hit {
             self.read(&oid, stage.path())?;
         }
         check_restore_destination(db)?;
-        stage.persist(db).map_err(error)?;
+        if crate::store::Store::open_read_only(db)
+            .map_err(error)?
+            .is_some()
+        {
+            let merged = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
+            snapshot::merge(db, stage.path(), merged.path()).map_err(error)?;
+            check_restore_destination(db)?;
+            merged.persist(db).map_err(error)?;
+        } else {
+            stage.persist(db).map_err(error)?;
+        }
         Ok(true)
     }
 
@@ -324,7 +456,8 @@ impl Remote {
         let current = self.scratch.path().join("current.sqlite");
         let candidate = self.scratch.path().join("candidate.sqlite");
         let mut old = self.head()?;
-        for attempt in 0..2 {
+        let mut retried = false;
+        loop {
             if let Some(oid) = &old {
                 self.read(oid, &current)?;
                 snapshot::merge(&current, artifact, &candidate).map_err(error)?;
@@ -349,27 +482,46 @@ impl Remote {
                 old.as_deref().unwrap_or("")
             );
             let refspec = format!("{oid}:{HISTORY_REF}");
-            match self.git(["push", &lease, &self.url, &refspec], None) {
+            match self.git(["push", "--porcelain", &lease, &self.url, &refspec], None) {
                 Ok(_) => {
                     if let Some(dir) = cache {
-                        let path = dir.join(&oid);
-                        fs::create_dir_all(&path).map_err(error)?;
-                        fs::write(path.join(BLOB), compressed).map_err(error)?;
-                        let commit = self.git(["cat-file", "commit", &oid], None)?;
-                        fs::write(path.join("commit"), commit).map_err(error)?;
+                        let cached = (|| -> Result<(), HistoryError> {
+                            let path = dir.join(&oid);
+                            fs::create_dir_all(&path).map_err(error)?;
+                            fs::write(path.join(BLOB), compressed).map_err(error)?;
+                            let commit = self.git(["cat-file", "commit", &oid], None)?;
+                            fs::write(path.join("commit"), commit).map_err(error)?;
+                            Ok(())
+                        })();
+                        if let Err(err) = cached {
+                            eprintln!(
+                                "greenshift: ⚠ history published, but cache copy failed: {err}"
+                            );
+                        }
                     }
                     return Ok(oid);
                 }
-                Err(_) if attempt == 0 => old = self.head()?,
+                Err(
+                    err @ HistoryError::Git {
+                        lease_rejected: true,
+                        ..
+                    },
+                ) if !retried => {
+                    let head = self.head()?;
+                    if head == old {
+                        return Err(err);
+                    }
+                    retried = true;
+                    old = head;
+                }
                 Err(err) => return Err(err),
             }
         }
-        Err(error("history update rejected"))
     }
 }
 
 fn valid_oid(oid: &str) -> bool {
-    matches!(oid.len(), 40 | 64) && oid.bytes().all(|b| b.is_ascii_hexdigit())
+    oid.len() == 40 && oid.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn bounded_read(path: &Path, cap: u64) -> Result<Vec<u8>, HistoryError> {
@@ -398,19 +550,7 @@ fn bounded_read(path: &Path, cap: u64) -> Result<Vec<u8>, HistoryError> {
 }
 
 fn check_restore_destination(path: &Path) -> Result<(), HistoryError> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let mut sidecar = path.as_os_str().to_owned();
-        sidecar.push(suffix);
-        match fs::symlink_metadata(Path::new(&sidecar)) {
-            Ok(_) => {
-                return Err(error(
-                    "history destination has SQLite sidecars; close other connections first",
-                ))
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
-            Err(err) => return Err(error(err)),
-        }
-    }
+    snapshot::check_sidecars(path).map_err(error)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => {
             crate::store::Store::open_read_only(path).map_err(error)?;
@@ -432,11 +572,15 @@ fn compress(path: &Path) -> Result<Vec<u8>, HistoryError> {
 }
 
 fn decompress(bytes: &[u8], path: &Path) -> Result<(), HistoryError> {
+    decompress_bounded(bytes, path, snapshot::MAX_DB_BYTES)
+}
+
+fn decompress_bounded(bytes: &[u8], path: &Path, limit: u64) -> Result<(), HistoryError> {
     let decoder = flate2::read::GzDecoder::new(bytes);
-    let mut bounded = decoder.take(snapshot::MAX_DB_BYTES + 1);
+    let mut bounded = decoder.take(limit + 1);
     let mut output = File::create(path).map_err(error)?;
     let len = std::io::copy(&mut bounded, &mut output).map_err(error)?;
-    if len > snapshot::MAX_DB_BYTES {
+    if len > limit {
         return Err(error("decompressed snapshot exceeds size limit"));
     }
     output.sync_all().map_err(error)
@@ -445,6 +589,250 @@ fn decompress(bytes: &[u8], path: &Path) -> Result<(), HistoryError> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    fn fixture(path: &Path, source: &str) {
+        crate::store::Store::open(path)
+            .unwrap()
+            .record_run(
+                &crate::store::NewRun {
+                    commit: None,
+                    source,
+                    files: &[],
+                    partial: false,
+                    branch: None,
+                    tag: None,
+                },
+                std::iter::empty(),
+            )
+            .unwrap();
+    }
+
+    fn remote_repository(path: &Path) -> Remote {
+        assert!(Command::new("git")
+            .args(["init", "--bare"])
+            .arg(path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        Remote::new(path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn test_decompress_exact_bound_accepts_and_over_bound_or_corrupt_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        fs::write(&input, vec![b'x'; 1000]).unwrap();
+        let gzip = compress(&input).unwrap();
+        decompress_bounded(&gzip, &output, 1000).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), vec![b'x'; 1000]);
+        assert!(matches!(
+            decompress_bounded(&gzip, &output, 999),
+            Err(HistoryError::Invalid(
+                "decompressed snapshot exceeds size limit"
+            ))
+        ));
+        assert!(matches!(
+            decompress_bounded(b"not a gzip", &output, 1000),
+            Err(HistoryError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn test_cached_forged_commit_over_matching_substitute_tree_rejected_by_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("canonical");
+        let substitute = dir.path().join("substitute");
+        fixture(&canonical, "canonical");
+        fixture(&substitute, "substitute");
+        let remote = remote_repository(&dir.path().join("remote.git"));
+        let other = remote_repository(&dir.path().join("other.git"));
+        let cache = dir.path().join("cache");
+        let oid = remote.publish(&canonical, Some(&cache)).unwrap();
+        let other_cache = dir.path().join("other-cache");
+        let other_oid = other.publish(&substitute, Some(&other_cache)).unwrap();
+        for name in ["commit", BLOB] {
+            fs::copy(
+                other_cache.join(&other_oid).join(name),
+                cache.join(&oid).join(name),
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            remote.cached(&cache, &oid, &dir.path().join("stage")),
+            Err(HistoryError::Invalid("cached commit identity mismatch"))
+        ));
+        let output = dir.path().join("read");
+        remote.restore(&output, Some(&cache)).unwrap();
+        let source: String = rusqlite::Connection::open(output)
+            .unwrap()
+            .query_row("SELECT source FROM runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source, "canonical");
+    }
+
+    #[test]
+    fn test_read_wrong_name_mode_and_extra_tree_entries_rejected_as_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("db");
+        fixture(&database, "canonical");
+        let remote = remote_repository(&dir.path().join("remote.git"));
+        let gzip = compress(&database).unwrap();
+        let blob = remote
+            .git(["hash-object", "-w", "--stdin"], Some(&gzip))
+            .unwrap();
+        let blob = std::str::from_utf8(&blob).unwrap().trim();
+        for description in [
+            format!("100755 blob {blob}\t{BLOB}\n"),
+            format!("100644 blob {blob}\twrong-name\n"),
+            format!("100644 blob {blob}\t{BLOB}\n100644 blob {blob}\tsecond\n"),
+        ] {
+            let tree = remote
+                .git(["mktree"], Some(description.as_bytes()))
+                .unwrap();
+            let tree = std::str::from_utf8(&tree).unwrap().trim();
+            let commit = remote
+                .git(["commit-tree", tree], Some(b"malformed history\n"))
+                .unwrap();
+            let commit = std::str::from_utf8(&commit).unwrap().trim();
+            remote
+                .git(
+                    [
+                        "push",
+                        "--force",
+                        &remote.url,
+                        &format!("{commit}:{HISTORY_REF}"),
+                    ],
+                    None,
+                )
+                .unwrap();
+            assert!(matches!(
+                remote.restore(&dir.path().join("read"), None),
+                Err(HistoryError::Invalid(
+                    "history commit must contain exactly one regular snapshot"
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_git_stalled_stdin_reader_is_still_bounded_by_operation_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut remote = remote_repository(&dir.path().join("remote.git"));
+        remote.timeout = Duration::from_millis(150);
+        let script = dir.path().join("stalled-reader");
+        fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        let started = Instant::now();
+        let error = remote
+            .git_program(
+                script.as_os_str(),
+                ["hash-object", "--stdin"],
+                Some(&vec![0; 1024 * 1024]),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            HistoryError::Invalid("git operation timed out")
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_cancellation_before_constructor_or_during_child_is_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+        let cancellation = Arc::new(AtomicBool::new(true));
+        assert!(matches!(
+            Remote::new_cancellable("/does/not/exist", cancellation.clone()),
+            Err(HistoryError::Cancelled)
+        ));
+        cancellation.store(false, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("remote.git");
+        assert!(Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let remote = Remote::new_cancellable(repo.to_str().unwrap(), cancellation.clone()).unwrap();
+        let script = dir.path().join("waiting");
+        fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                cancellation.store(true, Ordering::SeqCst);
+            });
+            let started = Instant::now();
+            let result = remote.git_program(
+                script.as_os_str(),
+                ["hash-object", "--stdin"],
+                Some(&vec![0; 1024 * 1024]),
+            );
+            assert!(result.unwrap_err().is_cancelled());
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+        assert!(remote.head().unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn test_restore_legacy_v3_ref_then_publish_upgrades_without_losing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("legacy");
+        fixture(&database, "legacy");
+        rusqlite::Connection::open(&database).unwrap().execute_batch("DROP INDEX runs_by_history_id; ALTER TABLE runs DROP COLUMN history_id; PRAGMA user_version=3;").unwrap();
+        let remote = remote_repository(&dir.path().join("remote.git"));
+        let blob = remote
+            .git(
+                ["hash-object", "-w", "--stdin"],
+                Some(&compress(&database).unwrap()),
+            )
+            .unwrap();
+        let blob = std::str::from_utf8(&blob).unwrap().trim();
+        let tree = remote
+            .git(
+                ["mktree"],
+                Some(format!("100644 blob {blob}\t{BLOB}\n").as_bytes()),
+            )
+            .unwrap();
+        let commit = remote
+            .git(
+                ["commit-tree", std::str::from_utf8(&tree).unwrap().trim()],
+                Some(b"legacy snapshot\n"),
+            )
+            .unwrap();
+        let oid = std::str::from_utf8(&commit).unwrap().trim();
+        remote
+            .git(["push", &remote.url, &format!("{oid}:{HISTORY_REF}")], None)
+            .unwrap();
+        let output = dir.path().join("read");
+        remote.restore(&output, None).unwrap();
+        let conn = rusqlite::Connection::open(&output).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(conn);
+        remote.publish(&output, None).unwrap();
+        let fresh = dir.path().join("fresh");
+        remote.restore(&fresh, None).unwrap();
+        let conn = rusqlite::Connection::open(fresh).unwrap();
+        assert_eq!(
+            conn.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            crate::store::SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
 
     #[test]
     fn test_git_timeout_terminates_transport_helper_group() {

@@ -393,7 +393,18 @@ Opt-in git-ref snapshots, stock cache integration and a separate trusted publish
 are described in [durable history](docs/design/durable-history.md), including the
 GitHub workflow reference and the unresolved stock Forgejo token-isolation gate.
 `greenshift history --help` lists the storage commands. Existing local runs keep
-their current behavior unless `--history-remote` is supplied.
+their current behavior unless `--history-remote` is supplied. Restore combines
+canonical and local history rather than discarding unpublished local runs.
+
+**Publication audience:** snapshots include the exact JUnit file paths stored in
+`run_files`, which may contain workstation usernames in absolute paths. Everyone
+with access to the destination repository can read that metadata. Use relative
+JUnit paths at ingest when absolute paths should not be published.
+
+History storage outages warn without failing tests; malformed history arguments
+or publish-policy refusals exit 2. A second CAS rejection does not automatically
+recover that run's new results; durable delivery remains separate work. Ctrl-C
+during history transport terminates its Git helpers and returns 130.
 
 ## Building
 

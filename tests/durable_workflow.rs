@@ -55,3 +55,57 @@ fn missing_artifact_or_cache_never_fails_workflow_or_attempts_publishing_missing
         .contains("steps.artifact.outcome == 'failure'")
         && s["run"].as_str().unwrap_or("").contains("::warning::")));
 }
+
+#[test]
+fn checkout_token_and_cache_wiring_preserve_the_job_trust_boundary() {
+    let workflow = workflow();
+    let tests = workflow["jobs"]["test"]["steps"].as_array().unwrap();
+    let checkout = tests
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("actions/checkout@")
+        })
+        .unwrap();
+    assert_eq!(checkout["with"]["persist-credentials"], false);
+    assert!(workflow["env"]["GREENSHIFT_HISTORY_TOKEN"].is_null());
+    for name in ["test", "publish"] {
+        let job = &workflow["jobs"][name];
+        assert!(job["env"]["GREENSHIFT_HISTORY_TOKEN"].is_null());
+        for step in job["steps"].as_array().unwrap() {
+            if !step["env"]["GREENSHIFT_HISTORY_TOKEN"].is_null() {
+                assert!(step["run"].as_str().unwrap().contains("greenshift"));
+                assert_eq!(
+                    step["env"]["GREENSHIFT_HISTORY_TOKEN"],
+                    "${{ github.token }}"
+                );
+            }
+        }
+    }
+    let publisher = workflow["jobs"]["publish"]["steps"].as_array().unwrap();
+    let save = publisher.iter().find(|step| step["id"] == "save").unwrap();
+    assert_eq!(
+        save["env"]["GREENSHIFT_HISTORY_TOKEN"],
+        "${{ github.token }}"
+    );
+    for name in ["Resolve canonical cache key", "Run tests and export data"] {
+        let step = tests.iter().find(|step| step["name"] == name).unwrap();
+        assert_eq!(
+            step["env"]["GREENSHIFT_HISTORY_TOKEN"],
+            "${{ github.token }}"
+        );
+    }
+    assert!(save["run"]
+        .as_str()
+        .unwrap()
+        .contains("--default-branch \"$DEFAULT_BRANCH\""));
+    let cache = tests.iter().find(|step| step["id"] == "cache").unwrap();
+    assert_eq!(cache["continue-on-error"], true);
+    assert!(tests.iter().any(|step| step["if"]
+        .as_str()
+        .unwrap_or("")
+        .contains("steps.cache.outcome == 'failure'")
+        && step["run"].as_str().unwrap_or("").contains("::warning::")));
+}

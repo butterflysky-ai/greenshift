@@ -113,14 +113,51 @@ const MIGRATIONS: &[&str] = &[
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
+/// Construct only trusted schema SQL, for exact-version snapshot admission.
+/// This connection contains no caller data and never opens an input database.
+pub(crate) fn canonical_schema(version: i64) -> Result<Connection, StoreError> {
+    let path = Tainted::raw(":memory:");
+    if !(1..=SCHEMA_VERSION).contains(&version) {
+        return Err(StoreError::BadVersion {
+            path,
+            found: version,
+        });
+    }
+    let conn = Connection::open_in_memory().map_err(sqlite_err(&path))?;
+    for sql in MIGRATIONS.iter().take(version as usize) {
+        conn.execute_batch(sql).map_err(sqlite_err(&path))?;
+    }
+    conn.pragma_update(None, "application_id", APPLICATION_ID)
+        .map_err(sqlite_err(&path))?;
+    conn.pragma_update(None, "user_version", version)
+        .map_err(sqlite_err(&path))?;
+    Ok(conn)
+}
+
 // Two separately migrated copies of the same legacy DB must retain the same
 // run identities. Include local id to preserve identical repeated legacy runs;
 // content distinguishes unrelated runs whose local ids happen to coincide.
 fn identify_legacy_runs(conn: &Connection) -> rusqlite::Result<()> {
+    for (id, identity) in legacy_run_identities(conn)? {
+        conn.execute(
+            "UPDATE runs SET history_id=?1 WHERE id=?2",
+            params![identity, id],
+        )?;
+    }
+    Ok(())
+}
+
+// The v1 hash encoding, including SQL bytes and original local ids, is a durable
+// format. Snapshot callers first admit the exact known schema and bounded data.
+pub(crate) fn legacy_run_identities(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
     use sha2::{Digest, Sha256};
-    let mut runs = conn.prepare(
-        "SELECT id,commit_sha,source,ingested_at,partial,branch,tag FROM runs ORDER BY id",
-    )?;
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let run_sql = match version {
+        1 => "SELECT id,commit_sha,source,ingested_at,0,NULL,NULL FROM runs ORDER BY id",
+        2 => "SELECT id,commit_sha,source,ingested_at,partial,NULL,NULL FROM runs ORDER BY id",
+        _ => "SELECT id,commit_sha,source,ingested_at,partial,branch,tag FROM runs ORDER BY id",
+    };
+    let mut runs = conn.prepare(run_sql)?;
     let mut rows = runs.query([])?;
     let mut identities = Vec::new();
     while let Some(row) = rows.next()? {
@@ -141,13 +178,7 @@ fn identify_legacy_runs(conn: &Connection) -> rusqlite::Result<()> {
         }
         identities.push((id, format!("{:x}", digest.finalize())[..32].to_owned()));
     }
-    for (id, identity) in identities {
-        conn.execute(
-            "UPDATE runs SET history_id=?1 WHERE id=?2",
-            params![identity, id],
-        )?;
-    }
-    Ok(())
+    Ok(identities)
 }
 
 fn hash_row(
@@ -220,6 +251,8 @@ pub enum StoreError {
     },
     #[error("history store {path} has schema version {found}, which no greenshift writes")]
     BadVersion { path: Tainted, found: i64 },
+    #[error("history store {path} has an invalid durable run identity")]
+    InvalidHistoryId { path: Tainted },
     #[error(
         "\"{path}\" is SQLite's special name for a private in-memory database, not a file; pass a real path"
     )]
@@ -519,6 +552,13 @@ impl Store {
             tx.pragma_update(None, "user_version", from as i64 + 1)
                 .map_err(&sqlite)?;
         }
+        let invalid_ids: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE history_id IS NULL OR typeof(history_id) != 'text' OR length(history_id) != 32 OR history_id GLOB '*[^0-9a-f]*')",
+            [], |row| row.get(0),
+        ).map_err(&sqlite)?;
+        if invalid_ids {
+            return Err(StoreError::InvalidHistoryId { path: path.clone() });
+        }
         tx.commit().map_err(&sqlite)
     }
 
@@ -707,7 +747,7 @@ fn refuse_memory_path(path: &Path) -> Result<(), StoreError> {
 /// database. Anchoring such a path at `./` makes SQLite read it as the
 /// plain file name it is. Other paths are passed as given, so SQLite's
 /// own error text names the path the user typed.
-fn as_plain_file(path: &Path) -> std::borrow::Cow<'_, Path> {
+pub(crate) fn as_plain_file(path: &Path) -> std::borrow::Cow<'_, Path> {
     if path.as_os_str().as_encoded_bytes().starts_with(b"file:") {
         std::borrow::Cow::Owned(Path::new(".").join(path))
     } else {
@@ -716,7 +756,7 @@ fn as_plain_file(path: &Path) -> std::borrow::Cow<'_, Path> {
 }
 
 /// The outcome stored as `text`, if it is one.
-fn stored_outcome(text: &str) -> Option<Outcome> {
+pub(crate) fn stored_outcome(text: &str) -> Option<Outcome> {
     [
         Outcome::Passed,
         Outcome::Failed,

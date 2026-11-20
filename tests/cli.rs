@@ -21,6 +21,42 @@ fn version_prints_crate_version() {
 }
 
 #[test]
+fn history_commands_reject_flags_they_do_not_apply() {
+    for args in [
+        vec![
+            "history",
+            "cache-key",
+            "--remote",
+            ".",
+            "--db",
+            "unused.sqlite",
+        ],
+        vec![
+            "history",
+            "cache-key",
+            "--remote",
+            ".",
+            "--cache-dir",
+            "unused",
+        ],
+        vec![
+            "history",
+            "restore",
+            "--remote",
+            ".",
+            "--default-branch",
+            "main",
+        ],
+    ] {
+        greenshift()
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("unexpected argument"));
+    }
+}
+
+#[test]
 fn help_describes_the_tool() {
     greenshift()
         .arg("--help")

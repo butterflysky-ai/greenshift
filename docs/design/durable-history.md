@@ -18,12 +18,15 @@ greenshift run nextest --history-remote URL --history-artifact PATH
                       [--history-cache-dir DIRECTORY] [other run options]
 ```
 
-`run` is opt-in: existing local runs are unchanged. Restore happens before test
+`run` is opt-in: existing local runs are unchanged. Restore merges fetched history
+with an existing local store, preserving unpublished local runs. It happens before test
 listing; unavailable canonical history runs all tests as rich. Recording remains
 best-effort and the artifact is written after recording even when tests fail.
 Storage errors emit `⚠` and preserve the test result. Explicit history commands
-also warn and return zero on storage failure; successful publish prints the new
-commit identity, while a failed publish prints no identity.
+also warn and return zero on storage failure. Invalid arguments/configuration or
+publication-policy refusals exit 2; cancellation exits 130. Successful publish
+prints the new commit identity even if its optional cache copy cannot be saved;
+a failed publish prints no identity.
 
 On Unix, authentication is supplied through `GREENSHIFT_HISTORY_TOKEN` for HTTPS
 only; authenticated HTTP and redirects are refused. Unauthenticated HTTP and
@@ -33,6 +36,23 @@ ingestion/selection. URL-embedded credentials are refused. Git runs in its own
 temporary bare repository, with inherited Git configuration removed, hooks
 disabled, no checkout, and bounded operation duration/output. Tokens do not enter
 command arguments or diagnostics.
+
+The wire protocol currently supports SHA-1 Git repositories; a SHA-256 remote
+history identity is refused explicitly rather than treated as a usable snapshot.
+The binary owns Ctrl-C handling only for active history transport: cancellation
+terminates its isolated Git process group and returns 130. Outside transport,
+Ctrl-C keeps normal termination behavior. Library transports install no signal
+handler. Test-runner listing/build/run children do not inherit
+`GREENSHIFT_HISTORY_TOKEN`.
+
+## Published data and audience
+
+Snapshots preserve complete recorded history, including `run_files.path` exactly
+as ingested. Absolute JUnit paths can contain workstation usernames or other
+host-specific information; anyone with repository access can read that metadata
+from the durable ref. Audit the destination audience before publishing. Ingest
+relative JUnit paths when absolute paths should not be shared. The snapshot does
+not redact paths or silently change durable run identities.
 
 ## Stock cache contract
 
@@ -82,12 +102,20 @@ single data artifact. Publication is only for pushes to the configured default
 branch, never pull requests (including `pull_request_target`). The CLI repeats
 that policy for CI invocations and requires `--default-branch` there.
 
-The parser accepts only the exact current schema/application id, disallows extra
+The parser accepts only known supported schema versions/application id, disallows extra
 views/triggers/tables/indexes, verifies integrity and foreign keys, checks types,
 IDs/outcomes/durations/ref exclusivity, and caps bytes/rows/field lengths and
 expanded in-memory data. Input connections are read-only and defensive with
 untrusted schemas disabled. Export constructs a new canonical database using
-bound values; no input SQL is executed as SQL. Output replacement is atomic.
+bound values; no input SQL is executed as SQL. Known older schemas are validated
+against their own exact trusted migration-prefix schema before data is projected
+into a fresh current database. Newer unknown versions are refused without
+altering the source or canonical ref. Output replacement is atomic.
+
+Commit strings from existing history remain bounded historical data, including
+arbitrary strings written before commit validation existed. New ingest input
+still uses `CommitId` validation. Historical commit strings are copied using
+bound SQL values, never used as Git command arguments or shell input.
 
 SQLite migration 4 gives each run a durable 128-bit identity. New runs use SQLite
 random bytes. Legacy identities hash typed run metadata, original local id,
@@ -95,13 +123,20 @@ ordered files and results, so separately migrated copies of one legacy DB agree.
 Local id preserves repeated identical legacy invocations. Already-diverged legacy
 stores cannot recover whether identical historical records were independently
 recorded or shared; that information was never recorded. Same identity with
-conflicting contents is rejected rather than silently replacing history.
+conflicting contents is rejected rather than silently replacing history. Merged
+runs are numbered in `(ingested_at, history_id)` order: this is deterministic
+recorded-time ordering, not proof of actual execution chronology. Timestamp ties
+do not merge independent run identities.
 
 Each publish fetches and validates current history, merges by durable identity,
 and uses an exact `--force-with-lease` compare-and-swap. Rejection refetches,
 remerges and retries once. A second rejection warns. Workflow concurrency reduces
 collisions but is not the correctness lock, and pending workflow cancellation is
-not a promise that every pushed commit receives a run.
+not a promise that every pushed commit receives a run. Newly produced results
+that lose both attempts are best-effort: no later publisher automatically reads
+the failed run's artifact. It can be replayed manually only while retained (one
+day in the reference workflow). Durable pending delivery/replay is separate work;
+already-published canonical history remains protected by CAS.
 
 ## Forgejo capability gate
 

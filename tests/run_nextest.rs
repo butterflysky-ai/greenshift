@@ -21,6 +21,11 @@ fn harness(names: &[&str]) -> String {
         r#"const NAMES: &[&str] = &{names:?};
 
 fn main() {{
+    if std::env::var_os("DENY_HISTORY_TOKEN").is_some()
+        && std::env::var_os("GREENSHIFT_HISTORY_TOKEN").is_some() {{
+        eprintln!("test child inherited history credential");
+        std::process::exit(42);
+    }}
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--list") {{
         if !args.iter().any(|a| a == "--ignored") {{
@@ -200,6 +205,25 @@ fn every_test(failed: &[&str]) -> Vec<(String, String, String)> {
 
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn history_credential_is_absent_from_listing_and_running_test_children() {
+    let project = Project::new();
+    let out = project.run_in_env(
+        &[],
+        &[],
+        &[
+            (
+                "GREENSHIFT_HISTORY_TOKEN",
+                "invented-test-history-credential",
+            ),
+            ("DENY_HISTORY_TOKEN", "1"),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(project.runs()[0].results.len(), 5);
+    assert!(!stderr(&out).contains("invented-test-history-credential"));
 }
 
 #[test]

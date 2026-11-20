@@ -71,11 +71,21 @@ pub trait Backend {
 
 /// Run the whole cycle with `backend`; see the module docs.
 pub fn run(backend: &dyn Backend, options: &RunOptions) -> anyhow::Result<ExitCode> {
+    run_with_control(backend, options, &cli::TransportControl::default())
+}
+
+pub(crate) fn run_with_control(
+    backend: &dyn Backend,
+    options: &RunOptions,
+    control: &cli::TransportControl,
+) -> anyhow::Result<ExitCode> {
     let mut history_unavailable = false;
     if let Some(url) = &options.history_remote {
-        let restored = crate::history::Remote::new(url).and_then(|remote| {
-            remote.restore(&options.select.db, options.history_cache_dir.as_deref())
-        });
+        let _phase = control.phase();
+        let restored =
+            crate::history::Remote::new_cancellable(url, control.token()).and_then(|remote| {
+                remote.restore(&options.select.db, options.history_cache_dir.as_deref())
+            });
         match restored {
             Ok(true) => {}
             Ok(false) => {
@@ -83,6 +93,13 @@ pub fn run(backend: &dyn Backend, options: &RunOptions) -> anyhow::Result<ExitCo
                 eprintln!("greenshift: ⚠ no durable history; running without it");
             }
             Err(err) => {
+                if err.is_cancelled() {
+                    return Ok(ExitCode::from(130));
+                }
+                if err.is_usage() {
+                    eprintln!("greenshift: usage error: {err}");
+                    return Ok(ExitCode::from(2));
+                }
                 history_unavailable = true;
                 eprintln!("greenshift: ⚠ {err}");
             }
@@ -153,6 +170,7 @@ fn execute(invocation: &Invocation) -> u8 {
             std::fs::write(path, content).with_context(|| Tainted::from(path.as_path()))?;
         }
         std::process::Command::new(&invocation.program)
+            .env_remove("GREENSHIFT_HISTORY_TOKEN")
             .args(&invocation.args)
             .status()
             .with_context(|| {

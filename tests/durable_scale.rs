@@ -51,7 +51,10 @@ fn independently_migrated_legacy_copies_keep_the_same_durable_run_identity() {
     {
         let conn = Connection::open(&legacy).unwrap();
         conn.execute_batch(
-            "DROP INDEX runs_by_history_id;
+            "INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id)
+                 SELECT commit_sha,source,ingested_at,partial,branch,tag,lower(hex(randomblob(16))) FROM runs;
+             INSERT INTO results SELECT 2,test_id,outcome,duration_ms FROM results;
+             DROP INDEX runs_by_history_id;
              ALTER TABLE runs DROP COLUMN history_id;
              PRAGMA user_version=3;",
         )
@@ -64,26 +67,30 @@ fn independently_migrated_legacy_copies_keep_the_same_durable_run_identity() {
     let identity = |path: &Path| {
         Connection::open(path)
             .unwrap()
-            .query_row("SELECT history_id FROM runs", [], |row| {
-                row.get::<_, String>(0)
-            })
+            .prepare("SELECT history_id FROM runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap()
     };
     assert_eq!(identity(&first), identity(&second));
-    assert_eq!(identity(&first).len(), 32);
+    assert_eq!(identity(&first).len(), 2);
+    assert_ne!(identity(&first)[0], identity(&first)[1]);
+    assert!(identity(&first).iter().all(|id| id.len() == 32));
     snapshot::merge(&first, &second, &merged).unwrap();
     let conn = Connection::open(&merged).unwrap();
     assert_eq!(
         conn.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     assert_eq!(
         conn.query_row("SELECT count(*) FROM results", [], |row| {
             row.get::<_, i64>(0)
         })
         .unwrap(),
-        7
+        14
     );
 }
 

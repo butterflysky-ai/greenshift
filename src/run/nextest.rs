@@ -324,6 +324,7 @@ impl Backend for Nextest {
         std::fs::write(&config, self.tool_config(&dir.join("list.xml"))?)
             .context("could not write nextest's tool config")?;
         let out = std::process::Command::new(CARGO)
+            .env_remove("GREENSHIFT_HISTORY_TOKEN")
             .args(self.list_command(&config)?)
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())

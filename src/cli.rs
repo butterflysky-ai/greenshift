@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::Context;
 use clap::builder::{NonEmptyStringValueParser, StyledStr};
@@ -14,6 +16,44 @@ use crate::select::{self, Class, Empirical, Estimator, Line, Smoothed, Threshold
 use crate::store::{self, CommitId, NewRun, Store};
 use crate::tainted::Tainted;
 use crate::{junit, nextest, plan, run};
+
+/// Per-invocation transport cancellation. The binary owns signal policy; library
+/// callers can cancel operations without changing process-wide signal handlers.
+#[derive(Clone, Default)]
+pub struct TransportControl {
+    cancelled: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
+}
+
+impl TransportControl {
+    /// Interrupt an active transport. False leaves non-transport signal handling
+    /// to the binary, so a backend child cannot make Ctrl-C disappear.
+    pub fn interrupt(&self) -> bool {
+        if self.active.load(Ordering::SeqCst) {
+            self.cancelled.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
+    pub(crate) fn phase(&self) -> TransportPhase<'_> {
+        self.active.store(true, Ordering::SeqCst);
+        TransportPhase(self)
+    }
+}
+
+pub(crate) struct TransportPhase<'a>(&'a TransportControl);
+
+impl Drop for TransportPhase<'_> {
+    fn drop(&mut self) {
+        self.0.active.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Pick which tests to run from what your tests have done before.
 #[derive(Debug, Parser)]
@@ -50,23 +90,35 @@ pub struct HistoryArgs {
 #[derive(Debug, Subcommand)]
 pub enum HistoryCommand {
     /// Restore canonical history (a cache miss is harmless).
-    Restore(HistoryOptions),
+    Restore(HistoryDataOptions),
     /// Validate and publish a snapshot; run only in a fresh trusted job.
-    Publish(HistoryOptions),
+    Publish(HistoryPublishOptions),
     /// Print the canonical ref identity for stock actions/cache.
-    CacheKey(HistoryOptions),
+    CacheKey(HistoryRemoteOptions),
 }
 
 #[derive(Debug, Args)]
-pub struct HistoryOptions {
+pub struct HistoryRemoteOptions {
     /// Canonical repository URL. Credentials belong in GREENSHIFT_HISTORY_TOKEN.
     #[arg(long)]
     pub remote: String,
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryDataOptions {
+    #[command(flatten)]
+    pub location: HistoryRemoteOptions,
     #[arg(long, default_value = store::DEFAULT_PATH)]
     pub db: PathBuf,
     /// Optional stock-action cache directory (not a cache service endpoint).
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryPublishOptions {
+    #[command(flatten)]
+    pub data: HistoryDataOptions,
     /// Required for CI publishing: the forge's configured default branch.
     #[arg(long)]
     pub default_branch: Option<String>,
@@ -364,6 +416,11 @@ fn escape_tip(tip: &StyledStr, quoted: &[(String, String)]) -> Option<StyledStr>
 
 /// Parse `std::env::args_os` and run the requested command.
 pub fn run() -> anyhow::Result<ExitCode> {
+    run_with_control(&TransportControl::default())
+}
+
+/// CLI entry for a binary that supplies its own transport cancellation policy.
+pub fn run_with_control(control: &TransportControl) -> anyhow::Result<ExitCode> {
     let cli = parse(std::env::args_os()).unwrap_or_else(|err| err.exit());
     match cli.command {
         Command::Ingest(args) => ingest(&args).map(|()| ExitCode::SUCCESS),
@@ -371,49 +428,75 @@ pub fn run() -> anyhow::Result<ExitCode> {
         Command::NextestFilter(args) => nextest_filter(&args),
         Command::Plan(args) => plan(&args),
         Command::Run(args) => match args.backend {
-            Backend::Nextest(args) => run_nextest(&args),
+            Backend::Nextest(args) => run_nextest_with_control(&args, control),
         },
-        Command::History(args) => history(&args),
+        Command::History(args) => history(&args, control),
     }
 }
 
-fn history(args: &HistoryArgs) -> anyhow::Result<ExitCode> {
-    let options = match &args.operation {
-        HistoryCommand::Restore(options)
-        | HistoryCommand::Publish(options)
-        | HistoryCommand::CacheKey(options) => options,
+fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<ExitCode> {
+    let location = match &args.operation {
+        HistoryCommand::Restore(options) => &options.location,
+        HistoryCommand::Publish(options) => &options.data.location,
+        HistoryCommand::CacheKey(options) => options,
+    };
+    if let Err(error) = crate::history::validate_remote_argument(&location.remote) {
+        eprintln!("greenshift: usage error: {error}");
+        return Ok(ExitCode::from(2));
+    }
+    // Policy mistakes are configuration errors, not unavailable storage. Check
+    // them before constructing a transport or touching its remote.
+    if let HistoryCommand::Publish(options) = &args.operation {
+        if std::env::var("GITHUB_EVENT_NAME")
+            .is_ok_and(|event| event == "pull_request" || event == "pull_request_target")
+        {
+            eprintln!("greenshift: usage error: publishing history from pull requests is refused");
+            return Ok(ExitCode::from(2));
+        }
+        if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+            let Some(branch) = options
+                .default_branch
+                .as_deref()
+                .filter(|branch| !branch.is_empty())
+            else {
+                eprintln!("greenshift: usage error: CI publishing requires --default-branch");
+                return Ok(ExitCode::from(2));
+            };
+            if std::env::var("GITHUB_EVENT_NAME").ok().as_deref() != Some("push")
+                || std::env::var("GITHUB_REF").ok().as_deref()
+                    != Some(&format!("refs/heads/{branch}"))
+            {
+                eprintln!(
+                    "greenshift: usage error: only default-branch pushes may publish history"
+                );
+                return Ok(ExitCode::from(2));
+            }
+        }
+    }
+    let _phase = control.phase();
+    let remote = match crate::history::Remote::new_cancellable(&location.remote, control.token()) {
+        Ok(remote) => remote,
+        Err(error) if error.is_cancelled() => return Ok(ExitCode::from(130)),
+        Err(error) if error.is_usage() => {
+            eprintln!("greenshift: usage error: {error}");
+            return Ok(ExitCode::from(2));
+        }
+        Err(error) => {
+            eprintln!("greenshift: ⚠ {error}");
+            return Ok(ExitCode::SUCCESS);
+        }
     };
     let result = (|| -> anyhow::Result<()> {
-        let remote = crate::history::Remote::new(&options.remote)?;
         match &args.operation {
-            HistoryCommand::Restore(_) => {
+            HistoryCommand::Restore(options) => {
                 if !remote.restore(&options.db, options.cache_dir.as_deref())? {
                     eprintln!("greenshift: ⚠ no durable history; running without it");
                 }
             }
-            HistoryCommand::Publish(_) => {
-                // The workflow is the authorization boundary. Do not infer
-                // publish authority merely from possession of a token.
-                if std::env::var("GITHUB_EVENT_NAME")
-                    .is_ok_and(|event| event == "pull_request" || event == "pull_request_target")
-                {
-                    anyhow::bail!("publishing history from pull requests is refused");
-                }
-                if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
-                    let branch = options
-                        .default_branch
-                        .as_deref()
-                        .context("CI publishing requires --default-branch")?;
-                    if std::env::var("GITHUB_EVENT_NAME").ok().as_deref() != Some("push")
-                        || std::env::var("GITHUB_REF").ok().as_deref()
-                            != Some(&format!("refs/heads/{branch}"))
-                    {
-                        anyhow::bail!("only default-branch pushes may publish history");
-                    }
-                }
+            HistoryCommand::Publish(options) => {
                 println!(
                     "{}",
-                    remote.publish(&options.db, options.cache_dir.as_deref())?
+                    remote.publish(&options.data.db, options.data.cache_dir.as_deref())?
                 );
             }
             HistoryCommand::CacheKey(_) => {
@@ -426,6 +509,12 @@ fn history(args: &HistoryArgs) -> anyhow::Result<ExitCode> {
         Ok(())
     })();
     if let Err(err) = result {
+        if err
+            .downcast_ref::<crate::history::HistoryError>()
+            .is_some_and(|error| error.is_cancelled())
+        {
+            return Ok(ExitCode::from(130));
+        }
         eprintln!("greenshift: ⚠ {err:#}");
     }
     // History storage must never turn a successful test job into a failed one.
@@ -636,12 +725,19 @@ pub fn plan_groups<'t>(
 
 /// Run the whole cycle with cargo-nextest; see [`run`].
 pub fn run_nextest(args: &NextestRunArgs) -> anyhow::Result<ExitCode> {
+    run_nextest_with_control(args, &TransportControl::default())
+}
+
+fn run_nextest_with_control(
+    args: &NextestRunArgs,
+    control: &TransportControl,
+) -> anyhow::Result<ExitCode> {
     let backend = run::nextest::Nextest::new(
         &args.args,
         std::env::var_os("NEXTEST_PROFILE").as_deref(),
         args.max_filterset_bytes,
     )?;
-    run::run(&backend, &args.options)
+    run::run_with_control(&backend, &args.options, control)
 }
 
 /// The history `plan` reads. A missing store is created, and its history
