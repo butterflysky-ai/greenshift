@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::builder::{NonEmptyStringValueParser, StyledStr};
@@ -22,19 +22,22 @@ use crate::{junit, nextest, plan, run};
 #[derive(Clone, Default)]
 pub struct TransportControl {
     cancelled: Arc<AtomicBool>,
-    active: Arc<AtomicBool>,
+    // Serializes interrupt publication with the phase-to-caller transition.
+    active: Arc<Mutex<bool>>,
 }
 
 impl TransportControl {
     /// Interrupt an active transport. False leaves non-transport signal handling
     /// to the binary, so a backend child cannot make Ctrl-C disappear.
     pub fn interrupt(&self) -> bool {
-        if self.active.load(Ordering::SeqCst) {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *active {
             self.cancelled.store(true, Ordering::SeqCst);
-            true
-        } else {
-            false
         }
+        *active
     }
 
     pub(crate) fn token(&self) -> Arc<AtomicBool> {
@@ -42,16 +45,47 @@ impl TransportControl {
     }
 
     pub(crate) fn phase(&self) -> TransportPhase<'_> {
-        self.active.store(true, Ordering::SeqCst);
-        TransportPhase(self)
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        TransportPhase {
+            control: self,
+            finished: false,
+        }
     }
 }
 
-pub(crate) struct TransportPhase<'a>(&'a TransportControl);
+pub(crate) struct TransportPhase<'a> {
+    control: &'a TransportControl,
+    finished: bool,
+}
+
+impl TransportPhase<'_> {
+    /// Stop accepting transport interrupts and observe all interrupts accepted
+    /// before this transition under the same lock. A later signal is handled
+    /// by the binary's non-transport policy, never lost between two atomics.
+    pub(crate) fn finish(mut self) -> bool {
+        let mut active = self
+            .control
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active = false;
+        self.finished = true;
+        self.control.cancelled.load(Ordering::SeqCst)
+    }
+}
 
 impl Drop for TransportPhase<'_> {
     fn drop(&mut self) {
-        self.0.active.store(false, Ordering::SeqCst);
+        if !self.finished {
+            *self
+                .control
+                .active
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = false;
+        }
     }
 }
 
@@ -473,15 +507,17 @@ fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<Exi
             }
         }
     }
-    let _phase = control.phase();
+    let phase = control.phase();
     let remote = match crate::history::Remote::new_cancellable(&location.remote, control.token()) {
         Ok(remote) => remote,
-        Err(error) if error.is_cancelled() => return Ok(ExitCode::from(130)),
-        Err(error) if error.is_usage() => {
-            eprintln!("greenshift: usage error: {error}");
-            return Ok(ExitCode::from(2));
-        }
         Err(error) => {
+            if phase.finish() || error.is_cancelled() {
+                return Ok(ExitCode::from(130));
+            }
+            if error.is_usage() {
+                eprintln!("greenshift: usage error: {error}");
+                return Ok(ExitCode::from(2));
+            }
             eprintln!("greenshift: ⚠ {error}");
             return Ok(ExitCode::SUCCESS);
         }
@@ -508,6 +544,9 @@ fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<Exi
         }
         Ok(())
     })();
+    if phase.finish() {
+        return Ok(ExitCode::from(130));
+    }
     if let Err(err) = result {
         if err
             .downcast_ref::<crate::history::HistoryError>()
@@ -844,6 +883,52 @@ fn written(result: std::io::Result<ExitCode>) -> anyhow::Result<ExitCode> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn test_transport_finish_observes_latched_interrupt_and_disarms_phase() {
+        let control = TransportControl::default();
+        let phase = control.phase();
+        assert!(control.interrupt());
+        assert!(
+            phase.finish(),
+            "an accepted interrupt must stop caller continuation"
+        );
+        assert!(
+            !control.interrupt(),
+            "later signals use non-transport policy"
+        );
+    }
+
+    #[test]
+    fn test_transport_finish_and_interrupt_have_one_ordered_boundary() {
+        for _ in 0..100 {
+            let control = TransportControl::default();
+            let phase = control.phase();
+            let start = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let interrupt = scope.spawn(|| {
+                    start.wait();
+                    control.interrupt()
+                });
+                start.wait();
+                let cancelled = phase.finish();
+                assert_eq!(
+                    cancelled,
+                    interrupt.join().unwrap(),
+                    "finish must observe every interrupt accepted before disarming"
+                );
+            });
+            assert!(!control.interrupt());
+        }
+    }
+
+    #[test]
+    fn test_transport_phase_drop_disarms_on_early_return() {
+        let control = TransportControl::default();
+        drop(control.phase());
+        assert!(!control.interrupt());
+        assert!(!control.token().load(Ordering::SeqCst));
+    }
 
     #[test]
     fn cli_definition_is_valid() {

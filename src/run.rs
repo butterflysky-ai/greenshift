@@ -81,11 +81,14 @@ pub(crate) fn run_with_control(
 ) -> anyhow::Result<ExitCode> {
     let mut history_unavailable = false;
     if let Some(url) = &options.history_remote {
-        let _phase = control.phase();
+        let phase = control.phase();
         let restored =
             crate::history::Remote::new_cancellable(url, control.token()).and_then(|remote| {
                 remote.restore(&options.select.db, options.history_cache_dir.as_deref())
             });
+        if phase.finish() {
+            return Ok(ExitCode::from(130));
+        }
         match restored {
             Ok(true) => {}
             Ok(false) => {

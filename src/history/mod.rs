@@ -433,19 +433,33 @@ impl Remote {
         if !hit {
             self.read(&oid, stage.path())?;
         }
+        self.check_cancelled()?;
         check_restore_destination(db)?;
-        if crate::store::Store::open_read_only(db)
+        let stage = if crate::store::Store::open_read_only(db)
             .map_err(error)?
             .is_some()
         {
             let merged = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
             snapshot::merge(db, stage.path(), merged.path()).map_err(error)?;
-            check_restore_destination(db)?;
-            merged.persist(db).map_err(error)?;
+            merged
         } else {
-            stage.persist(db).map_err(error)?;
-        }
+            stage
+        };
+        self.persist_restore(stage, db)?;
         Ok(true)
+    }
+
+    // The staged data is fully validated. Cancellation can still arrive during
+    // local data work, so fence the atomic replacement, not only Git calls.
+    fn persist_restore(
+        &self,
+        stage: tempfile::NamedTempFile,
+        db: &Path,
+    ) -> Result<(), HistoryError> {
+        check_restore_destination(db)?;
+        self.check_cancelled()?;
+        stage.persist(db).map_err(error)?;
+        Ok(())
     }
 
     /// Publish validated data, comparing the expected old identity. One rejected
@@ -616,6 +630,33 @@ mod tests {
             .status
             .success());
         Remote::new(path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn test_persist_restore_cancelled_after_validation_preserves_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("existing.sqlite");
+        fixture(&destination, "unpublished-local");
+        let before = fs::read(&destination).unwrap();
+        let stage = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        fixture(stage.path(), "canonical-remote");
+        snapshot::validate(stage.path()).unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let remote = Remote {
+            scratch: tempfile::tempdir().unwrap(),
+            url: String::new(),
+            token: None,
+            timeout: TIMEOUT,
+            cancellation: Arc::clone(&cancellation),
+        };
+        // No Git runs here: the interrupt arrives after local validation and
+        // must still fence the actual atomic replacement.
+        cancellation.store(true, Ordering::SeqCst);
+        assert!(remote
+            .persist_restore(stage, &destination)
+            .unwrap_err()
+            .is_cancelled());
+        assert_eq!(fs::read(destination).unwrap(), before);
     }
 
     #[test]
