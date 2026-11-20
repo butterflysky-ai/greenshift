@@ -10,7 +10,10 @@
 #   v16.0.3/v17.0.2 grants that token write access outside fork pull
 #   requests and ignores workflow permissions. persist-credentials:false or
 #   only referencing the token in a publisher step does not make its test
-#   job read-only.
+#   job read-only. A separate publisher credential does not revoke the
+#   automatic one. This is a platform baseline, not an additional
+#   privilege granted by greenshift, but it does not satisfy this design's
+#   read-only-test-job guarantee.
 #
 #   Consequently no ordinary push-test Forgejo workflow is offered as
 #   isolated.
@@ -22,6 +25,11 @@
 # branch; but that limits what greenshift does, not what test code can
 # do. No `permissions` are written: Forgejo ignores them, and they would
 # claim otherwise.
+#
+# The history, every run's test results by commit and branch, is kept
+# whole, never pruned, and published where anyone who can read this
+# repository can read it: anyone at all, if the repository is public.
+# Deleting refs/greenshift/history removes the published copy.
 #
 # Forgejo's artifact and cache actions differ from GitHub's: the artifact
 # steps use Forgejo's own forks, as stock v4 refuses to run here. Check a
@@ -38,7 +46,7 @@ env:
 
 jobs:
   test:
-    runs-on: @RUNS_ON@
+    runs-on: '@RUNS_ON@'
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -90,7 +98,7 @@ jobs:
   publish:
     needs: test
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-    runs-on: @RUNS_ON@
+    runs-on: '@RUNS_ON@'
     concurrency:
       group: greenshift-history-publish
       cancel-in-progress: false

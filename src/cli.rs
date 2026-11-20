@@ -152,8 +152,8 @@ pub struct InitNextestArgs {
 
     /// The runner label the jobs run on. Default: ubuntu-latest on GitHub,
     /// docker on Forgejo.
-    #[arg(long, value_name = "LABEL", value_parser = crate::init::runner_label)]
-    pub runs_on: Option<String>,
+    #[arg(long, value_name = "LABEL")]
+    pub runs_on: Option<crate::init::RunnerLabel>,
 
     /// Write the Forgejo workflow although it cannot be isolated: stock
     /// Forgejo gives every step a token with write access to the
@@ -552,7 +552,7 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
             );
             return Ok(ExitCode::from(2));
         }
-        _ => {}
+        (Forge::Github, false) | (Forge::Forgejo, true) => {}
     }
     if args.ci.is_none() {
         println!(
@@ -561,11 +561,15 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
             forge.name()
         );
     }
+    let runs_on = args
+        .runs_on
+        .clone()
+        .unwrap_or_else(|| forge.default_runner());
     let settings = init::nextest::Settings {
         forge,
         release: &args.release,
         sha256: &args.sha256,
-        runs_on: args.runs_on.as_deref().unwrap_or(forge.default_runner()),
+        runs_on: &runs_on,
     };
     let wants = init::nextest::wants(root, &settings)?;
     let actions = init::decide(root, wants, args.force)?;

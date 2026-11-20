@@ -148,21 +148,8 @@ fn install(workflow: &Value, job: &str, binary: &[u8]) -> (bool, Option<Vec<u8>>
     std::fs::create_dir(&bin).unwrap();
     let payload = dir.path().join("payload");
     std::fs::write(&payload, binary).unwrap();
-    let curl = bin.join("curl");
-    std::fs::write(
-        &curl,
-        format!(
-            "#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do\n  \
-             if [[ $1 == --output ]]; then cp {payload:?} \"$2\"; exit 0; fi\n  \
-             shift\ndone\nexit 22\n"
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let urls = dir.path().join("urls");
+    fake_curl(&bin, &payload, &urls);
     let temp = dir.path().join("runner-temp");
     std::fs::create_dir(&temp).unwrap();
     let path = format!(
@@ -192,12 +179,43 @@ fn install(workflow: &Value, job: &str, binary: &[u8]) -> (bool, Option<Vec<u8>>
         .filter(|name| name != "greenshift")
         .collect();
     assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    let release = env["GREENSHIFT_RELEASE"].as_str().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&urls).unwrap(),
+        format!(
+            "https://github.com/paceheart/greenshift/releases/download/{release}/\
+             greenshift-{release}-x86_64-unknown-linux-musl\n"
+        ),
+        "the one download is the pinned release's Linux binary"
+    );
     (
         status.success(),
         installed
             .exists()
             .then(|| std::fs::read(installed).unwrap()),
     )
+}
+
+/// An executable `curl` in `bin` that writes `payload` where the real one
+/// would write the download, and appends each URL it is given to `urls`.
+/// Like the real one with --fail, it fails without an --output.
+fn fake_curl(bin: &std::path::Path, payload: &std::path::Path, urls: &std::path::Path) {
+    let curl = bin.join("curl");
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/usr/bin/env bash\nout=\nwhile [[ $# -gt 0 ]]; do\n  \
+             case $1 in\n    --output) out=$2; shift ;;\n    \
+             https://*) echo \"$1\" >> {urls:?} ;;\n  esac\n  \
+             shift\ndone\n[[ -n $out ]] || exit 22\ncp {payload:?} \"$out\"\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -261,4 +279,161 @@ fn forgejo_keeps_the_publisher_apart_but_claims_no_permissions() {
     }
     let rust = step(&workflow, "test", "Install Rust when the runner has none");
     assert!(rust["run"].as_str().unwrap().contains("sha256sum --check"));
+}
+
+#[test]
+fn every_runner_label_reaches_the_workflow_as_that_string() {
+    // Each would be something else, or no YAML, if written bare.
+    for label in [
+        "-",
+        ":",
+        "a:",
+        "null",
+        "true",
+        "0x1F",
+        ".inf",
+        "ubuntu-24.04",
+    ] {
+        for forge in forges() {
+            let mut extra = extra_for(forge).to_vec();
+            extra.extend(["--runs-on", label]);
+            let workflow = generated(forge, &"a".repeat(64), &extra);
+            for job in ["test", "publish"] {
+                assert_eq!(
+                    workflow["jobs"][job]["runs-on"],
+                    Value::String(label.into()),
+                    "{forge} {job} {label:?}"
+                );
+            }
+        }
+    }
+}
+
+/// `text` with whitespace runs made single spaces.
+fn words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn the_forgejo_header_quotes_the_capability_gate_as_the_design_says_it() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let doc = std::fs::read_to_string(format!("{root}/docs/design/durable-history.md")).unwrap();
+    let doc = words(&doc.replace('`', "").replace("**", ""));
+    let dir = tempfile::tempdir().unwrap();
+    assert_cmd::Command::cargo_bin("greenshift")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["init", "nextest", "--ci", "forgejo", "--accept-unisolated"])
+        .args(["--release", RELEASE, "--sha256", &"a".repeat(64)])
+        .assert()
+        .success();
+    let text =
+        std::fs::read_to_string(dir.path().join(".forgejo/workflows/greenshift.yml")).unwrap();
+    // The quoted paragraphs: the comment lines indented under "says:".
+    let mut quoted = vec![String::new()];
+    let mut inside = false;
+    for line in text.lines().take_while(|line| line.starts_with('#')) {
+        let body = line.trim_start_matches('#');
+        if body.trim_end().ends_with("says:") {
+            inside = true;
+        } else if inside && body.starts_with("   ") {
+            quoted.last_mut().unwrap().push_str(&format!(" {body}"));
+        } else if inside && body.trim().is_empty() {
+            quoted.push(String::new());
+        } else if inside {
+            break;
+        }
+    }
+    let quoted: Vec<String> = quoted
+        .iter()
+        .map(|q| words(q))
+        .filter(|q| !q.is_empty())
+        .collect();
+    assert!(quoted.len() >= 2, "{quoted:?}");
+    for paragraph in &quoted {
+        assert!(
+            doc.contains(paragraph.as_str()),
+            "not in the design: {paragraph:?}"
+        );
+    }
+    // Whole sentences, none dropped from the first paragraph.
+    assert!(
+        quoted[0].ends_with("read-only-test-job guarantee."),
+        "{:?}",
+        quoted[0]
+    );
+}
+
+/// Run the Forgejo test job's Rust step with a PATH that has only the
+/// tools it needs, `cargo` among them when `with_cargo`, and a `curl`
+/// that downloads `payload`; return whether it succeeded, the URLs it
+/// fetched, and whether the download was run.
+#[cfg(unix)]
+fn install_rust(with_cargo: bool, payload: &[u8]) -> (bool, String, bool) {
+    let workflow = generated("forgejo", &"a".repeat(64), &["--accept-unisolated"]);
+    let script = step(&workflow, "test", "Install Rust when the runner has none")["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for tool in ["bash", "sha256sum", "rm", "chmod", "env", "cp", "touch"] {
+        let found = Command::new("bash")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .unwrap();
+        let found = String::from_utf8(found.stdout).unwrap();
+        std::os::unix::fs::symlink(found.trim(), bin.join(tool)).unwrap();
+    }
+    let ran = dir.path().join("ran");
+    if with_cargo {
+        let cargo = bin.join("cargo");
+        std::fs::write(&cargo, "#!/usr/bin/env bash\necho cargo 1.0.0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let download = dir.path().join("payload");
+    std::fs::write(&download, payload).unwrap();
+    let urls = dir.path().join("urls");
+    fake_curl(&bin, &download, &urls);
+    let temp = dir.path().join("runner-temp");
+    std::fs::create_dir(&temp).unwrap();
+    let status = Command::new(bin.join("bash"))
+        .args(["--noprofile", "--norc", "-c", &script])
+        .env_clear()
+        .env("PATH", &bin)
+        .env("RUNNER_TEMP", &temp)
+        .env("RAN", &ran)
+        .env("GITHUB_PATH", dir.path().join("github-path"))
+        .status()
+        .unwrap();
+    let leftovers: Vec<_> = std::fs::read_dir(&temp).unwrap().collect();
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    (
+        status.success(),
+        std::fs::read_to_string(&urls).unwrap_or_default(),
+        ran.exists(),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn the_rust_step_uses_the_runners_cargo_and_otherwise_installs_only_a_matching_rustup() {
+    let rustup = b"#!/usr/bin/env bash\ntouch \"$RAN\"\n";
+    let (ok, urls, ran) = install_rust(true, rustup);
+    assert!(
+        ok && urls.is_empty() && !ran,
+        "cargo present: nothing fetched"
+    );
+    let (ok, urls, ran) = install_rust(false, rustup);
+    assert!(
+        !ok,
+        "a rustup-init that does not match the pin fails the step"
+    );
+    assert!(!ran, "and is never run");
+    assert_eq!(
+        urls,
+        "https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init\n"
+    );
 }

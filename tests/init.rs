@@ -96,7 +96,10 @@ fn the_forge_is_found_from_the_repository_when_not_given() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".github")).unwrap();
     let out = stdout_of(&mut init(dir.path(), &[]));
-    assert!(out.contains("github"), "{out}");
+    assert!(
+        out.contains("found .github, so writing for github"),
+        "{out}"
+    );
     assert!(dir.path().join(GITHUB_WORKFLOW).is_file());
 }
 
@@ -125,7 +128,123 @@ fn a_second_run_changes_nothing_and_says_so() {
     let out = stdout_of(&mut init(dir.path(), &["--ci", "github"]));
     assert_eq!(snapshot(dir.path()), before);
     assert!(out.contains("nothing to change"), "{out}");
+    assert!(
+        out.contains(&format!("{GITHUB_WORKFLOW} is already up to date")),
+        "{out}"
+    );
     assert!(!out.contains("wrote"), "{out}");
+}
+
+#[test]
+fn force_rewrites_nothing_that_is_already_as_wanted() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &["--ci", "github"]).assert().success();
+    let before = snapshot(dir.path());
+    let out = stdout_of(&mut init(dir.path(), &["--ci", "github", "--force"]));
+    assert_eq!(snapshot(dir.path()), before);
+    assert!(
+        out.contains(&format!("{GITHUB_WORKFLOW} is already up to date")),
+        "{out}"
+    );
+    assert!(!out.contains("overwrote"), "{out}");
+    assert!(out.contains("nothing to change"), "{out}");
+}
+
+/// The mode a file newly made in `dir` gets from the process's umask.
+#[cfg(unix)]
+fn fresh_mode(dir: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    let probe = dir.join("probe");
+    std::fs::File::create(&probe).unwrap();
+    let mode = std::fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+    std::fs::remove_file(probe).unwrap();
+    mode
+}
+
+#[cfg(unix)]
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn written_files_get_ordinary_modes_and_rewritten_ones_keep_theirs() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = fresh_mode(dir.path());
+    write(dir.path(), NEXTEST_TOML, "[profile.ci]\nretries = 1\n");
+    let toml = dir.path().join(NEXTEST_TOML);
+    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o664)).unwrap();
+    init(dir.path(), &["--ci", "github"]).assert().success();
+    assert_eq!(junit_path(dir.path()).as_deref(), Some("junit.xml"));
+    assert_eq!(mode(&toml), 0o664, "the rewritten file keeps its mode");
+    assert_eq!(
+        mode(&dir.path().join(GITHUB_WORKFLOW)),
+        fresh,
+        "a new file gets the mode any new file would"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_on_the_way_to_a_file_is_never_followed_or_replaced() {
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("credentials.toml");
+    std::fs::write(&secret, "[registry]\ntoken = \"secret\"\n").unwrap();
+    // A symlinked file, and a symlinked directory on the way to one.
+    for (link, target, other) in [
+        (NEXTEST_TOML, secret.clone(), GITHUB_WORKFLOW),
+        (".github", outside.path().to_owned(), NEXTEST_TOML),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join(link);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, &at).unwrap();
+        let outside_before = snapshot(outside.path());
+        for force in [false, true] {
+            let mut cmd = init(dir.path(), &["--ci", "github"]);
+            if force {
+                cmd.arg("--force");
+            }
+            cmd.assert()
+                .code(1)
+                .stderr(predicate::str::contains(link))
+                .stderr(predicate::str::contains("symlink"));
+            let meta = std::fs::symlink_metadata(&at).unwrap();
+            assert!(meta.file_type().is_symlink(), "{link}: link kept");
+            assert_eq!(snapshot(outside.path()), outside_before, "{link}");
+            assert!(
+                !dir.path().join(other).exists(),
+                "{link}: nothing is written"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_cannot_be_written_means_none_is_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join(".config");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::File::create(config.join("probe")).is_ok() {
+        // Running as root, which can write anywhere: nothing to test.
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let out = init(dir.path(), &["--ci", "github"]).assert().code(1);
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(stderr.contains(NEXTEST_TOML), "{stderr}");
+    assert!(stderr.contains("nothing written"), "{stderr}");
+    assert!(
+        !dir.path().join(GITHUB_WORKFLOW).exists(),
+        "the workflow is not written without the nextest.toml"
+    );
+    assert!(snapshot(dir.path()).is_empty());
 }
 
 #[test]
@@ -252,7 +371,7 @@ fn runs_on_names_the_runner() {
         .assert()
         .success();
     let text = std::fs::read_to_string(dir.path().join(GITHUB_WORKFLOW)).unwrap();
-    assert_eq!(text.matches("runs-on: ubuntu-24.04").count(), 2, "{text}");
+    assert_eq!(text.matches("runs-on: 'ubuntu-24.04'").count(), 2, "{text}");
     assert!(!text.contains("ubuntu-latest"));
 }
 
@@ -283,7 +402,13 @@ fn a_missing_nextest_toml_is_written_with_the_junit_stanza() {
     let out = stdout_of(&mut init(dir.path(), &["--ci", "github"]));
     assert!(out.contains(&format!("wrote {NEXTEST_TOML}")), "{out}");
     assert_eq!(junit_path(dir.path()).as_deref(), Some("junit.xml"));
+    let text = std::fs::read_to_string(dir.path().join(NEXTEST_TOML)).unwrap();
+    assert!(text.starts_with(STANZA_COMMENT), "{text}");
 }
+
+/// The comment `init` puts above the stanza it adds.
+const STANZA_COMMENT: &str = "# JUnit output, for `greenshift ingest` and other JUnit readers.\n\
+                              # Added by `greenshift init nextest`.\n";
 
 #[test]
 fn an_existing_junit_stanza_is_left_alone_even_with_force() {
@@ -331,6 +456,12 @@ fn the_stanza_is_added_to_a_nextest_toml_without_one_keeping_the_rest() {
         let text = std::fs::read_to_string(dir.path().join(NEXTEST_TOML)).unwrap();
         for line in mine.lines() {
             assert!(text.contains(line), "{mine:?}: lost {line:?} in\n{text}");
+        }
+        if !mine.contains("[profile.default.junit]") {
+            assert!(
+                text.contains(&format!("{STANZA_COMMENT}[profile.default.junit]\n")),
+                "{mine:?}: no comment above the new stanza in\n{text}"
+            );
         }
         let mut expected = leaves(mine);
         expected.insert("profile.default.junit.path".into(), "\"junit.xml\"".into());
@@ -402,6 +533,26 @@ fn a_nextest_toml_that_cannot_be_read_as_toml_is_never_touched() {
 }
 
 #[test]
+fn a_nextest_toml_that_is_not_toml_is_quoted_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        NEXTEST_TOML,
+        "x = \"\u{1b}[31mred\u{1b}]0;title\u{7}\" oops\n",
+    );
+    let out = init(dir.path(), &["--ci", "github"]).assert().code(1);
+    let stderr = &out.get_output().stderr;
+    assert!(
+        !stderr.iter().any(|&b| b == 0x1b || b == 0x07),
+        "{}",
+        String::from_utf8_lossy(stderr)
+    );
+    let stderr = String::from_utf8_lossy(stderr);
+    assert!(stderr.contains("is not TOML"), "{stderr}");
+    assert!(stderr.contains("\\u{1b}[31mred"), "{stderr}");
+}
+
+#[test]
 fn a_junit_setting_of_the_wrong_shape_is_never_touched() {
     for mine in [
         "[profile.default]\njunit = \"junit.xml\"\n",
@@ -467,7 +618,10 @@ fn forgejo_is_found_from_the_repository_and_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".forgejo")).unwrap();
     let out = stdout_of(&mut init(dir.path(), &["--accept-unisolated"]));
-    assert!(out.contains("forgejo"), "{out}");
+    assert!(
+        out.contains("found .forgejo, so writing for forgejo"),
+        "{out}"
+    );
     assert!(dir.path().join(FORGEJO_WORKFLOW).is_file());
     let before = snapshot(dir.path());
     let out = stdout_of(&mut init(dir.path(), &["--accept-unisolated"]));

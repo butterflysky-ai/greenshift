@@ -5,9 +5,12 @@
 //! what content ([`Want`]); this module decides what to do with each
 //! against what is already on disk ([`decide`]), and then writes, all or
 //! nothing: a file that exists and differs is left alone unless `--force`
-//! is given, and while one is left alone, none is written. A second run
-//! with the same inputs finds every file as it would write it and changes
-//! nothing.
+//! is given, and while one is left alone, none is written. A file the
+//! backend merges ([`Want::Merged`]) was already decided by the backend,
+//! which read it; `decide` only passes that on. A path through a symlink
+//! is never read or written, and every file is staged before any is put
+//! in place. A second run with the same inputs finds every file as it
+//! would write it and changes nothing.
 //!
 //! What gets pinned is the greenshift release the workflow downloads,
 //! by tag and SHA-256 ([`Release`], [`Sha256`]). Neither has a default: a
@@ -57,11 +60,14 @@ impl Forge {
     /// The runner label jobs use unless `--runs-on` is given: GitHub's
     /// hosted Ubuntu runner, and the label a Forgejo runner registers by
     /// default.
-    pub fn default_runner(self) -> &'static str {
-        match self {
-            Forge::Github => "ubuntu-latest",
-            Forge::Forgejo => "docker",
-        }
+    pub fn default_runner(self) -> RunnerLabel {
+        RunnerLabel(
+            match self {
+                Forge::Github => "ubuntu-latest",
+                Forge::Forgejo => "docker",
+            }
+            .to_owned(),
+        )
     }
 }
 
@@ -172,16 +178,39 @@ impl std::str::FromStr for Sha256 {
 }
 
 /// A runner label for `runs-on`: letters, digits and `.`, `_`, `-`, `:`,
-/// so that it goes into YAML as it is.
-pub fn runner_label(text: &str) -> Result<String, String> {
-    let ok = !text.is_empty()
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b));
-    if ok {
-        Ok(text.to_owned())
-    } else {
-        Err("expected a runner label of letters, digits, '.', '_', '-' and ':'".into())
+/// so that it goes into a single-quoted YAML string as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerLabel(String);
+
+impl RunnerLabel {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RunnerLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for RunnerLabel {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<RunnerLabel, String> {
+        let ok = !text.is_empty()
+            && text.len() <= 256
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b));
+        if ok {
+            Ok(RunnerLabel(text.to_owned()))
+        } else {
+            Err(
+                "expected a runner label of at most 256 letters, digits, '.', '_', '-' and ':'"
+                    .into(),
+            )
+        }
     }
 }
 
@@ -204,7 +233,7 @@ pub enum Want {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeOutcome {
     /// Write this content, creating the file or adding to it.
-    Write { content: String, what: String },
+    Write { content: String, what: &'static str },
     /// Leave the file as it is, for this reason.
     Keep { why: String },
 }
@@ -216,7 +245,7 @@ pub enum Action {
     Write {
         path: PathBuf,
         content: String,
-        verb: String,
+        verb: &'static str,
     },
     /// Nothing to do: already as wanted, or kept for the reason given.
     Unchanged { path: PathBuf, why: String },
@@ -230,12 +259,12 @@ pub fn decide(root: &Path, wants: Vec<Want>, force: bool) -> anyhow::Result<Vec<
         .into_iter()
         .map(|want| match want {
             Want::Generated { path, content } => {
-                let existing = read_existing(&root.join(&path))?;
+                let existing = read_existing(root, &path)?;
                 Ok(match existing {
                     None => Action::Write {
                         path,
                         content,
-                        verb: "wrote".into(),
+                        verb: "wrote",
                     },
                     Some(text) if text == content => Action::Unchanged {
                         path,
@@ -244,7 +273,7 @@ pub fn decide(root: &Path, wants: Vec<Want>, force: bool) -> anyhow::Result<Vec<
                     Some(_) if force => Action::Write {
                         path,
                         content,
-                        verb: "overwrote".into(),
+                        verb: "overwrote",
                     },
                     Some(_) => Action::Conflict { path },
                 })
@@ -261,8 +290,28 @@ pub fn decide(root: &Path, wants: Vec<Want>, force: bool) -> anyhow::Result<Vec<
         .collect()
 }
 
-/// The text of the file at `path`, or `None` if there is none.
-pub fn read_existing(path: &Path) -> anyhow::Result<Option<String>> {
+/// The text of the file at `path` under `root`, or `None` if there is
+/// none. A symlink at `path`, or on the way to it from `root`, is an
+/// error: `init` neither reads what it points to into the repository nor
+/// replaces it.
+pub fn read_existing(root: &Path, path: &Path) -> anyhow::Result<Option<String>> {
+    let mut at = root.to_owned();
+    for part in path.components() {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => anyhow::bail!(
+                "{} is a symlink; left alone, and nothing written",
+                Tainted::from(at.strip_prefix(root).unwrap_or(&at))
+            ),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => {
+                return Err(err).with_context(|| format!("could not read {}", Tainted::from(path)))
+            }
+        }
+    }
+    let full = root.join(path);
+    let path = full.as_path();
     match std::fs::read(path) {
         Ok(bytes) => String::from_utf8(bytes)
             .map(Some)
@@ -294,15 +343,31 @@ pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<u8> {
         eprintln!("greenshift: nothing written");
         return Ok(1);
     }
+    // Stage every file first, so that one that cannot be written leaves
+    // every other one as it was.
+    let mut staged = Vec::new();
+    for action in actions {
+        if let Action::Write { path, content, .. } = action {
+            let file = stage(&root.join(path), content).with_context(|| {
+                format!(
+                    "could not write {}; nothing written",
+                    Tainted::from(path.as_path())
+                )
+            })?;
+            staged.push(file);
+        }
+    }
+    let mut staged = staged.into_iter();
     let mut changed = false;
     for action in actions {
         match action {
-            Action::Write {
-                path,
-                content,
-                verb,
-            } => {
-                write_file(&root.join(path), content)?;
+            Action::Write { path, verb, .. } => {
+                let file = staged.next().expect("one staged file per write");
+                file.persist(root.join(path))
+                    .map_err(|err| err.error)
+                    .with_context(|| {
+                        format!("could not write {}", Tainted::from(path.as_path()))
+                    })?;
                 println!("greenshift: {verb} {}", Tainted::from(path.as_path()));
                 changed = true;
             }
@@ -318,22 +383,30 @@ pub fn apply(root: &Path, actions: &[Action]) -> anyhow::Result<u8> {
     Ok(0)
 }
 
-/// Write `content` to `path`, creating its directory, through a temporary
-/// file renamed into place, so the file is never left half written.
-fn write_file(path: &Path, content: &str) -> anyhow::Result<()> {
-    let context = || format!("could not write {}", Tainted::from(path));
+/// `content` in a temporary file beside `path`, creating its directory,
+/// for renaming into place, so the file is never left half written. It
+/// has the mode of the file it replaces, or else the mode any new file
+/// gets.
+fn stage(path: &Path, content: &str) -> std::io::Result<tempfile::NamedTempFile> {
     let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
     let dir = dir.unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).with_context(context)?;
-    let mut file = tempfile::Builder::new()
-        .prefix(".greenshift-init-")
-        .tempfile_in(dir)
-        .with_context(context)?;
-    std::io::Write::write_all(&mut file, content.as_bytes()).with_context(context)?;
-    file.persist(path)
-        .map_err(|err| err.error)
-        .with_context(context)?;
-    Ok(())
+    std::fs::create_dir_all(dir)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".greenshift-init-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Subject to the umask, as for any new file.
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let mut file = builder.tempfile_in(dir)?;
+    match std::fs::metadata(path) {
+        Ok(meta) => file.as_file().set_permissions(meta.permissions())?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    std::io::Write::write_all(&mut file, content.as_bytes())?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -383,10 +456,13 @@ mod tests {
 
     #[test]
     fn runner_labels_go_into_yaml_as_they_are() {
-        assert!(runner_label("ubuntu-24.04").is_ok());
-        assert!(runner_label("self-hosted:docker_x").is_ok());
-        for bad in ["", "a b", "a\nb", "'x'", "x#y", "[x]"] {
-            assert!(runner_label(bad).is_err(), "{bad:?}");
+        for ok in ["ubuntu-24.04", "self-hosted:docker_x", "-", "null"] {
+            assert_eq!(ok.parse::<RunnerLabel>().unwrap().as_str(), ok);
         }
+        let long = "a".repeat(257);
+        for bad in ["", "a b", "a\nb", "'x'", "x#y", "[x]", &long] {
+            assert!(bad.parse::<RunnerLabel>().is_err(), "{bad:?}");
+        }
+        assert!("a".repeat(256).parse::<RunnerLabel>().is_ok());
     }
 }

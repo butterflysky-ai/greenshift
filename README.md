@@ -422,6 +422,11 @@ ignores `permissions` (see the
 The file says so at the top, and `init` writes it only with
 `--accept-unisolated`.
 
+The workflow publishes the history to `refs/greenshift/history`, whole
+and never pruned, where anyone who can read the repository can read it:
+anyone at all, if the repository is public (see **Publication audience**
+below). The generated file says so too.
+
 It prints what it wrote. A second run with the same options changes
 nothing and says so. A generated file that exists and differs is left
 alone, and then nothing at all is written, unless `--force` is given;
@@ -429,8 +434,9 @@ alone, and then nothing at all is written, unless `--force` is given;
 To pin a new release, run it again with the new `--release`, `--sha256`
 and `--force`.
 
-Exit status: 0 when the repository is set up, 1 for a file left alone or
-one that cannot be read (such as a `.config/nextest.toml` that is not
+Exit status: 0 when the repository is set up, 1 for a file left alone,
+one reached through a symlink (never followed or replaced), or one that
+cannot be read or written (such as a `.config/nextest.toml` that is not
 TOML), with nothing written, and 2 for a usage error, such as a missing
 or malformed `--release` or `--sha256`.
 
@@ -446,7 +452,9 @@ canonical and local history rather than discarding unpublished local runs.
 **Publication audience:** snapshots include the exact JUnit file paths stored in
 `run_files`, which may contain workstation usernames in absolute paths. Everyone
 with access to the destination repository can read that metadata. Use relative
-JUnit paths at ingest when absolute paths should not be published.
+JUnit paths at `greenshift ingest` when absolute paths should not be published;
+`run nextest` records the paths of its own JUnit files, in a temporary
+directory.
 
 Ordinary history storage errors warn without failing tests; malformed history arguments
 or publish-policy refusals exit 2. A second CAS rejection does not automatically

@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
-use super::{Forge, MergeOutcome, Release, Sha256, Want};
+use super::{Forge, MergeOutcome, Release, RunnerLabel, Sha256, Want};
+use crate::tainted::Tainted;
 
 /// The cargo-nextest version the workflow installs, as the durable-history
 /// reference workflow pins it.
@@ -25,7 +26,7 @@ pub struct Settings<'a> {
     pub release: &'a Release,
     pub sha256: &'a Sha256,
     /// The runner label every job runs on.
-    pub runs_on: &'a str,
+    pub runs_on: &'a RunnerLabel,
 }
 
 /// Where the workflow goes for `forge`.
@@ -46,7 +47,7 @@ const STANZA_COMMENT: &str = "# JUnit output, for `greenshift ingest` and other 
 
 /// The files `init nextest` wants, in the order it reports them.
 pub fn wants(root: &Path, settings: &Settings<'_>) -> anyhow::Result<Vec<Want>> {
-    let existing = super::read_existing(&root.join(NEXTEST_TOML))?;
+    let existing = super::read_existing(root, Path::new(NEXTEST_TOML))?;
     let outcome = junit_stanza(existing.as_deref())
         .map_err(|why| anyhow::anyhow!("{NEXTEST_TOML} {why}; left alone"))?;
     Ok(vec![
@@ -75,22 +76,23 @@ pub fn junit_stanza(existing: Option<&str>) -> Result<MergeOutcome, String> {
                 "added the JUnit stanza to"
             } else {
                 "wrote"
-            }
-            .into(),
+            },
         });
     };
     let mut doc = text
         .parse::<DocumentMut>()
-        .map_err(|err| format!("is not TOML: {}", one_line(&err.to_string())))?;
-    let profile = child_table(doc.as_table_mut(), "profile", "profile")?;
-    let default = child_table(profile, "default", "profile.default")?;
-    let junit = child_table(default, "junit", "profile.default.junit")?;
+        .map_err(|err| format!("is not TOML: {}", Tainted::raw(one_line(&err.to_string()))))?;
+    let profile = child_table(doc.as_table_mut(), "profile", "profile", implicit())?;
+    let default = child_table(profile, "default", "profile.default", implicit())?;
+    let mut stanza = Table::new();
+    stanza.decor_mut().set_prefix(format!("\n{STANZA_COMMENT}"));
+    let junit = child_table(default, "junit", "profile.default.junit", stanza)?;
     if let Some(path) = junit.get("path") {
         return match path.as_str() {
             Some(path) => Ok(MergeOutcome::Keep {
                 why: format!(
                     "already sets the default profile's JUnit path ({}); left alone",
-                    crate::tainted::Tainted::raw(path)
+                    Tainted::raw(path)
                 ),
             }),
             None => Err("sets profile.default.junit.path to something other than a string".into()),
@@ -99,25 +101,27 @@ pub fn junit_stanza(existing: Option<&str>) -> Result<MergeOutcome, String> {
     junit.insert("path", toml_edit::value(JUNIT_PATH));
     Ok(MergeOutcome::Write {
         content: doc.to_string(),
-        what: "added the JUnit stanza to".into(),
+        what: "added the JUnit stanza to",
     })
 }
 
-/// The table at `key` in `parent`, made if missing, or an error naming
-/// `dotted` if something else is there.
+/// A table that gets no header of its own unless it holds a value.
+fn implicit() -> Table {
+    let mut table = Table::new();
+    table.set_implicit(true);
+    table
+}
+
+/// The table at `key` in `parent`, `fresh` put there if there is none, or
+/// an error naming `dotted` if something else is there.
 fn child_table<'t>(
     parent: &'t mut dyn TableLike,
     key: &str,
     dotted: &str,
+    fresh: Table,
 ) -> Result<&'t mut dyn TableLike, String> {
     if parent.get(key).is_none() {
-        let mut table = Table::new();
-        if key == "junit" {
-            table.decor_mut().set_prefix(format!("\n{STANZA_COMMENT}"));
-        } else {
-            table.set_implicit(true);
-        }
-        parent.insert(key, Item::Table(table));
+        parent.insert(key, Item::Table(fresh));
     }
     parent
         .get_mut(key)
@@ -150,7 +154,7 @@ fn fill(template: &str, settings: &Settings<'_>) -> String {
         .replace("@RUSTUP_SHA256@", RUSTUP_SHA256)
         .replace("@RELEASE@", settings.release.as_str())
         .replace("@SHA256@", settings.sha256.as_str())
-        .replace("@RUNS_ON@", settings.runs_on)
+        .replace("@RUNS_ON@", settings.runs_on.as_str())
         .replace("@NEXTEST@", NEXTEST_VERSION)
 }
 
@@ -168,19 +172,6 @@ fn indent(text: &str, by: usize) -> String {
         .collect()
 }
 
-/// The placeholders [`fill`] fills.
-#[cfg(test)]
-const PLACEHOLDERS: &[&str] = &[
-    "@INSTALL@",
-    "@RELEASE@",
-    "@SHA256@",
-    "@RUNS_ON@",
-    "@NEXTEST@",
-    "@INSTALL_RUST@",
-    "@RUSTUP@",
-    "@RUSTUP_SHA256@",
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,16 +181,27 @@ mod tests {
         let release: Release = "v0.2.0".parse().unwrap();
         let sha256: Sha256 = "a".repeat(64).parse().unwrap();
         for forge in [Forge::Github, Forge::Forgejo] {
+            let runs_on = forge.default_runner();
             let settings = Settings {
                 forge,
                 release: &release,
                 sha256: &sha256,
-                runs_on: forge.default_runner(),
+                runs_on: &runs_on,
             };
             let text = workflow(&settings);
-            for placeholder in PLACEHOLDERS {
-                assert!(!text.contains(placeholder), "{forge:?}: {placeholder}");
-            }
+            // Any `@NAME@` left, whether or not `fill` knows the name.
+            let parts: Vec<&str> = text.split('@').collect();
+            let between = &parts[1..parts.len().saturating_sub(1).max(1)];
+            let left: Vec<&&str> = between
+                .iter()
+                .filter(|name| {
+                    !name.is_empty()
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                })
+                .collect();
+            assert!(left.is_empty(), "{forge:?}: {left:?}");
         }
     }
 }
