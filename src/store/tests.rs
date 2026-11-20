@@ -3,12 +3,7 @@ use std::path::PathBuf;
 use super::*;
 
 fn tc(suite: &str, name: &str, outcome: Outcome, ms: Option<i64>) -> TestCase {
-    TestCase {
-        suite: Tainted::raw(suite),
-        name: Tainted::raw(name),
-        outcome,
-        duration_ms: ms,
-    }
+    TestCase::new(Tainted::raw(suite), Tainted::raw(name), outcome, ms)
 }
 
 const RUN: NewRun<'static> = NewRun {
@@ -521,6 +516,28 @@ fn a_repeated_test_in_one_run_is_merged() {
             row("w", "steady", "passed", None),
         ]
     );
+}
+
+#[test]
+fn merge_duplicates_preserves_first_order_saturation_and_unknown_durations() {
+    let cases = [
+        tc("z", "first", Outcome::Skipped, Some(i64::MAX)),
+        tc("a", "second", Outcome::Error, None),
+        tc("z", "first", Outcome::Passed, Some(1)),
+        tc("a", "second", Outcome::Passed, None),
+        tc("z", "third", Outcome::Passed, Some(8)),
+        tc("z", "third", Outcome::Failed, None),
+    ];
+    assert_eq!(
+        merge_duplicates(&cases),
+        [
+            tc("z", "first", Outcome::Passed, Some(i64::MAX)),
+            tc("a", "second", Outcome::Error, None),
+            tc("z", "third", Outcome::Failed, Some(8)),
+        ]
+    );
+    assert_eq!(cases[0].outcome(), Outcome::Skipped);
+    assert_eq!(cases[2].duration_ms(), Some(1));
 }
 
 #[test]

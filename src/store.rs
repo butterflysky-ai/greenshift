@@ -593,17 +593,22 @@ impl Store {
                 .map_err(&sqlite)?;
             for c in &merged {
                 let existing: Option<i64> = find_test
-                    .query_row(params![c.suite.as_raw(), c.name.as_raw()], |r| r.get(0))
+                    .query_row(params![c.suite().as_raw(), c.name().as_raw()], |r| r.get(0))
                     .optional()
                     .map_err(&sqlite)?;
                 let test_id = match existing {
                     Some(id) => id,
                     None => add_test
-                        .insert(params![c.suite.as_raw(), c.name.as_raw()])
+                        .insert(params![c.suite().as_raw(), c.name().as_raw()])
                         .map_err(&sqlite)?,
                 };
                 add_result
-                    .execute(params![run_id, test_id, c.outcome.as_str(), c.duration_ms])
+                    .execute(params![
+                        run_id,
+                        test_id,
+                        c.outcome().as_str(),
+                        c.duration_ms()
+                    ])
                     .map_err(&sqlite)?;
             }
         }
@@ -792,27 +797,46 @@ fn severity(outcome: Outcome) -> u8 {
 
 /// Combine repeated test identities, keeping first-appearance order.
 fn merge_duplicates<'c>(cases: impl IntoIterator<Item = &'c TestCase>) -> Vec<TestCase> {
-    let mut merged: Vec<TestCase> = Vec::new();
+    struct Accumulator<'a> {
+        first: &'a TestCase,
+        outcome: Outcome,
+        duration_ms: Option<i64>,
+    }
+    let mut merged: Vec<Accumulator<'c>> = Vec::new();
     let mut index: HashMap<(&Tainted, &Tainted), usize> = HashMap::new();
     for c in cases {
-        match index.get(&(&c.suite, &c.name)) {
+        match index.get(&(c.suite(), c.name())) {
             Some(&i) => {
                 let m = &mut merged[i];
-                if severity(c.outcome) > severity(m.outcome) {
-                    m.outcome = c.outcome;
+                if severity(c.outcome()) > severity(m.outcome) {
+                    m.outcome = c.outcome();
                 }
-                m.duration_ms = match (m.duration_ms, c.duration_ms) {
+                m.duration_ms = match (m.duration_ms, c.duration_ms()) {
                     (Some(a), Some(b)) => Some(a.saturating_add(b)),
                     (a, b) => a.or(b),
                 };
             }
             None => {
-                index.insert((&c.suite, &c.name), merged.len());
-                merged.push(c.clone());
+                index.insert((c.suite(), c.name()), merged.len());
+                merged.push(Accumulator {
+                    first: c,
+                    outcome: c.outcome(),
+                    duration_ms: c.duration_ms(),
+                });
             }
         }
     }
     merged
+        .into_iter()
+        .map(|m| {
+            TestCase::new(
+                m.first.suite().clone(),
+                m.first.name().clone(),
+                m.outcome,
+                m.duration_ms,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

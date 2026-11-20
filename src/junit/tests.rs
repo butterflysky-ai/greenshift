@@ -6,16 +6,16 @@ const MALFORMED: &str = include_str!("../../fixtures/malformed.xml");
 
 fn case<'a>(report: &'a Report, suite: &str, name: &str) -> &'a TestCase {
     report
-        .cases
+        .cases()
         .iter()
-        .find(|c| c.suite.as_raw() == suite && c.name.as_raw() == name)
+        .find(|c| c.suite().as_raw() == suite && c.name().as_raw() == name)
         .unwrap_or_else(|| panic!("no case {suite} / {name} in {report:#?}"))
 }
 
 fn one(xml: &str) -> TestCase {
     let report = parse_str(xml).expect("parses");
-    assert_eq!(report.cases.len(), 1, "{report:#?}");
-    report.cases.into_iter().next().unwrap()
+    assert_eq!(report.cases().len(), 1, "{report:#?}");
+    report.into_cases().next().unwrap()
 }
 
 // --- vaelii-run-vars -------------------------------------------------------
@@ -23,7 +23,7 @@ fn one(xml: &str) -> TestCase {
 #[test]
 fn vaelii_reads_every_testcase_in_order() {
     let report = parse_str(VAELII).unwrap();
-    let names: Vec<_> = report.cases.iter().map(|c| c.name.as_raw()).collect();
+    let names: Vec<_> = report.cases().iter().map(|c| c.name().as_raw()).collect();
     assert_eq!(
         names,
         [
@@ -42,41 +42,41 @@ fn vaelii_reads_every_testcase_in_order() {
 fn vaelii_suite_is_the_namespace_from_classname() {
     let report = parse_str(VAELII).unwrap();
     let c = case(&report, "widgets.sprocket-test", "parses-a-sprocket");
-    assert_eq!(c.outcome, Outcome::Passed);
-    assert_eq!(c.duration_ms, Some(12));
+    assert_eq!(c.outcome(), Outcome::Passed);
+    assert_eq!(c.duration_ms(), Some(12));
 }
 
 #[test]
 fn vaelii_assertion_failures_are_failed() {
     let report = parse_str(VAELII).unwrap();
     let c = case(&report, "widgets.sprocket-test", "rejects-a-bent-cog");
-    assert_eq!(c.outcome, Outcome::Failed);
-    assert_eq!(c.duration_ms, Some(104));
+    assert_eq!(c.outcome(), Outcome::Failed);
+    assert_eq!(c.duration_ms(), Some(104));
 }
 
 #[test]
 fn vaelii_exception_is_an_error() {
     let report = parse_str(VAELII).unwrap();
     let c = case(&report, "widgets.sprocket-test", "spins-under-load");
-    assert_eq!(c.outcome, Outcome::Error);
-    assert_eq!(c.duration_ms, Some(1250));
+    assert_eq!(c.outcome(), Outcome::Error);
+    assert_eq!(c.duration_ms(), Some(1250));
 }
 
 #[test]
 fn vaelii_fixture_error_and_its_unrun_vars() {
     let report = parse_str(VAELII).unwrap();
     let fixtures = case(&report, "widgets.flywheel-test", "fixtures");
-    assert_eq!(fixtures.outcome, Outcome::Error);
+    assert_eq!(fixtures.outcome(), Outcome::Error);
     let unrun = case(&report, "widgets.flywheel-test", "stores-momentum");
-    assert_eq!(unrun.outcome, Outcome::Skipped);
+    assert_eq!(unrun.outcome(), Outcome::Skipped);
 }
 
 #[test]
 fn vaelii_unresolved_var_is_skipped_with_zero_time() {
     let report = parse_str(VAELII).unwrap();
     let c = case(&report, "ghost-gate", "unknown-var");
-    assert_eq!(c.outcome, Outcome::Skipped);
-    assert_eq!(c.duration_ms, Some(0));
+    assert_eq!(c.outcome(), Outcome::Skipped);
+    assert_eq!(c.duration_ms(), Some(0));
 }
 
 // --- cargo-nextest ---------------------------------------------------------
@@ -84,8 +84,8 @@ fn vaelii_unresolved_var_is_skipped_with_zero_time() {
 #[test]
 fn nextest_reads_every_testcase_across_suites() {
     let report = parse_str(NEXTEST).unwrap();
-    assert_eq!(report.cases.len(), 6);
-    let suites: Vec<_> = report.cases.iter().map(|c| c.suite.as_raw()).collect();
+    assert_eq!(report.cases().len(), 6);
+    let suites: Vec<_> = report.cases().iter().map(|c| c.suite().as_raw()).collect();
     assert_eq!(
         suites,
         [
@@ -103,41 +103,41 @@ fn nextest_reads_every_testcase_across_suites() {
 fn nextest_pass_ignores_system_out_and_err() {
     let report = parse_str(NEXTEST).unwrap();
     let c = case(&report, "sprocket-works", "widgets::parses_a_sprocket");
-    assert_eq!(c.outcome, Outcome::Passed);
-    assert_eq!(c.duration_ms, Some(4));
+    assert_eq!(c.outcome(), Outcome::Passed);
+    assert_eq!(c.duration_ms(), Some(4));
 }
 
 #[test]
 fn nextest_failure_with_output_is_failed() {
     let report = parse_str(NEXTEST).unwrap();
     let c = case(&report, "sprocket-works", "widgets::rejects_a_bent_cog");
-    assert_eq!(c.outcome, Outcome::Failed);
-    assert_eq!(c.duration_ms, Some(12));
+    assert_eq!(c.outcome(), Outcome::Failed);
+    assert_eq!(c.duration_ms(), Some(12));
 }
 
 #[test]
 fn nextest_flaky_test_that_passed_on_retry_is_passed() {
     let report = parse_str(NEXTEST).unwrap();
     let c = case(&report, "sprocket-works", "widgets::spins_eventually");
-    assert_eq!(c.outcome, Outcome::Passed);
-    assert_eq!(c.duration_ms, Some(250));
+    assert_eq!(c.outcome(), Outcome::Passed);
+    assert_eq!(c.duration_ms(), Some(250));
 }
 
 #[test]
 fn nextest_skipped() {
     let report = parse_str(NEXTEST).unwrap();
     let c = case(&report, "sprocket-works", "widgets::needs_a_lathe");
-    assert_eq!(c.outcome, Outcome::Skipped);
+    assert_eq!(c.outcome(), Outcome::Skipped);
 }
 
 #[test]
 fn nextest_abort_is_an_error_and_fractional_seconds_round() {
     let report = parse_str(NEXTEST).unwrap();
     let c = case(&report, "sprocket-works::assembly", "assembles_a_gearbox");
-    assert_eq!(c.outcome, Outcome::Error);
-    assert_eq!(c.duration_ms, Some(1457));
+    assert_eq!(c.outcome(), Outcome::Error);
+    assert_eq!(c.duration_ms(), Some(1457));
     let quick = case(&report, "sprocket-works::assembly", "lists_parts");
-    assert_eq!(quick.duration_ms, Some(2));
+    assert_eq!(quick.duration_ms(), Some(2));
 }
 
 // --- edge cases ------------------------------------------------------------
@@ -147,8 +147,8 @@ fn flat_testsuite_root() {
     let c = one(
         r#"<testsuite name="widgets"><testcase classname="widgets.Cog" name="turns" time="0.5"/></testsuite>"#,
     );
-    assert_eq!(c.suite.as_raw(), "widgets.Cog");
-    assert_eq!(c.duration_ms, Some(500));
+    assert_eq!(c.suite().as_raw(), "widgets.Cog");
+    assert_eq!(c.duration_ms(), Some(500));
 }
 
 #[test]
@@ -166,9 +166,9 @@ fn nested_testsuites_use_the_innermost_suite_name_without_classname() {
     )
     .unwrap();
     let got: Vec<_> = report
-        .cases
+        .cases()
         .iter()
-        .map(|c| (c.suite.as_raw(), c.name.as_raw()))
+        .map(|c| (c.suite().as_raw(), c.name().as_raw()))
         .collect();
     assert_eq!(
         got,
@@ -183,29 +183,29 @@ fn nested_testsuites_use_the_innermost_suite_name_without_classname() {
 #[test]
 fn classname_wins_over_suite_name() {
     let c = one(r#"<testsuite name="bin"><testcase classname="widgets" name="x"/></testsuite>"#);
-    assert_eq!(c.suite.as_raw(), "widgets");
+    assert_eq!(c.suite().as_raw(), "widgets");
 }
 
 #[test]
 fn entities_in_name_and_classname_are_unescaped() {
     let c =
         one(r#"<testsuite name="s"><testcase classname="w&amp;b" name="t&#x26;u"/></testsuite>"#);
-    assert_eq!(c.suite.as_raw(), "w&b");
-    assert_eq!(c.name.as_raw(), "t&u");
+    assert_eq!(c.suite().as_raw(), "w&b");
+    assert_eq!(c.name().as_raw(), "t&u");
 }
 
 #[test]
 fn empty_classname_falls_back_to_suite_name() {
     let c = one(r#"<testsuite name="bin"><testcase classname="" name="x"/></testsuite>"#);
-    assert_eq!(c.suite.as_raw(), "bin");
+    assert_eq!(c.suite().as_raw(), "bin");
 }
 
 #[test]
 fn missing_time_is_none() {
     let c = one(r#"<testsuite name="s"><testcase name="untimed"/></testsuite>"#);
-    assert_eq!(c.duration_ms, None);
+    assert_eq!(c.duration_ms(), None);
     let c = one(r#"<testsuite name="s"><testcase name="blank" time=""/></testsuite>"#);
-    assert_eq!(c.duration_ms, None);
+    assert_eq!(c.duration_ms(), None);
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn time_in_fractional_seconds_rounds_to_nearest_ms() {
         let c = one(&format!(
             r#"<testsuite name="s"><testcase name="t" time="{time}"/></testsuite>"#
         ));
-        assert_eq!(c.duration_ms, Some(ms), "time={time}");
+        assert_eq!(c.duration_ms(), Some(ms), "time={time}");
     }
 }
 
@@ -264,24 +264,24 @@ fn failure_and_error_together_is_failed() {
              <error message="boom"/>
              <failure message="wrong"/>
            </testcase></testsuite>"#);
-    assert_eq!(c.outcome, Outcome::Failed);
+    assert_eq!(c.outcome(), Outcome::Failed);
 }
 
 #[test]
 fn error_wins_over_skipped() {
     let c =
         one(r#"<testsuite name="s"><testcase name="t"><skipped/><error/></testcase></testsuite>"#);
-    assert_eq!(c.outcome, Outcome::Error);
+    assert_eq!(c.outcome(), Outcome::Error);
 }
 
 #[test]
 fn self_closing_and_open_skipped() {
     let c = one(r#"<testsuite name="s"><testcase name="t"><skipped/></testcase></testsuite>"#);
-    assert_eq!(c.outcome, Outcome::Skipped);
+    assert_eq!(c.outcome(), Outcome::Skipped);
     let c = one(
         r#"<testsuite name="s"><testcase name="t"><skipped>needs a lathe</skipped></testcase></testsuite>"#,
     );
-    assert_eq!(c.outcome, Outcome::Skipped);
+    assert_eq!(c.outcome(), Outcome::Skipped);
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn failure_text_with_cdata_entities_and_markup_is_ignored() {
     let c = one(
         r#"<testsuite name="s"><testcase name="t"><failure message="a &amp; b"><![CDATA[a < b]]> &amp; &#x263A; <b>bold</b></failure></testcase></testsuite>"#,
     );
-    assert_eq!(c.outcome, Outcome::Failed);
+    assert_eq!(c.outcome(), Outcome::Failed);
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn failure_nested_deeper_than_a_direct_child_is_ignored() {
     let c = one(
         r#"<testsuite name="s"><testcase name="t"><flakyFailure><failure/></flakyFailure><rerunFailure/></testcase></testsuite>"#,
     );
-    assert_eq!(c.outcome, Outcome::Passed);
+    assert_eq!(c.outcome(), Outcome::Passed);
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn suite_is_empty_without_classname_or_suite_name() {
         r#"<testsuites><testcase name="t"/></testsuites>"#,
         r#"<testsuite><testcase name="t"/></testsuite>"#,
     ] {
-        assert_eq!(one(xml).suite.as_raw(), "", "{xml}");
+        assert_eq!(one(xml).suite().as_raw(), "", "{xml}");
     }
 }
 
@@ -322,7 +322,7 @@ fn a_testcase_nested_in_a_testcase_is_ignored() {
             r#"<testsuite name="s"><testcase name="outer">{inner}</testcase></testsuite>"#
         ));
         assert_eq!(
-            (c.name.as_raw(), c.outcome),
+            (c.name().as_raw(), c.outcome()),
             ("outer", Outcome::Passed),
             "{inner}"
         );
@@ -339,16 +339,16 @@ fn properties_and_suite_level_output_are_ignored() {
            </testsuite></testsuites>"#,
     )
     .unwrap();
-    assert_eq!(report.cases.len(), 1);
+    assert_eq!(report.cases().len(), 1);
 }
 
 #[test]
 fn empty_testsuites_has_no_cases() {
-    assert!(parse_str("<testsuites/>").unwrap().cases.is_empty());
+    assert!(parse_str("<testsuites/>").unwrap().cases().is_empty());
     assert!(
         parse_str(r#"<?xml version="1.0"?><testsuites></testsuites>"#)
             .unwrap()
-            .cases
+            .cases()
             .is_empty()
     );
 }
@@ -479,8 +479,8 @@ fn references_in_attributes_greenshift_does_not_read_are_not_checked() {
     let c = one(
         r#"<testsuites foo="&bogus;"><testsuite name="s"><testcase name="t" foo="&bogus;"><failure message="&#0;"/></testcase></testsuite></testsuites>"#,
     );
-    assert_eq!((c.suite.as_raw(), c.name.as_raw()), ("s", "t"));
-    assert_eq!(c.outcome, Outcome::Failed);
+    assert_eq!((c.suite().as_raw(), c.name().as_raw()), ("s", "t"));
+    assert_eq!(c.outcome(), Outcome::Failed);
 }
 
 #[test]
@@ -545,13 +545,13 @@ fn parsed_names_keep_control_bytes_raw_but_print_escaped() {
     let report =
         parse_str("<testsuite name=\"s\u{1b}[31m\"><testcase name=\"t\u{7}\"/></testsuite>")
             .unwrap();
-    let c = &report.cases[0];
+    let c = &report.cases()[0];
     assert_eq!(
-        (c.suite.as_raw(), c.name.as_raw()),
+        (c.suite().as_raw(), c.name().as_raw()),
         ("s\u{1b}[31m", "t\u{7}")
     );
     assert_eq!(
-        (c.suite.to_string(), c.name.to_string()),
+        (c.suite().to_string(), c.name().to_string()),
         (r"s\u{1b}[31m".into(), r"t\u{7}".into())
     );
     let dump = format!("{report:#?}");
@@ -693,7 +693,7 @@ fn content_outside_the_root_element_is_an_error() {
 #[test]
 fn whitespace_comments_and_a_bom_around_the_root_are_fine() {
     let c = one("\u{feff}<?xml version=\"1.0\"?>\n<!-- c -->\n<testsuite name=\"s\"><testcase name=\"t\"/></testsuite>\n<!-- c -->\n");
-    assert_eq!(c.name.as_raw(), "t");
+    assert_eq!(c.name().as_raw(), "t");
 }
 
 #[test]
@@ -701,7 +701,7 @@ fn a_processing_instruction_after_the_root_is_fine() {
     // Unlike a declaration or a doctype, a PI is legal XML epilog content
     // (same grammar slot as a trailing comment), so it must stay accepted.
     let c = one(r#"<testsuite name="s"><testcase name="t"/></testsuite><?some-pi data?>"#);
-    assert_eq!(c.name.as_raw(), "t");
+    assert_eq!(c.name().as_raw(), "t");
 }
 
 #[test]

@@ -12,15 +12,17 @@ use rusqlite::Connection;
 
 fn record(path: &Path, count: usize) {
     let cases: Vec<_> = (0..count)
-        .map(|index| TestCase {
-            suite: Tainted::raw("scale-suite"),
-            name: Tainted::raw(format!("case-{index:06}")),
-            outcome: if index % 17 == 0 {
-                Outcome::Failed
-            } else {
-                Outcome::Passed
-            },
-            duration_ms: Some((index % 1000) as i64),
+        .map(|index| {
+            TestCase::new(
+                Tainted::raw("scale-suite"),
+                Tainted::raw(format!("case-{index:06}")),
+                if index % 17 == 0 {
+                    Outcome::Failed
+                } else {
+                    Outcome::Passed
+                },
+                Some((index % 1000) as i64),
+            )
         })
         .collect();
     let mut store = Store::open(path).unwrap();

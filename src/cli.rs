@@ -572,7 +572,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
     let mut cases = Vec::new();
     for file in &args.files {
         let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
-        cases.extend(report.cases);
+        cases.extend(report.into_cases());
     }
     let git_ref = resolve_git_ref(args.branch.as_deref(), args.tag.as_deref(), |var| {
         std::env::var_os(var)

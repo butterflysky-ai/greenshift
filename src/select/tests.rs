@@ -80,12 +80,7 @@ use crate::store::{NewRun, Store};
 use Outcome::{Error as E, Failed as F, Passed as P, Skipped as S};
 
 fn case(suite: &str, name: &str, outcome: Outcome, ms: Option<i64>) -> TestCase {
-    TestCase {
-        suite: Tainted::raw(suite),
-        name: Tainted::raw(name),
-        outcome,
-        duration_ms: ms,
-    }
+    TestCase::new(Tainted::raw(suite), Tainted::raw(name), outcome, ms)
 }
 
 /// A test in suite `s` that took `ms` milliseconds.
