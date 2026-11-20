@@ -571,7 +571,7 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
         sha256: &args.sha256,
         runs_on: &runs_on,
     };
-    let wants = init::nextest::wants(root, &settings)?;
+    let wants = init::nextest::wants(&settings);
     let actions = init::decide(root, wants, args.force)?;
     Ok(ExitCode::from(init::apply(root, &actions)?))
 }

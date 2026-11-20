@@ -173,17 +173,22 @@ fn written_files_get_ordinary_modes_and_rewritten_ones_keep_theirs() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let fresh = fresh_mode(dir.path());
-    write(dir.path(), NEXTEST_TOML, "[profile.ci]\nretries = 1\n");
-    let toml = dir.path().join(NEXTEST_TOML);
-    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o664)).unwrap();
     init(dir.path(), &["--ci", "github"]).assert().success();
-    assert_eq!(junit_path(dir.path()).as_deref(), Some("junit.xml"));
-    assert_eq!(mode(&toml), 0o664, "the rewritten file keeps its mode");
     assert_eq!(
         mode(&dir.path().join(GITHUB_WORKFLOW)),
         fresh,
         "a new file gets the mode any new file would"
     );
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), GITHUB_WORKFLOW, "# mine\n");
+    let workflow = dir.path().join(GITHUB_WORKFLOW);
+    let kept = if fresh == 0o640 { 0o600 } else { 0o640 };
+    std::fs::set_permissions(&workflow, std::fs::Permissions::from_mode(kept)).unwrap();
+    init(dir.path(), &["--ci", "github", "--force"])
+        .assert()
+        .success();
+    assert_golden(&workflow, "init-nextest-github.yml");
+    assert_eq!(mode(&workflow), kept, "the rewritten file keeps its mode");
 }
 
 #[cfg(unix)]
@@ -192,10 +197,13 @@ fn a_symlink_on_the_way_to_a_file_is_never_followed_or_replaced() {
     let outside = tempfile::tempdir().unwrap();
     let secret = outside.path().join("credentials.toml");
     std::fs::write(&secret, "[registry]\ntoken = \"secret\"\n").unwrap();
-    // A symlinked file, and a symlinked directory on the way to one.
-    for (link, target, other) in [
-        (NEXTEST_TOML, secret.clone(), GITHUB_WORKFLOW),
-        (".github", outside.path().to_owned(), NEXTEST_TOML),
+    std::fs::create_dir(outside.path().join("workflows")).unwrap();
+    // A symlinked file, and a symlinked directory on the way to one, at
+    // each level.
+    for (link, target) in [
+        (GITHUB_WORKFLOW, secret.clone()),
+        (".github/workflows", outside.path().join("workflows")),
+        (".github", outside.path().to_owned()),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let at = dir.path().join(link);
@@ -213,10 +221,10 @@ fn a_symlink_on_the_way_to_a_file_is_never_followed_or_replaced() {
                 .stderr(predicate::str::contains("symlink"));
             let meta = std::fs::symlink_metadata(&at).unwrap();
             assert!(meta.file_type().is_symlink(), "{link}: link kept");
-            assert_eq!(snapshot(outside.path()), outside_before, "{link}");
-            assert!(
-                !dir.path().join(other).exists(),
-                "{link}: nothing is written"
+            assert_eq!(
+                snapshot(outside.path()),
+                outside_before,
+                "{link}: nothing is written through it"
             );
         }
     }
@@ -227,24 +235,26 @@ fn a_symlink_on_the_way_to_a_file_is_never_followed_or_replaced() {
 fn a_file_that_cannot_be_written_means_none_is_written() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join(".config");
-    std::fs::create_dir(&config).unwrap();
-    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555)).unwrap();
-    if std::fs::File::create(config.join("probe")).is_ok() {
+    // The workflow's directory cannot be made.
+    let github = dir.path().join(".github");
+    std::fs::create_dir(&github).unwrap();
+    std::fs::set_permissions(&github, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::File::create(github.join("probe")).is_ok() {
         // Running as root, which can write anywhere: nothing to test.
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&github, std::fs::Permissions::from_mode(0o755)).unwrap();
         return;
     }
     let out = init(dir.path(), &["--ci", "github"]).assert().code(1);
-    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&github, std::fs::Permissions::from_mode(0o755)).unwrap();
     let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
-    assert!(stderr.contains(NEXTEST_TOML), "{stderr}");
+    assert!(stderr.contains(GITHUB_WORKFLOW), "{stderr}");
     assert!(stderr.contains("nothing written"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(!stdout.contains("wrote"), "{stdout}");
     assert!(
-        !dir.path().join(GITHUB_WORKFLOW).exists(),
-        "the workflow is not written without the nextest.toml"
+        snapshot(dir.path()).is_empty(),
+        "no file, staged or not, is left"
     );
-    assert!(snapshot(dir.path()).is_empty());
 }
 
 #[test]
@@ -377,19 +387,6 @@ fn runs_on_names_the_runner() {
 
 const NEXTEST_TOML: &str = ".config/nextest.toml";
 
-/// The JUnit path `.config/nextest.toml` in `dir` gives the default
-/// profile, as nextest would read it.
-fn junit_path(dir: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(dir.join(NEXTEST_TOML)).unwrap();
-    let doc: toml_edit::DocumentMut = text.parse().unwrap();
-    doc.get("profile")?
-        .get("default")?
-        .get("junit")?
-        .get("path")?
-        .as_str()
-        .map(str::to_owned)
-}
-
 fn write(dir: &Path, path: &str, text: &str) {
     let path = dir.join(path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -397,176 +394,38 @@ fn write(dir: &Path, path: &str, text: &str) {
 }
 
 #[test]
-fn a_missing_nextest_toml_is_written_with_the_junit_stanza() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = stdout_of(&mut init(dir.path(), &["--ci", "github"]));
-    assert!(out.contains(&format!("wrote {NEXTEST_TOML}")), "{out}");
-    assert_eq!(junit_path(dir.path()).as_deref(), Some("junit.xml"));
-    let text = std::fs::read_to_string(dir.path().join(NEXTEST_TOML)).unwrap();
-    assert!(text.starts_with(STANZA_COMMENT), "{text}");
-}
-
-/// The comment `init` puts above the stanza it adds.
-const STANZA_COMMENT: &str = "# JUnit output, for `greenshift ingest` and other JUnit readers.\n\
-                              # Added by `greenshift init nextest`.\n";
-
-#[test]
-fn an_existing_junit_stanza_is_left_alone_even_with_force() {
-    for force in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let mine = "# mine\n[profile.default.junit]\npath = \"results/junit.xml\"\n";
-        write(dir.path(), NEXTEST_TOML, mine);
-        let mut cmd = init(dir.path(), &["--ci", "github"]);
-        if force {
-            cmd.arg("--force");
-        }
-        let out = stdout_of(&mut cmd);
-        assert!(
-            out.contains(&format!("{NEXTEST_TOML} already sets")),
-            "{out}"
-        );
-        let text = std::fs::read_to_string(dir.path().join(NEXTEST_TOML)).unwrap();
-        assert_eq!(text, mine, "force={force}");
-    }
-}
-
-#[test]
-fn the_stanza_is_added_to_a_nextest_toml_without_one_keeping_the_rest() {
-    let cases = [
-        "# Our nextest settings.\n[profile.ci]\nfail-fast = false # keep going\n\n\
-         [[profile.default.overrides]]\nfilter = 'test(slow)'\nslow-timeout = \"5m\"\n",
-        "[profile.default]\nretries = 2\n",
-        "[profile.default.junit]\nstore-success-output = true\n",
-        "profile.default.retries = 1\n",
-        "",
-    ];
-    for mine in cases {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), NEXTEST_TOML, mine);
-        let out = stdout_of(&mut init(dir.path(), &["--ci", "github"]));
-        assert!(
-            out.contains(&format!("added the JUnit stanza to {NEXTEST_TOML}")),
-            "{mine:?}: {out}"
-        );
-        assert_eq!(
-            junit_path(dir.path()).as_deref(),
-            Some("junit.xml"),
-            "{mine:?}"
-        );
-        let text = std::fs::read_to_string(dir.path().join(NEXTEST_TOML)).unwrap();
-        for line in mine.lines() {
-            assert!(text.contains(line), "{mine:?}: lost {line:?} in\n{text}");
-        }
-        if !mine.contains("[profile.default.junit]") {
-            assert!(
-                text.contains(&format!("{STANZA_COMMENT}[profile.default.junit]\n")),
-                "{mine:?}: no comment above the new stanza in\n{text}"
-            );
-        }
-        let mut expected = leaves(mine);
-        expected.insert("profile.default.junit.path".into(), "\"junit.xml\"".into());
-        assert_eq!(
-            leaves(&text),
-            expected,
-            "{mine:?}: changed beyond the stanza"
-        );
-        // And a second run leaves it be.
-        let again = snapshot(dir.path());
-        init(dir.path(), &["--ci", "github"]).assert().success();
-        assert_eq!(snapshot(dir.path()), again, "{mine:?}");
-    }
-}
-
-/// Every value in the TOML `text`, by its dotted key, as TOML writes it.
-/// Arrays of tables are keyed by index.
-fn leaves(text: &str) -> std::collections::BTreeMap<String, String> {
-    fn walk(
-        prefix: &str,
-        item: &toml_edit::Item,
-        out: &mut std::collections::BTreeMap<String, String>,
-    ) {
-        let key = |k: &str| {
-            if prefix.is_empty() {
-                k.to_owned()
-            } else {
-                format!("{prefix}.{k}")
-            }
-        };
-        if let Some(table) = item.as_table_like() {
-            for (k, v) in table.iter() {
-                walk(&key(k), v, out);
-            }
-        } else if let Some(array) = item.as_array_of_tables() {
-            for (at, table) in array.iter().enumerate() {
-                for (k, v) in table.iter() {
-                    walk(&format!("{prefix}[{at}].{k}"), v, out);
-                }
-            }
-        } else if let Some(value) = item.as_value() {
-            out.insert(
-                prefix.to_owned(),
-                value.clone().decorated("", "").to_string(),
-            );
-        }
-    }
-    let doc: toml_edit::DocumentMut = text.parse().unwrap();
-    let mut out = std::collections::BTreeMap::new();
-    walk("", doc.as_item(), &mut out);
-    out
-}
-
-#[test]
-fn a_nextest_toml_that_cannot_be_read_as_toml_is_never_touched() {
-    for force in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), NEXTEST_TOML, "[profile.default\nnot toml");
-        let before = snapshot(dir.path());
-        let mut cmd = init(dir.path(), &["--ci", "github"]);
-        if force {
-            cmd.arg("--force");
-        }
-        cmd.assert()
-            .code(1)
-            .stderr(predicate::str::contains(NEXTEST_TOML));
-        assert_eq!(snapshot(dir.path()), before, "force={force}");
-    }
-}
-
-#[test]
-fn a_nextest_toml_that_is_not_toml_is_quoted_escaped() {
-    let dir = tempfile::tempdir().unwrap();
-    write(
-        dir.path(),
-        NEXTEST_TOML,
-        "x = \"\u{1b}[31mred\u{1b}]0;title\u{7}\" oops\n",
-    );
-    let out = init(dir.path(), &["--ci", "github"]).assert().code(1);
-    let stderr = &out.get_output().stderr;
-    assert!(
-        !stderr.iter().any(|&b| b == 0x1b || b == 0x07),
-        "{}",
-        String::from_utf8_lossy(stderr)
-    );
-    let stderr = String::from_utf8_lossy(stderr);
-    assert!(stderr.contains("is not TOML"), "{stderr}");
-    assert!(stderr.contains("\\u{1b}[31mred"), "{stderr}");
-}
-
-#[test]
-fn a_junit_setting_of_the_wrong_shape_is_never_touched() {
-    for mine in [
-        "[profile.default]\njunit = \"junit.xml\"\n",
-        "profile = 3\n",
-        "[profile.default.junit]\npath = 7\n",
+fn a_nextest_toml_is_left_byte_for_byte_and_none_is_created() {
+    for forge in [
+        &["--ci", "github"][..],
+        &["--ci", "forgejo", "--accept-unisolated"],
     ] {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), NEXTEST_TOML, mine);
-        let before = snapshot(dir.path());
-        init(dir.path(), &["--ci", "github", "--force"])
-            .assert()
-            .code(1)
-            .stderr(predicate::str::contains(NEXTEST_TOML));
-        assert_eq!(snapshot(dir.path()), before, "{mine:?}");
+        let out = stdout_of(&mut init(dir.path(), forge));
+        assert!(!dir.path().join(".config").exists(), "{forge:?}");
+        assert!(!out.contains("nextest.toml"), "{forge:?}: {out}");
+        for mine in [
+            "# mine\n[profile.default.junit]\npath = \"results/junit.xml\"\n",
+            "[profile.ci]\nretries = 1\n",
+            "",
+            "[profile.default\nnot toml",
+            "x = \"\u{1b}[31mred\" oops\n",
+        ] {
+            for force in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                write(dir.path(), NEXTEST_TOML, mine);
+                let mut cmd = init(dir.path(), forge);
+                if force {
+                    cmd.arg("--force");
+                }
+                let out = stdout_of(&mut cmd);
+                assert!(!out.contains("nextest.toml"), "{forge:?} {mine:?}: {out}");
+                assert_eq!(
+                    std::fs::read(dir.path().join(NEXTEST_TOML)).unwrap(),
+                    mine.as_bytes(),
+                    "{forge:?} {mine:?} force={force}"
+                );
+            }
+        }
     }
 }
 
@@ -574,7 +433,7 @@ fn a_junit_setting_of_the_wrong_shape_is_never_touched() {
 fn a_conflict_anywhere_means_nothing_is_written_anywhere() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), GITHUB_WORKFLOW, "# mine\n");
-    write(dir.path(), NEXTEST_TOML, "[profile.ci]\nretries = 1\n");
+    write(dir.path(), "README.md", "# mine too\n");
     let before = snapshot(dir.path());
     init(dir.path(), &["--ci", "github"]).assert().code(1);
     assert_eq!(snapshot(dir.path()), before);
@@ -601,7 +460,7 @@ fn forgejo_writes_the_golden_workflow_and_says_it_is_not_isolated() {
         &["--ci", "forgejo", "--accept-unisolated"],
     ));
     assert!(out.contains(&format!("wrote {FORGEJO_WORKFLOW}")), "{out}");
-    assert!(out.contains(&format!("wrote {NEXTEST_TOML}")), "{out}");
+    assert!(!dir.path().join(NEXTEST_TOML).exists());
     assert!(!dir.path().join(".github").exists());
     let workflow = dir.path().join(FORGEJO_WORKFLOW);
     assert_golden(&workflow, "init-nextest-forgejo.yml");

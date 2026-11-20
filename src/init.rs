@@ -5,10 +5,8 @@
 //! what content ([`Want`]); this module decides what to do with each
 //! against what is already on disk ([`decide`]), and then writes, all or
 //! nothing: a file that exists and differs is left alone unless `--force`
-//! is given, and while one is left alone, none is written. A file the
-//! backend merges ([`Want::Merged`]) was already decided by the backend,
-//! which read it; `decide` only passes that on. A path through a symlink
-//! is never read or written, and every file is staged before any is put
+//! is given, and while one is left alone, none is written. A path
+//! through a symlink is never read or written, and every file is staged before any is put
 //! in place. A second run with the same inputs finds every file as it
 //! would write it and changes nothing.
 //!
@@ -220,22 +218,6 @@ pub enum Want {
     /// Exactly this content: written if missing; if present and
     /// different, replaced only with `--force`.
     Generated { path: PathBuf, content: String },
-    /// An edit of what is there now (`None` if nothing is), worked out
-    /// by the backend from the current content: never a conflict, since
-    /// the edit keeps whatever else the file holds.
-    Merged {
-        path: PathBuf,
-        outcome: MergeOutcome,
-    },
-}
-
-/// What a backend's merge makes of a file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MergeOutcome {
-    /// Write this content, creating the file or adding to it.
-    Write { content: String, what: &'static str },
-    /// Leave the file as it is, for this reason.
-    Keep { why: String },
 }
 
 /// What `init` does with one wanted file.
@@ -247,7 +229,7 @@ pub enum Action {
         content: String,
         verb: &'static str,
     },
-    /// Nothing to do: already as wanted, or kept for the reason given.
+    /// Nothing to do: already as wanted, for the reason given.
     Unchanged { path: PathBuf, why: String },
     /// The file exists and differs, and `--force` was not given.
     Conflict { path: PathBuf },
@@ -278,14 +260,6 @@ pub fn decide(root: &Path, wants: Vec<Want>, force: bool) -> anyhow::Result<Vec<
                     Some(_) => Action::Conflict { path },
                 })
             }
-            Want::Merged { path, outcome } => Ok(match outcome {
-                MergeOutcome::Write { content, what } => Action::Write {
-                    path,
-                    content,
-                    verb: what,
-                },
-                MergeOutcome::Keep { why } => Action::Unchanged { path, why },
-            }),
         })
         .collect()
 }

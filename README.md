@@ -411,9 +411,12 @@ one step. Commit what it writes as is:
   job, unless it matches `--sha256`. Neither has a default: take the
   checksum from the release's `.sha256` file (see **Install a release**)
   and check it independently.
-- **JUnit**: `[profile.default.junit] path = "junit.xml"` in
-  `.config/nextest.toml`, added only when nothing there sets that path.
-  The rest of the file is kept as it is.
+
+That is all it writes. `run nextest` has nextest send JUnit to files of
+its own (see **JUnit** under Run nextest), so it needs no stanza in
+`.config/nextest.toml`, and `init` neither reads nor changes that file.
+Running `greenshift ingest` on nextest's own JUnit output still needs the
+stanza shown under Ingest.
 
 On Forgejo the workflow is **not isolated**: stock Forgejo gives every
 step, the tests included, a token that can write the repository, and
@@ -429,16 +432,14 @@ below). The generated file says so too.
 
 It prints what it wrote. A second run with the same options changes
 nothing and says so. A generated file that exists and differs is left
-alone, and then nothing at all is written, unless `--force` is given;
-`--force` never replaces a JUnit path `.config/nextest.toml` already sets.
+alone, and then nothing at all is written, unless `--force` is given.
 To pin a new release, run it again with the new `--release`, `--sha256`
 and `--force`.
 
 Exit status: 0 when the repository is set up, 1 for a file left alone,
 one reached through a symlink (never followed or replaced), or one that
-cannot be read or written (such as a `.config/nextest.toml` that is not
-TOML), with nothing written, and 2 for a usage error, such as a missing
-or malformed `--release` or `--sha256`.
+cannot be read or written, with nothing written, and 2 for a usage
+error, such as a missing or malformed `--release` or `--sha256`.
 
 ## Durable CI history
 
