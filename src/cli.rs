@@ -155,6 +155,13 @@ pub struct InitNextestArgs {
     #[arg(long, value_name = "LABEL", value_parser = crate::init::runner_label)]
     pub runs_on: Option<String>,
 
+    /// Write the Forgejo workflow although it cannot be isolated: stock
+    /// Forgejo gives every step a token with write access to the
+    /// repository, so the tests can write the history ref too. Required
+    /// with --ci forgejo.
+    #[arg(long)]
+    pub accept_unisolated: bool,
+
     /// Replace generated files that exist and differ.
     #[arg(long)]
     pub force: bool,
@@ -527,9 +534,25 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
             return Ok(ExitCode::from(2));
         }
     };
-    if forge == Forge::Forgejo {
-        eprintln!("greenshift: usage error: --ci forgejo is not supported yet");
-        return Ok(ExitCode::from(2));
+    match (forge, args.accept_unisolated) {
+        (Forge::Forgejo, false) => {
+            eprintln!(
+                "greenshift: usage error: the Forgejo workflow is not isolated: stock Forgejo \
+                 gives every step, the tests included, a token with write access to the \
+                 repository outside fork pull requests, and ignores `permissions` (see \
+                 \"Forgejo capability gate\" in greenshift's docs/design/durable-history.md). \
+                 Give --accept-unisolated to write it anyway."
+            );
+            return Ok(ExitCode::from(2));
+        }
+        (Forge::Github, true) => {
+            eprintln!(
+                "greenshift: usage error: --accept-unisolated is for --ci forgejo; \
+                 the GitHub workflow is isolated"
+            );
+            return Ok(ExitCode::from(2));
+        }
+        _ => {}
     }
     if args.ci.is_none() {
         println!(

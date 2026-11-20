@@ -428,3 +428,58 @@ fn a_conflict_anywhere_means_nothing_is_written_anywhere() {
     init(dir.path(), &["--ci", "github"]).assert().code(1);
     assert_eq!(snapshot(dir.path()), before);
 }
+
+const FORGEJO_WORKFLOW: &str = ".forgejo/workflows/greenshift.yml";
+
+#[test]
+fn forgejo_needs_the_token_limitation_accepted_and_otherwise_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &["--ci", "forgejo"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--accept-unisolated"))
+        .stderr(predicate::str::contains("write access"));
+    assert!(snapshot(dir.path()).is_empty());
+}
+
+#[test]
+fn forgejo_writes_the_golden_workflow_and_says_it_is_not_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = stdout_of(&mut init(
+        dir.path(),
+        &["--ci", "forgejo", "--accept-unisolated"],
+    ));
+    assert!(out.contains(&format!("wrote {FORGEJO_WORKFLOW}")), "{out}");
+    assert!(out.contains(&format!("wrote {NEXTEST_TOML}")), "{out}");
+    assert!(!dir.path().join(".github").exists());
+    let workflow = dir.path().join(FORGEJO_WORKFLOW);
+    assert_golden(&workflow, "init-nextest-forgejo.yml");
+    let text = std::fs::read_to_string(&workflow).unwrap();
+    assert!(text.contains("THIS WORKFLOW IS NOT ISOLATED"), "{text}");
+    assert!(
+        !text.contains("permissions:"),
+        "permissions would be ignored"
+    );
+}
+
+#[test]
+fn forgejo_is_found_from_the_repository_and_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".forgejo")).unwrap();
+    let out = stdout_of(&mut init(dir.path(), &["--accept-unisolated"]));
+    assert!(out.contains("forgejo"), "{out}");
+    assert!(dir.path().join(FORGEJO_WORKFLOW).is_file());
+    let before = snapshot(dir.path());
+    let out = stdout_of(&mut init(dir.path(), &["--accept-unisolated"]));
+    assert!(out.contains("nothing to change"), "{out}");
+    assert_eq!(snapshot(dir.path()), before);
+}
+
+#[test]
+fn accepting_the_forgejo_limitation_is_refused_for_github() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &["--ci", "github", "--accept-unisolated"])
+        .assert()
+        .code(2);
+    assert!(snapshot(dir.path()).is_empty());
+}

@@ -12,6 +12,12 @@ use super::{Forge, MergeOutcome, Release, Sha256, Want};
 /// reference workflow pins it.
 pub const NEXTEST_VERSION: &str = "0.9.143";
 
+/// The rustup the Forgejo workflow installs Rust with when the runner has
+/// none, and the SHA-256 of its x86_64-unknown-linux-gnu `rustup-init`, as
+/// static.rust-lang.org publishes it (checked against the download).
+pub const RUSTUP_VERSION: &str = "1.29.3";
+pub const RUSTUP_SHA256: &str = "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55";
+
 /// What the workflow is made from.
 #[derive(Debug, Clone)]
 pub struct Settings<'a> {
@@ -128,7 +134,7 @@ fn one_line(text: &str) -> String {
 pub fn workflow(settings: &Settings<'_>) -> String {
     let template = match settings.forge {
         Forge::Github => include_str!("nextest/github.yml"),
-        Forge::Forgejo => unimplemented!("forgejo"),
+        Forge::Forgejo => include_str!("nextest/forgejo.yml"),
     };
     fill(template, settings)
 }
@@ -136,8 +142,12 @@ pub fn workflow(settings: &Settings<'_>) -> String {
 /// `template` with its `@NAME@` placeholders filled in.
 fn fill(template: &str, settings: &Settings<'_>) -> String {
     let install = indent(include_str!("nextest/install.sh"), 10);
+    let install_rust = indent(include_str!("nextest/install-rust.sh"), 10);
     template
         .replace("@INSTALL@\n", &install)
+        .replace("@INSTALL_RUST@\n", &install_rust)
+        .replace("@RUSTUP@", RUSTUP_VERSION)
+        .replace("@RUSTUP_SHA256@", RUSTUP_SHA256)
         .replace("@RELEASE@", settings.release.as_str())
         .replace("@SHA256@", settings.sha256.as_str())
         .replace("@RUNS_ON@", settings.runs_on)
@@ -166,6 +176,9 @@ const PLACEHOLDERS: &[&str] = &[
     "@SHA256@",
     "@RUNS_ON@",
     "@NEXTEST@",
+    "@INSTALL_RUST@",
+    "@RUSTUP@",
+    "@RUSTUP_SHA256@",
 ];
 
 #[cfg(test)]
@@ -176,7 +189,7 @@ mod tests {
     fn every_placeholder_is_filled() {
         let release: Release = "v0.2.0".parse().unwrap();
         let sha256: Sha256 = "a".repeat(64).parse().unwrap();
-        for forge in [Forge::Github] {
+        for forge in [Forge::Github, Forge::Forgejo] {
             let settings = Settings {
                 forge,
                 release: &release,

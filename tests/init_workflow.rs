@@ -228,10 +228,37 @@ fn the_install_step_fails_closed_on_a_checksum_mismatch() {
 
 /// The forges `init nextest` writes for.
 fn forges() -> &'static [&'static str] {
-    &["github"]
+    &["github", "forgejo"]
 }
 
 /// The arguments `init nextest --ci forge` needs beyond the pin.
-fn extra_for(_forge: &str) -> &'static [&'static str] {
-    &[]
+fn extra_for(forge: &str) -> &'static [&'static str] {
+    match forge {
+        "forgejo" => &["--accept-unisolated"],
+        _ => &[],
+    }
+}
+
+#[test]
+fn forgejo_keeps_the_publisher_apart_but_claims_no_permissions() {
+    let workflow = generated("forgejo", &"a".repeat(64), &["--accept-unisolated"]);
+    assert_publisher_separation(&workflow);
+    // Forgejo ignores `permissions`; writing them would claim an
+    // isolation the test job does not have.
+    assert!(workflow["permissions"].is_null());
+    for job in ["test", "publish"] {
+        assert!(workflow["jobs"][job]["permissions"].is_null(), "{job}");
+        for step in steps(&workflow, job) {
+            if let Some(uses) = step["uses"].as_str() {
+                // Not resolved against the instance's DEFAULT_ACTIONS_URL.
+                assert!(uses.starts_with("https://"), "{uses}");
+                if uses.contains("artifact@") {
+                    // Stock v4 artifact actions refuse to run on Forgejo.
+                    assert!(uses.contains("/forgejo/"), "{uses}");
+                }
+            }
+        }
+    }
+    let rust = step(&workflow, "test", "Install Rust when the runner has none");
+    assert!(rust["run"].as_str().unwrap().contains("sha256sum --check"));
 }
