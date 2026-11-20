@@ -19,6 +19,8 @@ use text::FrozenText;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
+    #[error("history operation cancelled")]
+    Cancelled,
     #[error("snapshot I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("snapshot SQLite error: {0}")]
@@ -151,6 +153,11 @@ fn open_checked(path: &Path) -> Result<(Connection, i64), SnapshotError> {
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
     // One read transaction covers schema validation and every subsequent query.
     conn.execute_batch("BEGIN")?;
+    let version = checked_connection_version(&conn)?;
+    Ok((conn, version))
+}
+
+fn checked_connection_version(conn: &Connection) -> Result<i64, SnapshotError> {
     let app: i32 = conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if app != APPLICATION_ID {
@@ -160,7 +167,7 @@ fn open_checked(path: &Path) -> Result<(Connection, i64), SnapshotError> {
         return Err(invalid("unsupported snapshot schema version"));
     }
     let expected = store::canonical_schema(version)?;
-    if schema(&conn)? != schema(&expected)? {
+    if schema(conn)? != schema(&expected)? {
         return Err(invalid(
             "schema does not exactly match this greenshift release",
         ));
@@ -177,7 +184,7 @@ fn open_checked(path: &Path) -> Result<(Connection, i64), SnapshotError> {
     {
         return Err(invalid("broken foreign key"));
     }
-    Ok((conn, version))
+    Ok(version)
 }
 
 fn borrowed_text<'row>(
@@ -207,6 +214,10 @@ fn optional_text(
 
 fn load(path: &Path) -> Result<Data, SnapshotError> {
     let (conn, version) = open_checked(path)?;
+    load_connection(&conn, version)
+}
+
+fn load_connection(conn: &Connection, version: i64) -> Result<Data, SnapshotError> {
     // Normalize repeated test keys rather than expanding their text per result.
     // There is intentionally no arbitrary history size/allocation limit. Inputs
     // remain capable of exhausting memory, disk or CPU; see the design notes.
@@ -328,7 +339,7 @@ fn load(path: &Path) -> Result<Data, SnapshotError> {
         });
     }
     if version < 4 {
-        for (id, identity) in store::legacy_run_identities(&conn)? {
+        for (id, identity) in store::legacy_run_identities(conn)? {
             runs.get_mut(&id)
                 .ok_or_else(|| invalid("legacy identity has no run"))?
                 .metadata
@@ -362,8 +373,21 @@ fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
     let mut conn = Connection::open(store::as_plain_file(temporary.path()))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     let tx = conn.transaction()?;
+    insert_data(&tx, data)?;
+    tx.commit()?;
+    drop(conn);
+    validate(temporary.path())?;
+    temporary.as_file().sync_all()?;
+    check_output(output)?;
+    temporary
+        .persist(output)
+        .map_err(|error| SnapshotError::Io(error.error))?;
+    Ok(())
+}
+
+fn insert_data(conn: &Connection, data: &Data) -> Result<(), SnapshotError> {
     for key in data.tests.iter() {
-        tx.execute(
+        conn.execute(
             "INSERT INTO tests(suite,name) VALUES (?1,?2)",
             params![key.suite().as_str(), key.name().as_str()],
         )?;
@@ -374,10 +398,10 @@ fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
     });
     for run in chronological {
         let metadata = &run.metadata;
-        tx.execute("INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![metadata.commit.as_ref().map(FrozenText::as_str),metadata.source.as_str(),metadata.at.as_str(),metadata.partial,metadata.branch.as_ref().map(FrozenText::as_str),metadata.tag.as_ref().map(FrozenText::as_str),metadata.history_id.as_str()])?;
-        let id = tx.last_insert_rowid();
+        conn.execute("INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![metadata.commit.as_ref().map(FrozenText::as_str),metadata.source.as_str(),metadata.at.as_str(),metadata.partial,metadata.branch.as_ref().map(FrozenText::as_str),metadata.tag.as_ref().map(FrozenText::as_str),metadata.history_id.as_str()])?;
+        let id = conn.last_insert_rowid();
         for (position, path) in run.files.iter() {
-            tx.execute(
+            conn.execute(
                 "INSERT INTO run_files(run_id,position,path) VALUES (?1,?2,?3)",
                 params![id, position, path.as_bytes()],
             )?;
@@ -388,20 +412,12 @@ fn write(data: &Data, output: &Path) -> Result<(), SnapshotError> {
                 .ok_or_else(|| invalid("result test missing from snapshot"))?;
             let test = i64::try_from(result.test.index() + 1)
                 .map_err(|_| invalid("test id exceeds SQLite range"))?;
-            tx.execute(
+            conn.execute(
                 "INSERT INTO results(run_id,test_id,outcome,duration_ms) VALUES (?1,?2,?3,?4)",
                 params![id, test, result.outcome.as_str(), result.duration],
             )?;
         }
     }
-    tx.commit()?;
-    drop(conn);
-    validate(temporary.path())?;
-    temporary.as_file().sync_all()?;
-    check_output(output)?;
-    temporary
-        .persist(output)
-        .map_err(|error| SnapshotError::Io(error.error))?;
     Ok(())
 }
 
@@ -443,6 +459,10 @@ fn remap_runs(
 pub fn merge(current: &Path, incoming: &Path, output: &Path) -> Result<(), SnapshotError> {
     let data = load(current)?;
     let other = load(incoming)?;
+    write(&union(data, other)?, output)
+}
+
+fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
     let mut keys = BTreeSet::new();
     for key in data.tests.iter().chain(other.tests.iter()) {
         if !keys.contains(key) {
@@ -489,16 +509,242 @@ pub fn merge(current: &Path, incoming: &Path, output: &Path) -> Result<(), Snaps
         }
     }
     runs.extend(additions);
-    let data = Data {
+    Ok(Data {
         tests: merged,
         runs: freeze_runs(runs.into_iter()),
+    })
+}
+
+/// Import into the existing SQLite inode while excluding other SQLite writers.
+/// Incoming schemas remain data: only the trusted schema factory supplies DDL.
+pub(crate) fn restore_existing(
+    db: &Path,
+    incoming: &Path,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(), SnapshotError> {
+    restore_existing_transaction(db, incoming, &mut cancelled, |_, _| Ok(()))
+}
+
+#[derive(Clone, Copy)]
+enum RestoreCheckpoint {
+    Reserved,
+    BeforeCommit,
+}
+
+// The private observer gives transaction tests an exact boundary without
+// process control or relying on how often the cancellation predicate is polled.
+fn restore_existing_transaction(
+    db: &Path,
+    incoming: &Path,
+    cancelled: &mut impl FnMut() -> bool,
+    mut observe: impl FnMut(RestoreCheckpoint, &Connection) -> Result<(), SnapshotError>,
+) -> Result<(), SnapshotError> {
+    if cancelled() {
+        return Err(SnapshotError::Cancelled);
+    }
+    let incoming = load(incoming)?;
+    check_output(db)?;
+    let mut conn = Connection::open_with_flags(
+        store::as_plain_file(db),
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    // Reserve the writer before the first local schema or row read. Never
+    // replace this inode: already-open SQLite handles must follow the commit.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    observe(RestoreCheckpoint::Reserved, &tx)?;
+    if cancelled() {
+        return Err(SnapshotError::Cancelled);
+    }
+    let local = if schema(&tx)?.is_empty() {
+        Data {
+            tests: DictionaryBuilder::default().freeze(),
+            runs: freeze_runs(std::iter::empty()),
+        }
+    } else {
+        let version = checked_connection_version(&tx)?;
+        load_connection(&tx, version)?
     };
-    write(&data, output)
+    let data = union(local, incoming)?;
+    if cancelled() {
+        return Err(SnapshotError::Cancelled);
+    }
+    let canonical = store::canonical_schema(SCHEMA_VERSION)?;
+    let definitions = schema(&canonical)?;
+    tx.execute_batch("DROP TABLE IF EXISTS results; DROP TABLE IF EXISTS run_files; DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS tests;")?;
+    for kind in ["table", "index"] {
+        for (object_kind, _, _, sql) in &definitions {
+            if object_kind == kind {
+                if let Some(sql) = sql {
+                    tx.execute_batch(sql)?;
+                }
+            }
+        }
+    }
+    tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    insert_data(&tx, &data)?;
+    let version = checked_connection_version(&tx)?;
+    load_connection(&tx, version)?;
+    observe(RestoreCheckpoint::BeforeCommit, &tx)?;
+    if cancelled() {
+        return Err(SnapshotError::Cancelled);
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sources(path: &Path) -> Vec<String> {
+        let conn = Connection::open(path).unwrap();
+        let sources = conn
+            .prepare("SELECT source FROM runs ORDER BY source")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        sources
+    }
+
+    #[test]
+    fn test_restore_existing_reserves_writer_before_local_read_and_preserves_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        let incoming = dir.path().join("incoming");
+        fixture(&local, "local");
+        fixture(&incoming, "remote");
+        let writer = Connection::open(&local).unwrap();
+        writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&local).unwrap().ino()
+        };
+        let mut reserved = false;
+        restore_existing_transaction(&local,&incoming,&mut||false,|checkpoint,_| {
+            if matches!(checkpoint,RestoreCheckpoint::Reserved) {
+                // No local schema/data query has run yet. A DEFERRED mutation
+                // allows this ordinary writer, so this assertion must go red.
+                let result=writer.execute("INSERT INTO runs(source,history_id) VALUES ('competing',lower(hex(randomblob(16))))",[]);
+                assert!(matches!(result,Err(rusqlite::Error::SqliteFailure(error,_)) if error.code==rusqlite::ErrorCode::DatabaseBusy));
+                reserved=true;
+            }
+            Ok(())
+        }).unwrap();
+        assert!(reserved);
+        writer
+            .execute(
+                "INSERT INTO runs(source,history_id) VALUES ('after',lower(hex(randomblob(16))))",
+                [],
+            )
+            .unwrap();
+        assert_eq!(sources(&local), vec!["after", "local", "remote"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(&local).unwrap().ino(), inode);
+        }
+    }
+
+    #[test]
+    fn test_restore_existing_cancel_before_commit_rolls_back_rewritten_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        let incoming = dir.path().join("incoming");
+        fixture(&local, "local");
+        fixture(&incoming, "remote");
+        let before = std::fs::read(&local).unwrap();
+        let cancel = std::cell::Cell::new(false);
+        let result = restore_existing_transaction(
+            &local,
+            &incoming,
+            &mut || cancel.get(),
+            |checkpoint, tx| {
+                if matches!(checkpoint, RestoreCheckpoint::BeforeCommit) {
+                    assert_eq!(
+                        tx.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                            .unwrap(),
+                        2
+                    );
+                    cancel.set(true);
+                }
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(SnapshotError::Cancelled)));
+        assert!(cancel.get());
+        assert_eq!(sources(&local), vec!["local"]);
+        assert_eq!(std::fs::read(&local).unwrap(), before);
+    }
+
+    #[test]
+    fn test_restore_existing_supported_schemas_upgrade_in_place_and_keep_identities() {
+        for version in 1..=SCHEMA_VERSION {
+            let dir = tempfile::tempdir().unwrap();
+            let local = dir.path().join("local");
+            let incoming = dir.path().join("incoming");
+            if version < 4 {
+                historical_fixture(&local, version);
+            } else {
+                fixture(&local, "legacy");
+            }
+            fixture(&incoming, "remote");
+            let before = load(&local)
+                .unwrap()
+                .runs
+                .iter()
+                .map(|run| run.metadata.history_id.as_str().to_owned())
+                .collect::<Vec<_>>();
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(&local).unwrap().ino()
+            };
+            restore_existing(&local, &incoming, || false).unwrap();
+            assert_eq!(sources(&local), vec!["legacy", "remote"]);
+            let restored = load(&local).unwrap();
+            assert!(before.iter().all(|id| restored.runs.iter().any(|run| run
+                .metadata
+                .history_id
+                .as_str()
+                == id)));
+            let conn = Connection::open(&local).unwrap();
+            assert_eq!(checked_connection_version(&conn).unwrap(), SCHEMA_VERSION);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(std::fs::metadata(&local).unwrap().ino(), inode);
+            }
+        }
+    }
+
+    #[test]
+    fn test_restore_existing_identity_conflict_rolls_back_without_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        let incoming = dir.path().join("incoming");
+        fixture(&local, "local");
+        std::fs::copy(&local, &incoming).unwrap();
+        Connection::open(&incoming)
+            .unwrap()
+            .execute("UPDATE runs SET source='conflict'", [])
+            .unwrap();
+        let before = std::fs::read(&local).unwrap();
+        assert!(matches!(
+            restore_existing(&local, &incoming, || false),
+            Err(SnapshotError::Invalid(
+                "one run identity has conflicting contents"
+            ))
+        ));
+        assert_eq!(std::fs::read(&local).unwrap(), before);
+    }
 
     #[test]
     fn test_frozen_snapshot_layout_and_capacity_receipt() {

@@ -28,6 +28,13 @@ publication-policy refusals exit 2; cancellation exits 130. Successful publish
 prints the new commit identity even if its optional cache copy cannot be saved;
 a failed publish prints no identity.
 
+An existing local database is updated in place under an SQLite write transaction,
+so a completed local write cannot be discarded by replacing its pathname with a
+stale copy. Creating a missing local database does not overwrite a concurrent
+creator; that database is merged transactionally instead. This relies on ordinary
+SQLite writer coordination, not protection against unrelated direct filesystem
+replacement or deletion of the selected database.
+
 On Unix, authentication is supplied through `GREENSHIFT_HISTORY_TOKEN` for HTTPS
 only; authenticated HTTP and redirects are refused. Unauthenticated HTTP and
 local paths/file URLs are also supported; SSH/custom helpers are not. Token
@@ -105,12 +112,14 @@ that policy for CI invocations and requires `--default-branch` there.
 
 The parser accepts only known supported schema versions/application id, disallows extra
 views/triggers/tables/indexes, verifies integrity and foreign keys, checks types,
-IDs/outcomes/durations/ref exclusivity. Input connections are read-only and defensive with
+IDs/outcomes/durations/ref exclusivity. Artifact connections are read-only and defensive with
 untrusted schemas disabled. Export constructs a new canonical database using
 bound values; no input SQL is executed as SQL. Known older schemas are validated
 against their own exact trusted migration-prefix schema before data is projected
 into a fresh current database. Newer unknown versions are refused without
-altering the source or canonical ref. Output replacement is atomic.
+altering the source or canonical ref. The local restore destination is validated
+on its write-reserved connection before any rewrite. Export replacement and
+existing-store transaction commits are atomic.
 
 Commit strings from existing history remain historical data, including
 arbitrary strings written before commit validation existed. New ingest input

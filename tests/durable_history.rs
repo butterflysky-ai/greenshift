@@ -478,6 +478,42 @@ fn exact_history_ref_ignores_suffix_matching_branch_and_restore_keeps_local_runs
 }
 
 #[test]
+fn restore_updates_the_existing_sqlite_file_without_retiring_open_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("remote.git");
+    repository(&repo);
+    let canonical = dir.path().join("canonical");
+    let local = dir.path().join("local");
+    record(&canonical, "canonical");
+    record(&local, "local-before");
+    let observer = Connection::open(&local).unwrap();
+    let observed_count = || {
+        observer
+            .query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    assert_eq!(observed_count(), 1);
+    let remote = Remote::new(repo.to_str().unwrap()).unwrap();
+    remote.publish(&canonical, None).unwrap();
+    assert!(remote.restore(&local, None).unwrap());
+
+    // An idle connection must observe the same committed union as a newly
+    // opened connection, rather than remain attached to an unlinked old DB.
+    assert_eq!(observed_count(), 2);
+    assert_eq!(count(&local), 2);
+    record(&local, "local-after");
+    assert_eq!(observed_count(), 3);
+    observer
+        .execute(
+            "INSERT INTO runs(source,history_id) VALUES ('observer-after',?1)",
+            ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+        )
+        .unwrap();
+    assert_eq!(count(&local), 4);
+    assert_eq!(observed_count(), 4);
+}
+
+#[test]
 fn landed_push_keeps_success_oid_when_local_cache_cannot_be_written() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("remote.git");

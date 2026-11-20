@@ -148,7 +148,7 @@ fn identify_legacy_runs(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 // The v1 hash encoding, including SQL bytes and original local ids, is a durable
-// format. Snapshot callers first admit the exact known schema and bounded data.
+// format. Snapshot callers first admit the exact known schema and typed data.
 pub(crate) fn legacy_run_identities(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
     use sha2::{Digest, Sha256};
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;

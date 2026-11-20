@@ -49,7 +49,10 @@ pub enum HistoryError {
 
 impl HistoryError {
     pub fn is_cancelled(&self) -> bool {
-        matches!(self, Self::Cancelled)
+        matches!(
+            self,
+            Self::Cancelled | Self::Snapshot(snapshot::SnapshotError::Cancelled)
+        )
     }
     /// Configuration mistakes are usage errors, unlike unavailable storage.
     pub fn is_usage(&self) -> bool {
@@ -432,32 +435,48 @@ impl Remote {
             self.read(&oid, stage.path())?;
         }
         self.check_cancelled()?;
-        check_restore_destination(db)?;
-        let stage = if crate::store::Store::open_read_only(db)
-            .map_err(error)?
-            .is_some()
-        {
-            let merged = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
-            snapshot::merge(db, stage.path(), merged.path()).map_err(error)?;
-            merged
-        } else {
-            stage
-        };
         self.persist_restore(stage, db)?;
         Ok(true)
     }
 
-    // The staged data is fully validated. Cancellation can still arrive during
-    // local data work, so fence the atomic replacement, not only Git calls.
+    // Existing databases are updated through their SQLite inode. A missing
+    // destination is created without clobbering a concurrent creator.
     fn persist_restore(
         &self,
         stage: tempfile::NamedTempFile,
         db: &Path,
     ) -> Result<(), HistoryError> {
-        check_restore_destination(db)?;
-        self.check_cancelled()?;
-        stage.persist(db).map_err(error)?;
-        Ok(())
+        self.persist_restore_using(stage, db, create_restore)
+    }
+
+    fn persist_restore_using(
+        &self,
+        mut stage: tempfile::NamedTempFile,
+        db: &Path,
+        mut create: impl FnMut(tempfile::NamedTempFile, &Path) -> Result<File, tempfile::PersistError>,
+    ) -> Result<(), HistoryError> {
+        loop {
+            check_restore_destination(db)?;
+            self.check_cancelled()?;
+            match fs::symlink_metadata(db) {
+                Ok(_) => {
+                    return snapshot::restore_existing(db, stage.path(), || {
+                        self.cancellation.load(Ordering::SeqCst)
+                    })
+                    .map_err(error)
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+                Err(err) => return Err(error(err)),
+            }
+            self.check_cancelled()?;
+            match create(stage, db) {
+                Ok(_) => return Ok(()),
+                Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    stage = err.file
+                }
+                Err(err) => return Err(error(err)),
+            }
+        }
     }
 
     /// Publish validated data, comparing the expected old identity. One rejected
@@ -530,6 +549,13 @@ impl Remote {
             }
         }
     }
+}
+
+fn create_restore(
+    stage: tempfile::NamedTempFile,
+    db: &Path,
+) -> Result<File, tempfile::PersistError> {
+    stage.persist_noclobber(db)
 }
 
 fn valid_oid(oid: &str) -> bool {
@@ -653,6 +679,54 @@ mod tests {
             .unwrap_err()
             .is_cancelled());
         assert_eq!(fs::read(destination).unwrap(), before);
+    }
+
+    #[test]
+    fn test_create_restore_collision_retains_stage_then_unions_new_local_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("created.sqlite");
+        let stage = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        fixture(stage.path(), "remote");
+        assert!(!destination.exists());
+        let remote = Remote {
+            scratch: tempfile::tempdir().unwrap(),
+            url: String::new(),
+            token: None,
+            timeout: TIMEOUT,
+            cancellation: Arc::new(AtomicBool::new(false)),
+        };
+        let mut attempts = 0;
+        remote
+            .persist_restore_using(stage, &destination, |stage, db| {
+                attempts += 1;
+                // An ordinary creator wins after the real missing-path check. The
+                // creation primitive and its caller must retain our stage, then
+                // retry via the existing database transaction instead of replacing.
+                assert!(!db.exists());
+                fixture(db, "new-local");
+                let before = fs::read(db).unwrap();
+                let collision = create_restore(stage, db).unwrap_err();
+                assert_eq!(collision.error.kind(), std::io::ErrorKind::AlreadyExists);
+                assert_eq!(fs::read(db).unwrap(), before);
+                snapshot::validate(collision.file.path()).unwrap();
+                Err(collision)
+            })
+            .unwrap();
+        assert_eq!(attempts, 1);
+        let conn = rusqlite::Connection::open(&destination).unwrap();
+        let sources = conn
+            .prepare("SELECT source FROM runs ORDER BY source")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(sources, vec!["new-local", "remote"]);
+    }
+
+    #[test]
+    fn test_snapshot_transaction_cancellation_keeps_history_cancellation_semantics() {
+        assert!(HistoryError::from(snapshot::SnapshotError::Cancelled).is_cancelled());
     }
 
     #[test]
