@@ -117,7 +117,7 @@ fn immutable_fixture(body: &str) -> String {
         "#![allow(dead_code,unused_mut,unused_imports)]\n\
          #[path = {text:?}] mod text;\n\
          #[path = {dictionary:?}] mod dictionary;\n\
-         mod junit {{ #[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)] pub enum Outcome {{ Passed,Failed,Error,Skipped }} }}\n\
+         #[path = {outcome:?}] mod junit;\n\
          #[path = {frozen:?}] mod frozen;\n\
          use text::FrozenText;\n\
          use dictionary::{{DictionaryBuilder,TestKey}};\n\
@@ -143,6 +143,10 @@ fn immutable_fixture(body: &str) -> String {
              assert_eq!(runs.iter().count(),1);\n\
              assert_eq!(result.test(),id);\n\
              assert_eq!(result.outcome(),junit::Outcome::Passed);\n\
+             for (outcome,wire) in [(junit::Outcome::Passed,\"passed\"),(junit::Outcome::Failed,\"failed\"),(junit::Outcome::Error,\"error\"),(junit::Outcome::Skipped,\"skipped\")] {{\n\
+                 assert_eq!(outcome.as_str(),wire);\n\
+                 assert_eq!(outcome.to_string(),wire);\n\
+             }}\n\
              assert_eq!(result.duration(),Some(12));\n\
              assert_eq!(run.metadata(),&metadata);\n\
              assert_eq!(run.metadata().history_id().as_str(),\"0123456789abcdef0123456789abcdef\");\n\
@@ -159,6 +163,7 @@ fn immutable_fixture(body: &str) -> String {
          }}\n",
         text = root.join("text.rs").to_str().unwrap(),
         dictionary = root.join("dictionary.rs").to_str().unwrap(),
+        outcome = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/junit/outcome.rs"),
         frozen = root.join("frozen.rs").to_str().unwrap(),
     )
 }

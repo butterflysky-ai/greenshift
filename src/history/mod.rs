@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_persist_restore_cancelled_missing_destination_stays_absent() {
+    fn test_persist_restore_precancelled_missing_destination_skips_branch_inspection() {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("absent.sqlite");
         let stage = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
@@ -695,10 +695,15 @@ mod tests {
             timeout: TIMEOUT,
             cancellation: Arc::new(AtomicBool::new(true)),
         };
-        assert!(remote
-            .persist_restore(stage, &destination)
-            .unwrap_err()
-            .is_cancelled());
+        // This covers the early check before choosing create or update, not
+        // the final create fence after that branch's destination observation.
+        let mut branch_inspected = false;
+        let result = remote.persist_restore_using(stage, &destination, create_restore, |path| {
+            branch_inspected = true;
+            fs::symlink_metadata(path)
+        });
+        assert!(result.unwrap_err().is_cancelled());
+        assert!(!branch_inspected);
         assert!(!destination.exists());
     }
 
