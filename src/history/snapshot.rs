@@ -1240,9 +1240,9 @@ mod tests {
         };
         let forward_selection = analyse(&forward);
         assert!(forward_selection
-            .tests
+            .tests()
             .iter()
-            .any(|test| test.name.as_raw() == "new-case"));
+            .any(|test| test.name().as_raw() == "new-case"));
         assert_eq!(analyse(&reverse), forward_selection);
     }
 

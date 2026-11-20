@@ -25,13 +25,7 @@ impl Stored {
     fn lines(&self) -> Vec<Line<'_>> {
         self.0
             .iter()
-            .map(|(class, suite, name)| Line {
-                class: *class,
-                coverage: 100.0,
-                confidence: 100.0,
-                suite,
-                name,
-            })
+            .map(|(class, suite, name)| Line::new(*class, 100.0, 100.0, suite, name))
             .collect()
     }
 }

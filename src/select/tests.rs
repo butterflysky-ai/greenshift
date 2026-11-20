@@ -149,11 +149,11 @@ fn select(
         &cover_confidences(&analysis, estimator),
         thresholds,
     );
-    let lines = lines(&analysis, estimator, decided.rich, min_runs)
+    let lines = lines(&analysis, estimator, decided.rich(), min_runs)
         .iter()
         .map(|l| l.to_string())
         .collect();
-    Some((lines, decided.unreached))
+    Some((lines, decided.unreached().to_vec()))
 }
 
 const DEFAULT: Thresholds = Thresholds {
@@ -198,9 +198,9 @@ fn rich(lines: &[String]) -> Vec<&str> {
 
 fn median(analysis: &Analysis, name: &str) -> f64 {
     analysis
-        .tests
+        .tests()
         .iter()
-        .find(|t| t.name.as_raw() == name)
+        .find(|t| t.name().as_raw() == name)
         .unwrap()
         .median_ms()
 }
@@ -264,9 +264,9 @@ fn a_pick_drops_every_row_it_fails_in_and_failures_count_only_in_rows_left() {
         ]
     );
     let a = analysis(&store, &[]).unwrap();
-    assert_eq!((a.rows, a.green), (4, 1));
+    assert_eq!((a.rows(), a.green()), (4, 1));
     assert_eq!(
-        a.cover.iter().map(|p| p.rows_left).collect::<Vec<_>>(),
+        a.cover().iter().map(|p| p.rows_left()).collect::<Vec<_>>(),
         [1, 0]
     );
 }
@@ -396,7 +396,7 @@ fn the_universe_is_the_newest_full_run() {
     assert!(!lines.iter().any(|l| l.contains("old")), "{lines:?}");
     assert_eq!(rich(&lines), Vec::<&str>::new());
     let a = analysis(&store, &[]).unwrap();
-    assert_eq!((a.rows, a.green, a.tests.len()), (0, 2, 11));
+    assert_eq!((a.rows(), a.green(), a.tests().len()), (0, 2, 11));
 }
 
 #[test]
@@ -410,7 +410,7 @@ fn a_short_run_is_not_full() {
     assert_eq!(rich(&lines), Vec::<&str>::new());
     assert!(!lines.iter().any(|l| l.contains("only_short")), "{lines:?}");
     let a = analysis(&store, &[]).unwrap();
-    assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 11));
+    assert_eq!((a.rows(), a.green(), a.tests().len()), (0, 1, 11));
     // Its results still count towards min-runs: a has 2, the fillers 1.
     assert!(out(&store, 2).iter().all(|l| l.ends_with("\ts\ta")));
 }
@@ -430,15 +430,15 @@ fn a_partial_poor_only_run_is_not_full() {
     assert_eq!(rich(&lines), Vec::<&str>::new());
     assert!(!lines.iter().any(|l| l.contains("poor_only")), "{lines:?}");
     let a = analysis(&store, &[]).unwrap();
-    assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 11));
+    assert_eq!((a.rows(), a.green(), a.tests().len()), (0, 1, 11));
 }
 
 /// The names of the tests `analysis`'s cover picks, in pick order.
 fn picks(analysis: &Analysis) -> Vec<&str> {
     analysis
-        .cover
+        .cover()
         .iter()
-        .map(|pick| analysis.tests[pick.test].name.as_raw())
+        .map(|pick| analysis.tests()[pick.test()].name().as_raw())
         .collect()
 }
 
@@ -463,11 +463,11 @@ fn the_cover_among_eligible_tests_picks_the_witnesses_left() {
     let mut picked = picks(&a);
     picked.sort_unstable();
     assert_eq!(picked, ["b", "c"]);
-    assert_eq!((a.rows, a.green, a.tests.len()), (2, 1, 2));
+    assert_eq!((a.rows(), a.green(), a.tests().len()), (2, 1, 2));
     // With no eligible test there is nothing to cover, and the two runs
     // that failed are still not green.
     let none = analyse_among(&history, among(&[])).unwrap();
-    assert_eq!((none.rows, none.green, none.cover.len()), (0, 1, 0));
+    assert_eq!((none.rows(), none.green(), none.cover().len()), (0, 1, 0));
 }
 
 #[test]
@@ -493,10 +493,10 @@ fn a_run_failing_only_tests_left_out_is_not_green() {
     let history = store.history(&[]).unwrap();
     let a = analyse_among(&history, among(&["b"])).unwrap();
     // No row, as b cannot catch it, and not green, as it failed.
-    assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 1));
+    assert_eq!((a.rows(), a.green(), a.tests().len()), (0, 1, 1));
     // With every test eligible it is a row, as before.
     let all = analyse(&history).unwrap();
-    assert_eq!((all.rows, all.green, all.tests.len()), (1, 1, 2));
+    assert_eq!((all.rows(), all.green(), all.tests().len()), (1, 1, 2));
 }
 
 #[test]
@@ -510,7 +510,7 @@ fn every_test_eligible_still_counts_a_run_failing_only_gone_tests_green() {
     ]);
     let history = store.history(&[]).unwrap();
     let a = analyse(&history).unwrap();
-    assert_eq!((a.rows, a.green), (0, 2));
+    assert_eq!((a.rows(), a.green()), (0, 2));
     assert_eq!(analyse_among(&history, |_, _| true), Some(a));
 }
 
@@ -525,10 +525,10 @@ fn leaving_tests_out_never_makes_a_short_run_full() {
     record_as(&mut store, "ci", true, &[t("b", P, 10), t("c", F, 10)]);
     let history = store.history(&[]).unwrap();
     let a = analyse_among(&history, among(&["b", "c"])).unwrap();
-    assert_eq!((a.rows, a.green, a.tests.len()), (0, 1, 2));
-    assert!(a.cover.is_empty(), "{a:?}");
+    assert_eq!((a.rows(), a.green(), a.tests().len()), (0, 1, 2));
+    assert!(a.cover().is_empty(), "{a:?}");
     // Their results still count towards min-runs.
-    assert!(a.tests.iter().all(|t| t.results == 3), "{a:?}");
+    assert!(a.tests().iter().all(|t| t.results() == 3), "{a:?}");
 }
 
 #[test]
@@ -544,16 +544,16 @@ fn a_partial_run_still_counts_towards_min_runs() {
     record_as(&mut store, "ci", true, &[t("a", P, 10)]);
     let a = analysis(&store, &[]).unwrap();
     let results = |name: &str| {
-        a.tests
+        a.tests()
             .iter()
-            .find(|t| t.name.as_raw() == name)
+            .find(|t| t.name().as_raw() == name)
             .unwrap()
-            .results
+            .results()
     };
     assert_eq!((results("a"), results("f00")), (2, 1));
     // Its passes are not passes in full runs.
-    let a_info = a.tests.iter().find(|t| t.name.as_raw() == "a").unwrap();
-    assert_eq!(a_info.passes, 1);
+    let a_info = a.tests().iter().find(|t| t.name().as_raw() == "a").unwrap();
+    assert_eq!(a_info.passes(), 1);
 }
 
 #[test]
@@ -600,7 +600,7 @@ fn short_runs_are_not_among_the_runs_compared_with() {
         with(fillers(9), &[t("a", F, 10)]),
     ]);
     assert_eq!(rich(&out(&store, 0)), Vec::<&str>::new());
-    assert_eq!(analysis(&store, &[]).unwrap().tests.len(), 20);
+    assert_eq!(analysis(&store, &[]).unwrap().tests().len(), 20);
 }
 
 #[test]
@@ -654,11 +654,11 @@ fn skipped_results_do_not_count_towards_min_runs() {
     let store = store_of(&runs);
     let a = analysis(&store, &[]).unwrap();
     let results = |name: &str| {
-        a.tests
+        a.tests()
             .iter()
-            .find(|t| t.name.as_raw() == name)
+            .find(|t| t.name().as_raw() == name)
             .unwrap()
-            .results
+            .results()
     };
     assert_eq!((results("c"), results("d")), (119, 120));
     // At the default --min-runs, d is poor and c, below it, is new.
@@ -732,8 +732,8 @@ const CONF: [f64; 4] = [50.0, 80.0, 85.0, 95.0];
 
 fn rich_at(thresholds: Thresholds) -> usize {
     let decided = split(&COV, &CONF, thresholds);
-    assert_eq!(decided.unreached, [], "{thresholds:?}");
-    decided.rich
+    assert_eq!(decided.unreached(), [], "{thresholds:?}");
+    decided.rich()
 }
 
 #[test]
@@ -779,20 +779,13 @@ fn split_with_both_thresholds_ends_where_the_later_is_reached() {
 fn split_that_never_reaches_the_confidence_is_the_whole_cover() {
     assert_eq!(
         split(&COV, &CONF, confidence(99.0)),
-        Split {
-            rich: 4,
-            unreached: vec![Unreached {
-                measure: Measure::Confidence,
-                wanted: 99.0,
-                highest: 95.0
-            }]
-        }
+        Split::new(4, vec![Unreached::new(Measure::Confidence, 99.0, 95.0)])
     );
     // With a coverage that is reached, still the whole cover.
     let decided = split(&COV, &CONF, both(40.0, 99.0));
-    assert_eq!(decided.rich, 4);
-    assert_eq!(decided.unreached.len(), 1);
-    assert_eq!(decided.unreached[0].measure, Measure::Confidence);
+    assert_eq!(decided.rich(), 4);
+    assert_eq!(decided.unreached().len(), 1);
+    assert_eq!(decided.unreached()[0].measure(), Measure::Confidence);
 }
 
 #[test]
@@ -802,36 +795,21 @@ fn split_that_never_reaches_the_coverage_is_the_whole_cover() {
     let decided = split(&short, &CONF[..2], both(90.0, 99.0));
     assert_eq!(
         decided,
-        Split {
-            rich: 2,
-            unreached: vec![
-                Unreached {
-                    measure: Measure::Coverage,
-                    wanted: 90.0,
-                    highest: 70.0
-                },
-                Unreached {
-                    measure: Measure::Confidence,
-                    wanted: 99.0,
-                    highest: 80.0
-                },
+        Split::new(
+            2,
+            vec![
+                Unreached::new(Measure::Coverage, 90.0, 70.0),
+                Unreached::new(Measure::Confidence, 99.0, 80.0),
             ]
-        }
+        )
     );
     let decided = split(&short, &CONF[..2], coverage(90.0));
-    assert_eq!((decided.rich, decided.unreached.len()), (2, 1));
+    assert_eq!((decided.rich(), decided.unreached().len()), (2, 1));
 }
 
 #[test]
 fn an_unreached_threshold_never_shows_its_highest_at_or_over_it() {
-    let missed = |wanted, highest| {
-        Unreached {
-            measure: Measure::Confidence,
-            wanted,
-            highest,
-        }
-        .to_string()
-    };
+    let missed = |wanted, highest| Unreached::new(Measure::Confidence, wanted, highest).to_string();
     assert_eq!(
         missed(99.0, 75.0),
         "confidence 99% not reached; the highest is 75.0%"
@@ -856,13 +834,7 @@ fn an_unreached_threshold_never_shows_its_highest_at_or_over_it() {
 #[test]
 fn an_empty_cover_has_nothing_to_split() {
     for thresholds in [DEFAULT, coverage(50.0), confidence(99.0), both(1.0, 1.0)] {
-        assert_eq!(
-            split(&[], &[], thresholds),
-            Split {
-                rich: 0,
-                unreached: vec![]
-            }
-        );
+        assert_eq!(split(&[], &[], thresholds), Split::new(0, vec![]));
     }
 }
 
@@ -878,9 +850,9 @@ fn coverage_is_exactly_100_only_with_no_row_left() {
     assert!(c[0] < 100.0 && c[0] > 99.95, "{c:?}");
     assert_eq!(c[1], 100.0);
     let decided = split(&c, &cover_confidences(&a, &Empirical), coverage(100.0));
-    assert_eq!(decided.rich, 2);
+    assert_eq!(decided.rich(), 2);
     let decided = split(&c, &cover_confidences(&a, &Empirical), coverage(99.95));
-    assert_eq!(decided.rich, 1);
+    assert_eq!(decided.rich(), 1);
 }
 
 #[test]
@@ -914,8 +886,8 @@ fn smoothed_confidence_can_leave_a_threshold_unreached() {
     let (lines, unreached) = select(&store, &[], &Smoothed, confidence(99.0), 0).unwrap();
     assert_eq!(lines, ["rich\t100.0\t66.7\ts\ta"]);
     assert_eq!(unreached.len(), 1);
-    assert_eq!(unreached[0].measure, Measure::Confidence);
-    assert_eq!(format!("{:.1}", unreached[0].highest), "66.7");
+    assert_eq!(unreached[0].measure(), Measure::Confidence);
+    assert_eq!(format!("{:.1}", unreached[0].highest()), "66.7");
 }
 
 #[test]

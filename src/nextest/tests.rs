@@ -92,13 +92,7 @@ fn bins(ids: &[&str]) -> BTreeSet<String> {
 }
 
 fn line<'a>(class: Class, suite: &'a Tainted, name: &'a Tainted) -> Line<'a> {
-    Line {
-        class,
-        coverage: 100.0,
-        confidence: 100.0,
-        suite,
-        name,
-    }
+    Line::new(class, 100.0, 100.0, suite, name)
 }
 
 #[test]

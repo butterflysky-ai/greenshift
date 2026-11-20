@@ -862,9 +862,9 @@ fn with_history(
             confidence: args.confidence,
         },
     );
-    let lines = select::lines(&analysis, estimator, decided.rich, args.min_runs);
-    let code = written(write(Some(&lines)))?;
-    for missed in decided.unreached {
+    let lines = select::lines(&analysis, estimator, decided.rich(), args.min_runs);
+    let code = written(write(Some(lines.as_slice())))?;
+    for missed in decided.unreached() {
         eprintln!("greenshift: {missed}");
     }
     Ok(code)

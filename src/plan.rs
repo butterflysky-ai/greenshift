@@ -114,8 +114,8 @@ pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [InventoryTest]) -> Plan<'a> 
     let mut take = |class: Class| -> Vec<&'a InventoryTest> {
         lines
             .iter()
-            .filter(|line| line.class == class)
-            .filter_map(|line| unplanned.remove(&(line.suite, line.name)))
+            .filter(|line| line.class() == class)
+            .filter_map(|line| unplanned.remove(&(line.suite(), line.name())))
             .collect()
     };
     let mut rich = take(Class::Rich);

@@ -8,6 +8,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 
+mod payload;
+pub use payload::{Analysis, Line, Lines, Pick, Split, TestInfo, Unreached};
+
 use crate::junit::Outcome;
 use crate::store::{History, StoredRun};
 use crate::tainted::Tainted;
@@ -90,51 +93,6 @@ impl Estimator for Smoothed {
     fn p_green(&self, green: u64, rows_left: u64) -> f64 {
         (green as f64 + 1.0) / ((green + rows_left) as f64 + 2.0)
     }
-}
-
-/// One universe test and what history says about it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestInfo {
-    pub suite: Tainted,
-    pub name: Tainted,
-    /// Median duration in eighths of a millisecond, so medians of medians
-    /// stay exact; see [`TestInfo::median_ms`].
-    pub median_eighths: u128,
-    /// Passed results in full runs.
-    pub passes: u64,
-    /// Passed, failed and error results (not skips) in any run read.
-    pub results: u64,
-}
-
-impl TestInfo {
-    /// The median duration in milliseconds.
-    pub fn median_ms(&self) -> f64 {
-        self.median_eighths as f64 / 8.0
-    }
-}
-
-/// One step of the greedy cover.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pick {
-    /// Index into [`Analysis::tests`].
-    pub test: usize,
-    /// Matrix rows that no test picked so far, this one included, fails in.
-    pub rows_left: u64,
-}
-
-/// Everything [`lines`] needs, computed from history before anything is
-/// decided.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Analysis {
-    /// The universe, by suite and then name.
-    pub tests: Vec<TestInfo>,
-    /// The greedy cover, in pick order. It always ends with no rows left.
-    pub cover: Vec<Pick>,
-    /// Matrix rows: full runs in which a universe test failed.
-    pub rows: u64,
-    /// Full runs in which no universe test failed, and no test that
-    /// [`analyse_among`]'s `eligible` left out failed either.
-    pub green: u64,
 }
 
 /// Analyse `history`, which holds only the runs from the chosen sources.
@@ -241,22 +199,17 @@ pub fn analyse_among(
         .enumerate()
         .map(|(i, id)| {
             let (suite, name) = name_of(id).clone();
-            TestInfo {
+            TestInfo::new(
                 suite,
                 name,
-                median_eighths: medians[i].unwrap_or(fallback),
-                passes: passes[i],
-                results: results[i],
-            }
+                medians[i].unwrap_or(fallback),
+                passes[i],
+                results[i],
+            )
         })
         .collect();
     let cover = greedy_cover(&tests, &matrix);
-    Some(Analysis {
-        tests,
-        cover,
-        rows: matrix.len() as u64,
-        green,
-    })
+    Some(Analysis::new(tests, cover, matrix.len() as u64, green))
 }
 
 /// The full runs among `runs`, oldest first. A run recorded as partial is
@@ -327,10 +280,7 @@ fn greedy_cover(tests: &[TestInfo], matrix: &[Vec<usize>]) -> Vec<Pick> {
                 }
             }
         }
-        cover.push(Pick {
-            test: best,
-            rows_left,
-        });
+        cover.push(Pick::new(best, rows_left));
     }
     cover
 }
@@ -342,41 +292,41 @@ fn greedy_cover(tests: &[TestInfo], matrix: &[Vec<usize>]) -> Vec<Pick> {
 fn better(tests: &[TestInfo], fails: &[u64], a: usize, b: usize) -> Ordering {
     let (ta, tb) = (&tests[a], &tests[b]);
     let (fa, fb) = (u128::from(fails[a]), u128::from(fails[b]));
-    let (ra, rb) = (fa + u128::from(ta.passes), fb + u128::from(tb.passes));
+    let (ra, rb) = (fa + u128::from(ta.passes()), fb + u128::from(tb.passes()));
     // a's chance is fa / (ra * ma), b's is fb / (rb * mb).
     let lhs = fa
         .checked_mul(rb)
-        .and_then(|x| x.checked_mul(tb.median_eighths));
+        .and_then(|x| x.checked_mul(tb.median_eighths()));
     let rhs = fb
         .checked_mul(ra)
-        .and_then(|x| x.checked_mul(ta.median_eighths));
+        .and_then(|x| x.checked_mul(ta.median_eighths()));
     let chance = match (lhs, rhs) {
         (Some(l), Some(r)) => r.cmp(&l),
         // Only for absurd counts and durations: compare approximately.
         _ => {
             let c = |f: u128, r: u128, m: u128| f as f64 / r as f64 / m as f64;
-            c(fb, rb, tb.median_eighths).total_cmp(&c(fa, ra, ta.median_eighths))
+            c(fb, rb, tb.median_eighths()).total_cmp(&c(fa, ra, ta.median_eighths()))
         }
     };
     chance
-        .then(ta.median_eighths.cmp(&tb.median_eighths))
-        .then_with(|| ta.suite.as_raw().cmp(tb.suite.as_raw()))
-        .then_with(|| ta.name.as_raw().cmp(tb.name.as_raw()))
+        .then(ta.median_eighths().cmp(&tb.median_eighths()))
+        .then_with(|| ta.suite().as_raw().cmp(tb.suite().as_raw()))
+        .then_with(|| ta.name().as_raw().cmp(tb.name().as_raw()))
 }
 
 /// The coverage after each pick of the cover, as a percentage of the
 /// matrix rows. It is exactly 100 only once no row is left, however close
 /// to it a pick before comes.
 pub fn cover_coverages(analysis: &Analysis) -> Vec<f64> {
-    let rows = analysis.rows;
+    let rows = analysis.rows();
     analysis
-        .cover
+        .cover()
         .iter()
         .map(|pick| {
-            if pick.rows_left == 0 {
+            if pick.rows_left() == 0 {
                 100.0
             } else {
-                let caught = 100.0 * (rows - pick.rows_left) as f64 / rows as f64;
+                let caught = 100.0 * (rows - pick.rows_left()) as f64 / rows as f64;
                 caught.min(100f64.next_down())
             }
         })
@@ -386,9 +336,9 @@ pub fn cover_coverages(analysis: &Analysis) -> Vec<f64> {
 /// The confidence after each pick of the cover, as a percentage.
 pub fn cover_confidences(analysis: &Analysis, estimator: &dyn Estimator) -> Vec<f64> {
     analysis
-        .cover
+        .cover()
         .iter()
-        .map(|pick| 100.0 * estimator.p_green(analysis.green, pick.rows_left))
+        .map(|pick| 100.0 * estimator.p_green(analysis.green(), pick.rows_left()))
         .collect()
 }
 
@@ -416,48 +366,6 @@ pub struct Thresholds {
     pub confidence: Option<f64>,
 }
 
-/// A threshold no prefix of the cover reached.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Unreached {
-    pub measure: Measure,
-    /// The threshold, a percentage.
-    pub wanted: f64,
-    /// The highest the cover reached, a percentage.
-    pub highest: f64,
-}
-
-impl fmt::Display for Unreached {
-    /// `<measure> <wanted>% not reached; the highest is <highest>%`, the
-    /// highest to one decimal, or to as many more as it takes to show it
-    /// below the threshold.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {}% not reached; the highest is ",
-            self.measure, self.wanted
-        )?;
-        let below = |d: usize| {
-            format!("{:.d$}", self.highest)
-                .parse::<f64>()
-                .is_ok_and(|shown| shown < self.wanted)
-        };
-        match (1..=6).find(|&d| below(d)) {
-            Some(d) => write!(f, "{:.d$}%", self.highest),
-            // Shortest exact form, which is below the threshold.
-            None => write!(f, "{}%", self.highest),
-        }
-    }
-}
-
-/// How much of the cover is rich.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Split {
-    /// The length of the rich prefix of the cover.
-    pub rich: usize,
-    /// The thresholds that were never reached, coverage first.
-    pub unreached: Vec<Unreached>,
-}
-
 /// Decide the rich prefix of a cover from its per-pick `coverage` and
 /// `confidence` percentages, in pick order.
 ///
@@ -467,10 +375,7 @@ pub struct Split {
 /// how high it got. An empty cover has nothing to split.
 pub fn split(coverage: &[f64], confidence: &[f64], thresholds: Thresholds) -> Split {
     if coverage.is_empty() {
-        return Split {
-            rich: 0,
-            unreached: Vec::new(),
-        };
+        return Split::new(0, Vec::new());
     }
     let wanted = match thresholds {
         Thresholds {
@@ -493,11 +398,11 @@ pub fn split(coverage: &[f64], confidence: &[f64], thresholds: Thresholds) -> Sp
         };
         match values.iter().position(|&v| v >= threshold) {
             Some(i) => firsts.push(i),
-            None => unreached.push(Unreached {
+            None => unreached.push(Unreached::new(
                 measure,
-                wanted: threshold,
-                highest: values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            }),
+                threshold,
+                values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )),
         }
     }
     let rich = if unreached.is_empty() {
@@ -505,7 +410,7 @@ pub fn split(coverage: &[f64], confidence: &[f64], thresholds: Thresholds) -> Sp
     } else {
         coverage.len()
     };
-    Split { rich, unreached }
+    Split::new(rich, unreached)
 }
 
 /// The rich length when every threshold is reached and `firsts` are the
@@ -523,37 +428,6 @@ pub enum Class {
     Poor,
 }
 
-/// One line of `select` output.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Line<'a> {
-    pub class: Class,
-    /// Percentage of the matrix rows caught once this test and every line
-    /// before it pass.
-    pub coverage: f64,
-    /// [`Estimator::p_green`] once this test and every line before it pass,
-    /// as a percentage.
-    pub confidence: f64,
-    pub suite: &'a Tainted,
-    pub name: &'a Tainted,
-}
-
-impl fmt::Display for Line<'_> {
-    /// `class<TAB>coverage<TAB>confidence<TAB>suite<TAB>name`. Suite and
-    /// name are escaped as [`Tainted`] displays them, so a tab or newline
-    /// in either cannot break the line.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let class = match self.class {
-            Class::Rich => "rich",
-            Class::Poor => "poor",
-        };
-        write!(
-            f,
-            "{class}\t{:.1}\t{:.1}\t{}\t{}",
-            self.coverage, self.confidence, self.suite, self.name
-        )
-    }
-}
-
 /// The output lines: the first `rich` picks of the cover in pick order,
 /// then poor tests (every other universe test with at least `min_runs`
 /// results) by median duration, suite and name. The rest are new and not
@@ -563,57 +437,53 @@ pub fn lines<'a>(
     estimator: &dyn Estimator,
     rich: usize,
     min_runs: u64,
-) -> Vec<Line<'a>> {
-    let line = |class, coverage, confidence, test: &'a TestInfo| Line {
-        class,
-        coverage,
-        confidence,
-        suite: &test.suite,
-        name: &test.name,
+) -> Lines<'a> {
+    let line = |class, coverage, confidence, test: &'a TestInfo| {
+        Line::new(class, coverage, confidence, test.suite(), test.name())
     };
-    let mut out: Vec<Line<'a>> = analysis.cover[..rich]
+    let mut out: Vec<Line<'a>> = analysis.cover()[..rich]
         .iter()
         .zip(cover_coverages(analysis))
         .map(|(pick, coverage)| {
             // Only a cover with no row left prints as 100.0.
-            let coverage = if pick.rows_left > 0 {
+            let coverage = if pick.rows_left() > 0 {
                 coverage.min(99.9)
             } else {
                 coverage
             };
-            let confidence = 100.0 * estimator.p_green(analysis.green, pick.rows_left);
+            let confidence = 100.0 * estimator.p_green(analysis.green(), pick.rows_left());
             line(
                 Class::Rich,
                 coverage,
                 confidence,
-                &analysis.tests[pick.test],
+                &analysis.tests()[pick.test()],
             )
         })
         .collect();
-    let mut is_rich = vec![false; analysis.tests.len()];
-    for pick in &analysis.cover[..rich] {
-        is_rich[pick.test] = true;
+    let mut is_rich = vec![false; analysis.tests().len()];
+    for pick in &analysis.cover()[..rich] {
+        is_rich[pick.test()] = true;
     }
     let mut poor: Vec<&TestInfo> = analysis
-        .tests
+        .tests()
         .iter()
         .zip(&is_rich)
-        .filter(|(t, &rich)| !rich && t.results >= min_runs)
+        .filter(|(t, &rich)| !rich && t.results() >= min_runs)
         .map(|(t, _)| t)
         .collect();
     poor.sort_by(|a, b| {
-        a.median_eighths
-            .cmp(&b.median_eighths)
-            .then_with(|| a.suite.as_raw().cmp(b.suite.as_raw()))
-            .then_with(|| a.name.as_raw().cmp(b.name.as_raw()))
+        a.median_eighths()
+            .cmp(&b.median_eighths())
+            .then_with(|| a.suite().as_raw().cmp(b.suite().as_raw()))
+            .then_with(|| a.name().as_raw().cmp(b.name().as_raw()))
     });
     // Poor lines come after the whole cover, which leaves no row.
-    let confidence = 100.0 * estimator.p_green(analysis.green, 0);
+    let confidence = 100.0 * estimator.p_green(analysis.green(), 0);
     out.extend(
         poor.into_iter()
             .map(|t| line(Class::Poor, 100.0, confidence, t)),
     );
-    out
+    Lines::new(out)
 }
 
 #[cfg(test)]

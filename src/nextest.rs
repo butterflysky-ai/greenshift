@@ -208,12 +208,12 @@ pub fn binary_ids(json: &str) -> Result<BTreeSet<String>, InventoryError> {
 pub fn filter(lines: &[Line<'_>], class: Class, binaries: &BTreeSet<String>) -> String {
     let poor = lines
         .iter()
-        .filter(|line| line.class == Class::Poor)
+        .filter(|line| line.class() == Class::Poor)
         .filter(|line| {
-            let suite = line.suite.as_raw();
+            let suite = line.suite().as_raw();
             suite.is_empty() || binaries.contains(suite)
         })
-        .map(|line| (line.suite.as_raw(), line.name.as_raw()));
+        .map(|line| (line.suite().as_raw(), line.name().as_raw()));
     match class {
         Class::Rich => all_but(poor),
         Class::Poor => any_of(poor),
