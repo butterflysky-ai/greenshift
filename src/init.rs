@@ -442,6 +442,8 @@ mod tests {
             "v0.2.0 ",
             "v0.1.0",
             "v0.0.1",
+            // Too big for a u64.
+            "v18446744073709551616.0.0",
         ] {
             assert!(bad.parse::<Release>().is_err(), "{bad:?}");
         }

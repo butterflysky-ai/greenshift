@@ -285,7 +285,10 @@ fn an_existing_different_workflow_is_left_alone_without_force() {
             .assert()
             .code(1)
             .stderr(predicate::str::contains(path))
-            .stderr(predicate::str::contains("--force"));
+            .stderr(predicate::str::contains("--force"))
+            .stdout(
+                predicate::str::contains("not isolated").count(usize::from(forge == "forgejo")),
+            );
         assert_eq!(snapshot(dir.path()), before, "{forge}: nothing is written");
     }
 }
@@ -297,6 +300,11 @@ fn force_overwrites_the_workflow() {
         write(dir.path(), path, "# mine\n");
         let out = stdout_of(&mut init(dir.path(), &["--ci", forge, "--force"]));
         assert!(out.contains(&format!("overwrote {path}")), "{forge}: {out}");
+        assert_eq!(
+            out.matches("not isolated").count(),
+            usize::from(forge == "forgejo"),
+            "{forge}: the note is given when a Forgejo workflow is overwritten too: {out}"
+        );
         assert_golden(&dir.path().join(path), golden_name);
     }
 }
