@@ -311,12 +311,14 @@ fn a_broken_download_fails_the_install_step_and_leaves_nothing() {
 fn the_install_step_refuses_a_hand_edited_pin_before_downloading() {
     let binary = b"#!/bin/sh\necho pretend greenshift\n";
     let sha256 = sha256_hex(binary);
+    let too_long = format!("{sha256}0");
     for forge in forges() {
         for (name, bad) in [
             ("GREENSHIFT_RELEASE", "v0.2.0/../../evil"),
             ("GREENSHIFT_RELEASE", "main"),
             ("GREENSHIFT_SHA256", "not-a-checksum"),
             ("GREENSHIFT_SHA256", &sha256[1..]),
+            ("GREENSHIFT_SHA256", &too_long),
         ] {
             let mut workflow = generated(forge, &sha256, &[]);
             workflow["env"][name] = Value::String(bad.into());

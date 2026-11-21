@@ -114,8 +114,8 @@ pub enum Command {
     /// Restore or publish durable history, or print its immutable cache key.
     History(HistoryArgs),
     /// Set the repository up to run its tests with greenshift in CI: write
-    /// the CI workflow, pinned to a greenshift release, and what the test
-    /// runner needs. Changes nothing that exists unless --force is given.
+    /// the CI workflow, pinned to a greenshift release. Changes nothing
+    /// that exists unless --force is given.
     Init(InitArgs),
 }
 
@@ -150,8 +150,9 @@ pub struct InitNextestArgs {
     #[arg(long, value_name = "HEX", required = true)]
     pub sha256: crate::init::Sha256,
 
-    /// The runner label the jobs run on. Default: ubuntu-latest on GitHub,
-    /// docker on Forgejo.
+    /// The runner label the jobs run on, an x86_64 Linux runner: releases
+    /// ship only for x86_64-unknown-linux-musl. Default: ubuntu-latest on
+    /// GitHub, docker on Forgejo.
     #[arg(long, value_name = "LABEL")]
     pub runs_on: Option<crate::init::RunnerLabel>,
 

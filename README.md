@@ -412,7 +412,9 @@ one step. Commit what it writes as is:
   a separate publisher that publishes it for pushes to the default branch
   only. `--ci` picks the forge; without it, the one of `.github` and
   `.forgejo` the repository has. `--runs-on` names the runner label
-  (default `ubuntu-latest` on GitHub, `docker` on Forgejo).
+  (default `ubuntu-latest` on GitHub, `docker` on Forgejo), which must be
+  an x86_64 Linux runner: releases ship only for
+  `x86_64-unknown-linux-musl`.
 - **The pin.** The workflow installs the release `--release` names (newer
   than v0.1.0, which predates `run nextest`) and refuses it, failing the
   job, unless it matches `--sha256`. Neither has a default: take the
