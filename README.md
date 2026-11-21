@@ -87,8 +87,10 @@ greenshift ingest target/nextest/default/junit.xml \
   `run nextest` records every actual execution separately, even with identical
   reports. Older history has no raw report fingerprints and stays unkeyed;
   its first new keyed import may coexist with an equivalent legacy observation.
-- Keyed imports require schema 5. Use schema-5-capable importer and trusted
-  publisher binaries together; older binaries reject newer stores. Do not
+- Opening or exporting a store with this binary upgrades it to schema 5,
+  even for unkeyed executions. Upgrade every importer, runner and trusted
+  publisher sharing the store or history ref together; older binaries reject
+  newer stores. Do not
   downgrade or strip the membership table to make an old publisher accept it.
   Membership survives snapshot export, merge and restore. Publication keeps
   the remote destination's grouping/provenance; restore into an existing store
@@ -434,6 +436,14 @@ For example, to pin v0.2.0 (its `.sha256` file gives this checksum):
 greenshift init nextest --release v0.2.0 \
   --sha256 36a30034902f29885c9763d868aae1ea773ca79ddc710465c025a9f4c524074b
 ```
+
+That example pins a schema-4 release. Before a schema-5-capable binary opens
+or exports a shared history, upgrade all its writers and trusted publishers
+to a schema-5-capable release. Regenerate installed workflows with that
+release's independently checked checksum and `--force`. Init validates the
+tag and checksum format, not the downloaded binary's schema support. Both
+jobs use the same pin; do not substitute a publisher built by the test job
+or strip report memberships to make an older publisher accept the database.
 
 `init nextest` sets a cargo-nextest repository up to run `greenshift run
 nextest` in CI with [durable history](docs/design/durable-history.md), in

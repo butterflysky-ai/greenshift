@@ -142,6 +142,8 @@ pub struct InitNextestArgs {
 
     /// The greenshift release the workflow installs, such as v0.2.0. It
     /// needs `run nextest` and durable history, so it is newer than v0.1.0.
+    /// All writers and trusted publishers sharing history must support its
+    /// schema. Tag validation alone does not establish schema compatibility.
     #[arg(long, value_name = "TAG", required = true)]
     pub release: crate::init::Release,
 
