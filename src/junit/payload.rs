@@ -51,7 +51,7 @@ impl Report {
     pub fn cases(&self) -> &[TestCase] {
         &self.cases
     }
-    pub fn into_cases(self) -> impl ExactSizeIterator<Item = TestCase> {
+    pub fn into_cases(self) -> impl DoubleEndedIterator<Item = TestCase> + ExactSizeIterator {
         self.cases.into_iter()
     }
 }

@@ -50,7 +50,7 @@ use crate::tainted::Tainted;
 mod history_builder;
 mod history_data;
 
-pub use history_builder::{HistoryBuilder, StoredRunBuilder};
+pub use history_builder::StoredRunBuilder;
 pub use history_data::{History, StoredResult, StoredRun};
 
 /// The default store location, relative to the working directory.
@@ -698,11 +698,10 @@ impl Store {
                 run.results.push(result);
             }
         }
-        Ok(HistoryBuilder {
-            runs: runs.into_iter().map(StoredRunBuilder::build).collect(),
+        Ok(History::new(
+            runs.into_iter().map(StoredRunBuilder::build).collect(),
             tests,
-        }
-        .build())
+        ))
     }
 }
 

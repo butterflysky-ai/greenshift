@@ -124,7 +124,7 @@ impl CaseBuilder {
 /// Failure and error text is not kept: only which elements are present.
 pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
     let mut reader = Reader::from_str(xml);
-    let mut report = ReportBuilder::default();
+    let mut report = Vec::new();
     let mut seen_root = false;
     let mut depth: usize = 0;
     // Names of the enclosing <testsuite> elements, with the depth each opened at.
@@ -168,7 +168,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                     (b"testcase", None) => {
                         let builder = start_case(e, &suites, position)?;
                         if empty {
-                            report.cases.push(builder.finish());
+                            report.push(builder.finish());
                         } else {
                             case = Some((at, builder));
                         }
@@ -182,7 +182,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
             Event::End(_) => {
                 if case.as_ref().is_some_and(|(d, _)| *d == depth) {
                     let (_, builder) = case.take().expect("checked above");
-                    report.cases.push(builder.finish());
+                    report.push(builder.finish());
                 } else if suites.last().is_some_and(|(d, _)| *d == depth) {
                     suites.pop();
                 }
@@ -215,7 +215,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                 if depth != 0 {
                     return Err(JunitError::Truncated);
                 }
-                return Ok(report.build());
+                return Ok(Report::new(report));
             }
             Event::Text(_)
             | Event::CData(_)
@@ -224,18 +224,6 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
             | Event::DocType(_)
             | Event::Comment(_) => {}
         }
-    }
-}
-
-/// Cases collected while a document is still being validated.
-#[derive(Default)]
-struct ReportBuilder {
-    cases: Vec<TestCase>,
-}
-
-impl ReportBuilder {
-    fn build(self) -> Report {
-        Report::new(self.cases)
     }
 }
 

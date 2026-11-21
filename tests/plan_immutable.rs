@@ -1,7 +1,7 @@
 //! Completed inventory, plan and listing data is sealed at producer-parent privacy.
 
 use std::path::Path;
-use std::process::Command;
+mod common;
 
 fn fixture(body: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -55,7 +55,10 @@ fn main() {{
     assert_eq!(binaries.len(),2);
     assert!(!binaries.is_empty());
     assert!(binaries.contains("suite"));
-    assert_eq!(binaries.as_set(),listing.binaries().as_set());
+    assert_eq!(&binaries,listing.binaries());
+    let mut borrowed=Vec::new();
+    for id in &binaries {{ borrowed.push(id.as_str()); }}
+    assert_eq!(borrowed,["other","suite"]);
     assert_eq!(binaries.iter().map(String::as_str).collect::<Vec<_>>(),["other","suite"]);
     let mut ids=binaries.clone().into_ids();
     assert_eq!(ids.len(),2);
@@ -74,20 +77,7 @@ fn main() {{
 }
 
 fn compile(body: &str, execute: bool) -> (std::process::Output, Option<std::process::Output>) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("contract.rs");
-    let binary = directory.path().join("contract");
-    std::fs::write(&source, fixture(body)).unwrap();
-    let compilation = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
-        .arg("--edition=2021")
-        .arg(source)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .unwrap();
-    let execution =
-        (execute && compilation.status.success()).then(|| Command::new(binary).output().unwrap());
-    (compilation, execution)
+    common::compile(execute, |_| fixture(body))
 }
 
 #[test]
@@ -115,8 +105,11 @@ fn completed_plan_listing_payloads_reject_mutation_after_valid_builder_read_cons
         ("plan.poor.clear();", "error[E0616]"),
         ("listing.tests().clear();", "error[E0596]"),
         ("listing.tests()[\"suite\"].clear();", "error[E0596]"),
-        ("listing.binaries().as_set().clear();", "error[E0596]"),
-        ("binaries.as_set().clear();", "error[E0596]"),
+        (
+            "listing.binaries().iter().next().unwrap().clear();",
+            "error[E0596]",
+        ),
+        ("for id in &binaries { id.clear(); }", "error[E0596]"),
         (
             "test.name().as_raw().make_ascii_uppercase();",
             "error[E0596]",
@@ -157,6 +150,24 @@ fn production_inventory_listing_and_plan_preserve_parsing_order_and_consumption(
     let planned = plan::plan(&[], &inventory);
     assert_eq!(planned.rich(), [&inventory[0], &inventory[1]]);
     assert!(planned.poor().is_empty());
+    let mut groups = greenshift::run::planned_groups(planned.rich(), planned.poor());
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups.next_back(),
+        Some((greenshift::select::Class::Rich, planned.rich()))
+    );
+    assert_eq!(groups.len(), 0);
+    let mut groups = greenshift::run::planned_groups(&planned.rich()[..1], &planned.rich()[1..]);
+    assert_eq!(groups.len(), 2);
+    assert_eq!(
+        groups.next_back(),
+        Some((greenshift::select::Class::Poor, &planned.rich()[1..]))
+    );
+    assert_eq!(
+        groups.next(),
+        Some((greenshift::select::Class::Rich, &planned.rich()[..1]))
+    );
+    assert_eq!(groups.len(), 0);
     assert_eq!(
         planned.to_json(plan::HistoryState::Ok),
         r#"{"history":"ok","rich":[{"suite":"b","name":"two"},{"suite":"a","name":"one"}],"poor":[]}"#

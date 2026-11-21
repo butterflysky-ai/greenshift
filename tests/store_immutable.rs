@@ -1,7 +1,7 @@
 //! Producer-side mutation must not bypass completed history payloads.
 
 use std::path::Path;
-use std::process::Command;
+mod common;
 
 fn fixture(body: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -14,7 +14,7 @@ fn fixture(body: &str) -> String {
          #[path={data:?}] mod history_data;\n\
          pub use history_data::{{History,StoredRun,StoredResult}};\n\
          #[path={builder:?}] mod history_builder;\n\
-         use history_builder::{{HistoryBuilder,StoredRunBuilder}};\n\
+         use history_builder::StoredRunBuilder;\n\
          use tainted::Tainted;\n\
          fn main() {{\n\
              let mut result=StoredResult::new(7,junit::Outcome::Failed,Some(12));\n\
@@ -22,10 +22,9 @@ fn fixture(body: &str) -> String {
              run_builder.partial=true;\n\
              run_builder.results.push(result);\n\
              let mut run=run_builder.build();\n\
-             let mut builder=HistoryBuilder::default();\n\
-             builder.tests.insert(7,(Tainted::raw(\"suite\"),Tainted::raw(\"name\\n\")));\n\
-             builder.runs.push(run.clone());\n\
-             let mut history=builder.build();\n\
+             let mut tests=std::collections::HashMap::new();\n\
+             tests.insert(7,(Tainted::raw(\"suite\"),Tainted::raw(\"name\\n\")));\n\
+             let mut history=History::new(vec![run.clone()],tests);\n\
              assert_eq!(history.runs(),&[run.clone()]);\n\
              assert_eq!(history.tests()[&7].1.to_string(),\"name\\\\n\");\n\
              assert_eq!(run.id(),3);\n\
@@ -35,6 +34,17 @@ fn fixture(body: &str) -> String {
              assert_eq!(result.test_id(),7);\n\
              assert_eq!(result.outcome(),junit::Outcome::Failed);\n\
              assert_eq!(result.duration_ms(),Some(12));\n\
+             let second=StoredRun::new(4,\"ci\".to_owned(),false,vec![]);\n\
+             let mut runs=History::new(vec![run.clone(),second.clone()],history.tests().clone()).into_runs();\n\
+             assert_eq!(runs.len(),2);\n\
+             assert_eq!(runs.next_back(),Some(second));\n\
+             assert_eq!(runs.next(),Some(run.clone()));\n\
+             assert_eq!(runs.len(),0);\n\
+             let mut results=StoredRun::new(4,\"ci\".to_owned(),false,vec![result,StoredResult::new(8,junit::Outcome::Passed,None)]).into_results();\n\
+             assert_eq!(results.len(),2);\n\
+             assert_eq!(results.next_back().unwrap().test_id(),8);\n\
+             assert_eq!(results.next(),Some(result));\n\
+             assert_eq!(results.len(),0);\n\
              let consumed:Vec<_>=history.clone().into_runs().flat_map(StoredRun::into_results).collect();\n\
              assert_eq!(consumed,vec![result]);\n\
              assert!(History::default().runs().is_empty());\n\
@@ -48,20 +58,7 @@ fn fixture(body: &str) -> String {
 }
 
 fn compile(body: &str, execute: bool) -> (std::process::Output, Option<std::process::Output>) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("contract.rs");
-    let binary = directory.path().join("contract");
-    std::fs::write(&source, fixture(body)).unwrap();
-    let compilation = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
-        .arg("--edition=2021")
-        .arg(source)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .unwrap();
-    let execution =
-        (execute && compilation.status.success()).then(|| Command::new(binary).output().unwrap());
-    (compilation, execution)
+    common::compile(execute, |_| fixture(body))
 }
 
 #[test]
@@ -98,6 +95,8 @@ fn completed_history_rejects_mutation_after_valid_builder_read_and_consume_setup
         ("history.runs_mut();", "error[E0599]"),
         ("history.tests_mut();", "error[E0599]"),
         ("run.results_mut();", "error[E0599]"),
+        ("history.into_runs().as_mut_slice();", "error[E0599]"),
+        ("run.into_results().as_mut_slice();", "error[E0599]"),
     ] {
         let (negative, _) = compile(body, false);
         let error = String::from_utf8_lossy(&negative.stderr);

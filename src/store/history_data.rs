@@ -45,7 +45,8 @@ pub struct StoredRun {
 }
 
 impl StoredRun {
-    pub(super) fn new(id: i64, source: String, partial: bool, results: Vec<StoredResult>) -> Self {
+    /// Construct a completed run from its local identity, metadata and results.
+    pub fn new(id: i64, source: String, partial: bool, results: Vec<StoredResult>) -> Self {
         Self {
             id,
             source,
@@ -69,7 +70,7 @@ impl StoredRun {
         &self.results
     }
     /// Consume the completed run, yielding its results in their stored order.
-    pub fn into_results(self) -> impl ExactSizeIterator<Item = StoredResult> {
+    pub fn into_results(self) -> impl DoubleEndedIterator<Item = StoredResult> + ExactSizeIterator {
         self.results.into_iter()
     }
 }
@@ -82,7 +83,8 @@ pub struct History {
 }
 
 impl History {
-    pub(super) fn new(runs: Vec<StoredRun>, tests: HashMap<i64, (Tainted, Tainted)>) -> Self {
+    /// Construct a completed history with runs in caller-provided order.
+    pub fn new(runs: Vec<StoredRun>, tests: HashMap<i64, (Tainted, Tainted)>) -> Self {
         Self { runs, tests }
     }
 
@@ -95,7 +97,7 @@ impl History {
         &self.tests
     }
     /// Consume the completed history, yielding runs in their stored order.
-    pub fn into_runs(self) -> impl ExactSizeIterator<Item = StoredRun> {
+    pub fn into_runs(self) -> impl DoubleEndedIterator<Item = StoredRun> + ExactSizeIterator {
         self.runs.into_iter()
     }
 }

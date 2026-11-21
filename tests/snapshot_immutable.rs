@@ -2,7 +2,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
-use std::process::Command;
+mod common;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use greenshift::history::snapshot;
@@ -172,21 +172,7 @@ fn compile_fixture(
     body: &str,
     execute: bool,
 ) -> (std::process::Output, Option<std::process::Output>) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("contract.rs");
-    std::fs::write(&source, immutable_fixture(body)).unwrap();
-    let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    let binary = directory.path().join("contract");
-    let compilation = Command::new(compiler)
-        .arg("--edition=2024")
-        .arg(&source)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .unwrap();
-    let execution =
-        (execute && compilation.status.success()).then(|| Command::new(&binary).output().unwrap());
-    (compilation, execution)
+    common::compile(execute, |_| immutable_fixture(body))
 }
 
 #[test]

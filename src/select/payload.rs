@@ -271,8 +271,17 @@ impl<'a> Lines<'a> {
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
-    /// Consume lines in display order without exposing their backing storage.
-    pub fn into_lines(self) -> impl ExactSizeIterator<Item = Line<'a>> + DoubleEndedIterator {
+    /// Consume lines in display order with exact-size, double-ended iteration.
+    pub fn into_lines(self) -> impl DoubleEndedIterator<Item = Line<'a>> + ExactSizeIterator {
         self.lines.into_iter()
+    }
+}
+
+impl<'lines, 'text> IntoIterator for &'lines Lines<'text> {
+    type Item = &'lines Line<'text>;
+    type IntoIter = std::slice::Iter<'lines, Line<'text>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }

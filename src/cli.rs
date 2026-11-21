@@ -706,7 +706,7 @@ pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
     with_lines(&args.select, eligible, |lines| {
         let mut out = std::io::stdout().lock();
         let lines = lines.unwrap_or_default();
-        let filter = nextest::filter(lines, args.class(), listing.binaries().as_set());
+        let filter = nextest::filter(lines, args.class(), listing.binaries());
         writeln!(out, "{filter}")
             .and_then(|()| out.flush())
             .map(|()| ExitCode::SUCCESS)

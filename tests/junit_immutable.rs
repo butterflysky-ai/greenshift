@@ -1,7 +1,7 @@
 //! Completed JUnit payloads reject mutation, including from their producer parent.
 
 use std::path::Path;
-use std::process::Command;
+mod common;
 
 #[test]
 fn production_parser_and_construction_preserve_completed_read_and_consume_contract() {
@@ -27,6 +27,10 @@ fn production_parser_and_construction_preserve_completed_read_and_consume_contra
     ];
     let constructed = Report::new(cases);
     assert_eq!(parsed, constructed);
+    let mut reverse = parsed.clone().into_cases();
+    assert_eq!(reverse.len(), 2);
+    assert_eq!(reverse.next_back(), Some(constructed.cases()[1].clone()));
+    assert_eq!(reverse.len(), 1);
     let consumed: Vec<_> = parsed.into_cases().collect();
     assert_eq!(consumed, constructed.cases());
     assert_eq!(consumed[0].suite().as_raw(), "suite");
@@ -68,20 +72,7 @@ fn fixture(body: &str) -> String {
 }
 
 fn compile(body: &str, execute: bool) -> (std::process::Output, Option<std::process::Output>) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("contract.rs");
-    let binary = directory.path().join("contract");
-    std::fs::write(&source, fixture(body)).unwrap();
-    let compilation = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
-        .arg("--edition=2021")
-        .arg(source)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .unwrap();
-    let execution =
-        (execute && compilation.status.success()).then(|| Command::new(binary).output().unwrap());
-    (compilation, execution)
+    common::compile(execute, |_| fixture(body))
 }
 
 #[test]

@@ -1,6 +1,5 @@
 use super::*;
 use crate::tainted::Tainted;
-use std::collections::BTreeSet;
 
 #[test]
 fn escape_leaves_ordinary_text_alone() {
@@ -87,8 +86,8 @@ fn all_but_negates_and_matches_everything_when_empty() {
     );
 }
 
-fn bins(ids: &[&str]) -> BTreeSet<String> {
-    ids.iter().map(|id| (*id).to_owned()).collect()
+fn bins(ids: &[&str]) -> BinaryIds {
+    BinaryIds::new(ids.iter().map(|id| (*id).to_owned()).collect())
 }
 
 fn line<'a>(class: Class, suite: &'a Tainted, name: &'a Tainted) -> Line<'a> {
@@ -170,17 +169,14 @@ const BINARIES_ONLY: &str = r#"{"rust-build-meta":{"target-directory":"/t"},"rus
 #[test]
 fn binary_ids_from_a_full_or_binaries_only_listing() {
     assert_eq!(
-        binary_ids(FULL_LIST).unwrap().as_set(),
-        &bins(&["greenshift", "greenshift::cli"])
+        binary_ids(FULL_LIST).unwrap(),
+        bins(&["greenshift", "greenshift::cli"])
     );
     assert_eq!(
-        binary_ids(BINARIES_ONLY).unwrap().as_set(),
-        &bins(&["greenshift", "greenshift::bin/greenshift"])
+        binary_ids(BINARIES_ONLY).unwrap(),
+        bins(&["greenshift", "greenshift::bin/greenshift"])
     );
-    assert_eq!(
-        binary_ids(r#"{"rust-binaries":{}}"#).unwrap().as_set(),
-        &bins(&[])
-    );
+    assert_eq!(binary_ids(r#"{"rust-binaries":{}}"#).unwrap(), bins(&[]));
 }
 
 #[test]
@@ -202,7 +198,7 @@ fn binary_ids_refuses_anything_else() {
 fn a_full_listing_names_its_binaries_tests() {
     let listing = listing(FULL_LIST).unwrap();
     assert_eq!(
-        listing.binaries().as_set(),
+        listing.binaries(),
         &bins(&["greenshift", "greenshift::cli"])
     );
     assert!(listing.has("greenshift", "cli::tests::ingest_options"));

@@ -13,7 +13,6 @@
 //! tests, are never rich. A binaries-only listing names no tests, so a
 //! test gone from a binary it lists can still be.
 
-use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use crate::plan::{Inventory, InventoryTest};
@@ -182,7 +181,7 @@ pub fn binary_ids(json: &str) -> Result<BinaryIds, InventoryError> {
 /// tests are not in the inventory, and their terms would make nextest
 /// refuse the filterset. A line with no suite has no `binary_id` term and
 /// is kept.
-pub fn filter(lines: &[Line<'_>], class: Class, binaries: &BTreeSet<String>) -> String {
+pub fn filter(lines: &[Line<'_>], class: Class, binaries: &BinaryIds) -> String {
     let poor = lines
         .iter()
         .filter(|line| line.class() == Class::Poor)

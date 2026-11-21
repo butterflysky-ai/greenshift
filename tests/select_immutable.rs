@@ -1,7 +1,7 @@
 //! Completed selector records and their nested collections reject owned mutation.
 
 use std::path::Path;
-use std::process::Command;
+mod common;
 
 fn fixture(body: &str, selector: &Path) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -55,6 +55,9 @@ fn main() {
     let poor=Line::new(Class::Poor,100.0,50.0,info.suite(),info.name());
     let ordered=Lines::new(vec![line.clone(),poor.clone()]);
     assert_eq!(ordered.as_slice(), &[line.clone(),poor.clone()]);
+    let mut borrowed=Vec::new();
+    for item in &ordered { borrowed.push(item.class()); }
+    assert_eq!(borrowed,[Class::Rich,Class::Poor]);
     let mut consumed=ordered.clone().into_lines();
     assert_eq!(consumed.len(),2);
     assert_eq!(consumed.next(),Some(line.clone()));
@@ -87,45 +90,55 @@ fn main() {
         .replace("BODY", body)
 }
 
+fn relocate_payload(production: &str, payload: &Path) -> String {
+    let marker = "mod payload;";
+    let matches = production.matches(marker).count();
+    assert_eq!(
+        matches, 1,
+        "select fixture setup: expected exactly one `mod payload;` marker, found {matches}"
+    );
+    production.replacen(marker, &format!("#[path={payload:?}] mod payload;"), 1)
+}
+
 fn compile(body: &str, execute: bool) -> (std::process::Output, Option<std::process::Output>) {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("contract.rs");
-    let binary = directory.path().join("contract");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let selector = directory.path().join("select.rs");
-    // Relocate only the module path so rustc compiles the actual selector and
-    // its actual child payload rather than resolving a child beside this fixture.
-    // Put the probes in the selector producer parent, so pub(super) fields
-    // would fail the contract too, rather than hiding behind an external caller.
-    let production = std::fs::read_to_string(root.join("select.rs")).unwrap();
-    let fixture = fixture(body, &selector);
-    let (setup, contract) = fixture.split_once("fn main()").unwrap();
-    std::fs::write(
-        &selector,
-        format!(
-            "{}\npub fn contract_test(){contract}",
-            production.replace(
-                "mod payload;",
-                &format!("#[path={:?}] mod payload;", root.join("select/payload.rs")),
-            )
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        &source,
-        format!("{setup}\nfn main() {{ select::contract_test(); }}"),
-    )
-    .unwrap();
-    let compilation = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
-        .arg("--edition=2021")
-        .arg(source)
-        .arg("-o")
-        .arg(&binary)
-        .output()
+    common::compile(execute, |directory| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let selector = directory.join("select.rs");
+        // Keep the real selector's producer privacy boundary, relocating only
+        // its child payload path so no copied definitions can mask a regression.
+        let production = std::fs::read_to_string(root.join("select.rs")).unwrap();
+        let fixture = fixture(body, &selector);
+        let (setup, contract) = fixture.split_once("fn main()").unwrap();
+        std::fs::write(
+            &selector,
+            format!(
+                "{}\npub fn contract_test(){contract}",
+                relocate_payload(&production, &root.join("select/payload.rs"))
+            ),
+        )
         .unwrap();
-    let execution =
-        (execute && compilation.status.success()).then(|| Command::new(binary).output().unwrap());
-    (compilation, execution)
+        format!("{setup}\nfn main() {{ select::contract_test(); }}")
+    })
+}
+
+#[test]
+fn selector_fixture_rejects_missing_or_duplicate_payload_markers() {
+    for (source, count) in [("mod other;", 0), ("mod payload;\nmod payload;", 2)] {
+        let failure =
+            std::panic::catch_unwind(|| relocate_payload(source, Path::new("payload.rs")))
+                .expect_err("ambiguous fixture source must fail before rustc");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("assertion diagnostic");
+        assert!(
+            message.contains("select fixture setup: expected exactly one `mod payload;` marker")
+        );
+        assert!(message.contains(&format!("found {count}")));
+    }
+    assert_eq!(
+        relocate_payload("mod payload;", Path::new("actual.rs")),
+        "#[path=\"actual.rs\"] mod payload;"
+    );
 }
 
 #[test]

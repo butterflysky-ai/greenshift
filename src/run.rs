@@ -39,11 +39,11 @@ pub struct Invocation {
 
 /// What a backend's listing found.
 ///
-/// ```compile_fail
+/// ```
 /// use greenshift::run::Listed;
-/// let mut listed = Listed::Tests(Default::default());
-/// if let Listed::Tests(inventory) = &mut listed {
-///     inventory.clear();
+/// let listed = Listed::Tests(Default::default());
+/// if let Listed::Tests(inventory) = &listed {
+///     assert_eq!(inventory.iter().count(), 0);
 /// }
 /// ```
 #[derive(Debug)]
@@ -160,18 +160,26 @@ pub(crate) fn run_with_control(
 /// The groups to run, in order: rich, then poor, each only if it has a
 /// test, or rich alone, empty, when neither has one.
 ///
-/// ```compile_fail
+/// ```
 /// let mut groups = greenshift::run::planned_groups(&[], &[]);
-/// groups.as_mut_slice().reverse();
+/// assert_eq!(groups.len(), 1);
+/// assert_eq!(groups.next_back().unwrap().0, greenshift::select::Class::Rich);
+/// assert!(groups.next().is_none());
 /// ```
 pub fn planned_groups<'g, 't>(
     rich: &'g [&'t InventoryTest],
     poor: &'g [&'t InventoryTest],
-) -> impl Iterator<Item = (Class, &'g [&'t InventoryTest])> {
-    let empty = rich.is_empty() && poor.is_empty();
-    [(Class::Rich, rich), (Class::Poor, poor)]
-        .into_iter()
-        .filter(move |(class, group)| !group.is_empty() || (empty && *class == Class::Rich))
+) -> impl DoubleEndedIterator<Item = (Class, &'g [&'t InventoryTest])> + ExactSizeIterator {
+    let mut groups = [(Class::Rich, rich), (Class::Poor, poor)];
+    if rich.is_empty() && !poor.is_empty() {
+        groups.swap(0, 1);
+    }
+    let count = if !rich.is_empty() && !poor.is_empty() {
+        2
+    } else {
+        1
+    };
+    groups.into_iter().take(count)
 }
 
 /// Write the invocation's setup files and run it, its output going to

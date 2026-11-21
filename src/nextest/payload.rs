@@ -10,9 +10,6 @@ impl BinaryIds {
     pub fn new(ids: BTreeSet<String>) -> Self {
         Self { ids }
     }
-    pub fn as_set(&self) -> &BTreeSet<String> {
-        &self.ids
-    }
     pub fn contains(&self, id: &str) -> bool {
         self.ids.contains(id)
     }
@@ -30,6 +27,15 @@ impl BinaryIds {
     }
 }
 
+impl<'a> IntoIterator for &'a BinaryIds {
+    type Item = &'a String;
+    type IntoIter = std::collections::btree_set::Iter<'a, String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// What a nextest listing says exists now.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Listing {
@@ -44,14 +50,18 @@ impl Listing {
     pub fn binaries(&self) -> &BinaryIds {
         &self.binaries
     }
-    /// Names supplied by listed binaries; skipped binaries have no entry.
+    /// The test names of each binary whose tests the listing gives: the
+    /// `testcases` of a full listing's `listed` binaries. A binaries-only
+    /// listing, or a binary a full listing skipped, names no tests.
     pub fn tests(&self) -> &BTreeMap<String, BTreeSet<String>> {
         &self.tests
     }
     pub fn into_binary_ids(self) -> BinaryIds {
         self.binaries
     }
-    /// Empty suites match by name in any binary and are retained.
+    /// Whether the stored test `suite`, `name` is in the listing: its
+    /// binary is, and so is its name if the binary's tests are listed. A
+    /// test with no suite matches by name in any binary, so it is kept.
     pub fn has(&self, suite: &str, name: &str) -> bool {
         if suite.is_empty() {
             return true;
