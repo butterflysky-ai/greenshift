@@ -5,9 +5,10 @@
 //! split into rich and poor as `greenshift plan` splits them
 //! ([`cli::plan_groups`]); the backend runs the rich group and then the
 //! poor group, each as one or more [`Invocation`]s, every one writing
-//! JUnit to a file of its own; every JUnit file written is recorded in
-//! the store as one run, as `greenshift ingest` records it; and the exit
-//! status is that of the first invocation that failed, or 0.
+//! JUnit to a file of its own; the execution's JUnit files are recorded
+//! together as one distinct run, even when their bytes match a previous
+//! execution. `greenshift ingest` instead imports identical reports once.
+//! The exit status is that of the first invocation that failed, or 0.
 //!
 //! Each backend lives in a module of its own beside [`nextest`]; this
 //! module knows nothing of any one runner.
@@ -233,11 +234,11 @@ pub fn combined(codes: impl IntoIterator<Item = u8>) -> u8 {
     codes.into_iter().find(|&code| code != 0).unwrap_or(0)
 }
 
-/// Record the JUnit files in `junit` that exist as one run, as
-/// `scripts/record-history.sh` does for CI: with some missing, as a
-/// partial run; with none, not at all. The branch or tag is `--branch` or
-/// `--tag`, or as `ingest` finds it in the CI environment. Any error is
-/// named on stderr and does not change the exit status: the tests have run.
+/// Record this execution's existing JUnit files as one distinct run:
+/// with some missing, as a partial run; with none, not at all. The branch
+/// or tag is `--branch` or `--tag`, or as `ingest` finds it in the CI
+/// environment. Any error is named on stderr and does not change the
+/// exit status: the tests have run.
 fn record(options: &RunOptions, backend: &str, junit: &[PathBuf]) {
     let mut files = Vec::new();
     for file in junit {
