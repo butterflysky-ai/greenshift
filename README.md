@@ -8,7 +8,8 @@ history (`greenshift select`) and writes that choice as a cargo-nextest
 filterset (`greenshift nextest-filter`) or, for any test runner, as JSON
 rich and poor groups of the current tests (`greenshift plan`).
 `greenshift run nextest` does the whole cycle with cargo-nextest: list,
-plan, run and record.
+plan, run and record, and `greenshift init nextest` sets a repository up
+to do it in CI.
 
 ## Ingest
 
@@ -387,6 +388,70 @@ Exit status:
 - 1 for an error before any test runs, such as listing output that
   greenshift cannot read; 2 for a usage error.
 
+## Set up a repo
+
+```
+greenshift init nextest --release TAG --sha256 HEX [--ci github|forgejo]
+                        [--runs-on LABEL] [--force]
+```
+
+For example, to pin v0.2.0 (its `.sha256` file gives this checksum):
+
+```
+greenshift init nextest --release v0.2.0 \
+  --sha256 36a30034902f29885c9763d868aae1ea773ca79ddc710465c025a9f4c524074b
+```
+
+`init nextest` sets a cargo-nextest repository up to run `greenshift run
+nextest` in CI with [durable history](docs/design/durable-history.md), in
+one step. Commit what it writes as is:
+
+- **The workflow**, `.github/workflows/greenshift.yml` or
+  `.forgejo/workflows/greenshift.yml`: a test job that restores the
+  history, runs the tests and uploads the history as a data artifact, and
+  a separate publisher that publishes it for pushes to the default branch
+  only. `--ci` picks the forge; without it, the one of `.github` and
+  `.forgejo` the repository has. `--runs-on` names the runner label
+  (default `ubuntu-latest` on GitHub, `docker` on Forgejo), which must be
+  an x86_64 Linux runner: releases ship only for
+  `x86_64-unknown-linux-musl`.
+- **The pin.** The workflow installs the release `--release` names (newer
+  than v0.1.0, which predates `run nextest`) and refuses it, failing the
+  job, unless it matches `--sha256`. Neither has a default: take the
+  checksum from the release's `.sha256` file (see **Install a release**)
+  and check it independently.
+
+That is all it writes. `run nextest` has nextest send JUnit to files of
+its own (see **JUnit** under Run nextest), so it needs no stanza in
+`.config/nextest.toml`, and `init` neither reads nor changes that file.
+Running `greenshift ingest` on nextest's own JUnit output still needs the
+stanza shown under Ingest.
+
+On Forgejo the workflow is **not isolated**: stock Forgejo gives every
+step, the tests included, a token that can write the repository, and
+ignores `permissions` (see the
+[Forgejo capability gate](docs/design/durable-history.md#forgejo-capability-gate)).
+The file says so at the top, and `init` says so when it runs. Forgejo
+runs the workflows of only the first of `.forgejo/workflows`,
+`.gitea/workflows` and `.github/workflows` there is, so `init` also says
+when writing `.forgejo/workflows` would stop the others running.
+
+The workflow publishes the history to `refs/greenshift/history`, whole
+and never pruned, where anyone who can read the repository can read it:
+anyone at all, if the repository is public (see **Publication audience**
+below). The generated file says so too.
+
+It prints what it wrote. A second run with the same options changes
+nothing and says so. A generated file that exists and differs is left
+alone, and then nothing at all is written, unless `--force` is given.
+To pin a new release, run it again with the new `--release`, `--sha256`
+and `--force`.
+
+Exit status: 0 when the repository is set up, 1 for a file left alone,
+one reached through a symlink (never followed or replaced), or one that
+cannot be read or written, with nothing written, and 2 for a usage
+error, such as a missing or malformed `--release` or `--sha256`.
+
 ## Durable CI history
 
 Opt-in git-ref snapshots, stock cache integration and a separate trusted publisher
@@ -399,7 +464,10 @@ canonical and local history rather than discarding unpublished local runs.
 **Publication audience:** snapshots include the exact JUnit file paths stored in
 `run_files`, which may contain workstation usernames in absolute paths. Everyone
 with access to the destination repository can read that metadata. Use relative
-JUnit paths at ingest when absolute paths should not be published.
+JUnit paths at `greenshift ingest` when absolute paths should not be published;
+`run nextest` records the absolute paths of its own JUnit files, in a
+fresh directory under `$TMPDIR` (or `/tmp`), so they carry a user name only
+if `$TMPDIR` does.
 
 Ordinary history storage errors warn without failing tests; malformed history arguments
 or publish-policy refusals exit 2. A second CAS rejection does not automatically

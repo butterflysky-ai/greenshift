@@ -113,6 +113,52 @@ pub enum Command {
     Run(RunArgs),
     /// Restore or publish durable history, or print its immutable cache key.
     History(HistoryArgs),
+    /// Set the repository up to run its tests with greenshift in CI: write
+    /// the CI workflow, pinned to a greenshift release. Changes nothing
+    /// that exists unless --force is given.
+    Init(InitArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    #[command(subcommand)]
+    pub backend: InitBackend,
+}
+
+/// The test runners `init` sets a repository up for.
+#[derive(Debug, Subcommand)]
+pub enum InitBackend {
+    /// Set up `greenshift run nextest`, with cargo-nextest.
+    Nextest(InitNextestArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InitNextestArgs {
+    /// The forge to write the CI workflow for. Default: the one whose
+    /// directory (.github or .forgejo) the repository has.
+    #[arg(long, value_enum, value_name = "FORGE")]
+    pub ci: Option<crate::init::Forge>,
+
+    /// The greenshift release the workflow installs, such as v0.2.0. It
+    /// needs `run nextest` and durable history, so it is newer than v0.1.0.
+    #[arg(long, value_name = "TAG", required = true)]
+    pub release: crate::init::Release,
+
+    /// The release binary's SHA-256, from the release's .sha256 file,
+    /// checked independently. The workflow refuses a binary that does not
+    /// match it.
+    #[arg(long, value_name = "HEX", required = true)]
+    pub sha256: crate::init::Sha256,
+
+    /// The runner label the jobs run on, an x86_64 Linux runner: releases
+    /// ship only for x86_64-unknown-linux-musl. Default: ubuntu-latest on
+    /// GitHub, docker on Forgejo.
+    #[arg(long, value_name = "LABEL")]
+    pub runs_on: Option<crate::init::RunnerLabel>,
+
+    /// Replace generated files that exist and differ.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -465,7 +511,56 @@ pub fn run_with_control(control: &TransportControl) -> anyhow::Result<ExitCode> 
             Backend::Nextest(args) => run_nextest_with_control(&args, control),
         },
         Command::History(args) => history(&args, control),
+        Command::Init(args) => match args.backend {
+            InitBackend::Nextest(args) => init_nextest(&args, std::path::Path::new(".")),
+        },
     }
+}
+
+/// Write what `greenshift run nextest` needs in CI into the repository at
+/// `root`; see [`crate::init`].
+pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::Result<ExitCode> {
+    use crate::init::{self, Forge};
+    let forge = match args.ci {
+        Some(forge) => forge,
+        None => match init::detect_forge(root) {
+            Ok(forge) => {
+                println!("greenshift: found {}, so writing for {forge}", forge.dir());
+                forge
+            }
+            Err(why) => {
+                eprintln!("greenshift: usage error: {why}");
+                return Ok(ExitCode::from(2));
+            }
+        },
+    };
+    if forge == Forge::Forgejo {
+        println!(
+            "greenshift: note: the Forgejo workflow is not isolated: every step, the tests \
+             included, gets a token that can write the repository (see the top of the file)"
+        );
+        if let Some(hidden) = init::forgejo_would_hide(root) {
+            println!(
+                "greenshift: note: Forgejo runs the workflows of only the first of \
+                 .forgejo/workflows, .gitea/workflows and .github/workflows there is, so \
+                 committing .forgejo/workflows stops running the workflows in {hidden}; \
+                 move them into .forgejo/workflows to keep them"
+            );
+        }
+    }
+    let runs_on = args
+        .runs_on
+        .clone()
+        .unwrap_or_else(|| forge.default_runner());
+    let settings = init::nextest::Settings {
+        forge,
+        release: &args.release,
+        sha256: &args.sha256,
+        runs_on: &runs_on,
+    };
+    let wants = init::nextest::wants(&settings);
+    let actions = init::decide(root, wants, args.force)?;
+    init::apply(root, &actions)
 }
 
 fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<ExitCode> {

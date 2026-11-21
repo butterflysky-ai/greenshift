@@ -75,8 +75,13 @@ key can make an older cache authoritative.
 
 The reference [GitHub reusable workflow](../../examples/durable-history.github.yml)
 is not installed by this change. A caller must choose a published release that
-contains these commands and pin its independently verified SHA-256. `init`
-generation, per-branch saves/fold-in, multi-invocation keys and cache-only mode are
+contains these commands and pin its independently verified SHA-256.
+`greenshift init nextest` (#21) generates a standalone workflow from this one,
+with the release and SHA-256 given on its command line and a stricter install
+step (the download is moved into place only once `sha256sum --check --strict`
+passes), and a Forgejo variant that states the capability gate below instead
+of claiming isolation.
+Per-branch saves/fold-in, multi-invocation keys and cache-only mode are
 separate work.
 
 Reusable workflows cannot elevate their caller's permissions. A caller must
