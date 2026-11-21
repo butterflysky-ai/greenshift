@@ -5,6 +5,7 @@ use std::path::Path;
 
 use rusqlite::{config::DbConfig, params, Connection, OpenFlags};
 
+use super::{GroupOverlap, MergeReport};
 #[cfg(test)]
 use crate::junit::Outcome;
 use crate::report_key::ReportKey;
@@ -505,16 +506,19 @@ fn remap_runs(
     Ok(remapped)
 }
 
-/// Merge complete histories without treating SQLite's local row ids as identity.
-/// Durable run identities make publication idempotent while retaining independently
-/// recorded identical runs. Conflicting contents for one identity are rejected.
-pub fn merge(current: &Path, incoming: &Path, output: &Path) -> Result<(), SnapshotError> {
+/// Merge destination-first without treating SQLite's local row ids as identity.
+/// Genuine independent executions remain distinct. Keyed imports deduplicate by
+/// membership; entire partially overlapping incoming groups are excluded and
+/// reported. Conflicting contents for any shared retained identity are rejected.
+pub fn merge(current: &Path, incoming: &Path, output: &Path) -> Result<MergeReport, SnapshotError> {
     let data = load(current)?;
     let other = load(incoming)?;
-    write(&union(data, other)?, output)
+    let (data, report) = union(data, other)?;
+    write(&data, output)?;
+    Ok(report)
 }
 
-fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
+fn union(data: Data, other: Data) -> Result<(Data, MergeReport), SnapshotError> {
     let mut keys = BTreeSet::new();
     for key in data.tests.iter().chain(other.tests.iter()) {
         if !keys.contains(key) {
@@ -564,6 +568,30 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
         .iter()
         .map(|run| run.metadata.history_id.clone())
         .collect();
+    // This is the reverse-direction limitation, not an attempt to split or
+    // reconcile groups. In restore, these local groups cannot be fully merged
+    // back into the fetched source under its existing membership ownership.
+    let retained_groups = {
+        let source_keys: BTreeSet<_> = incoming.iter().flat_map(|run| run.reports.iter()).collect();
+        runs.iter()
+            .filter_map(|run| {
+                let seen = run
+                    .reports
+                    .iter()
+                    .filter(|key| source_keys.contains(*key))
+                    .count();
+                (seen != 0 && seen != run.reports.len()).then(|| {
+                    GroupOverlap::from_validated_id(
+                        run.metadata.history_id.as_str(),
+                        run.reports.len() - seen,
+                    )
+                })
+            })
+            .collect()
+    };
+    let mut excluded_groups = Vec::new();
+    let mut nonexact_replays = 0;
+    let mut metadata_replays = 0;
     let mut owners: BTreeMap<ReportKey, usize> = BTreeMap::new();
     for (index, run) in runs.iter().enumerate() {
         for key in &run.reports {
@@ -581,7 +609,12 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
                 .filter(|key| owners.contains_key(*key))
                 .count();
             if seen != 0 && seen != run.reports.len() {
-                return Err(invalid("report membership partial overlap"));
+                excluded_groups.push(GroupOverlap::from_validated_id(
+                    run.metadata.history_id.as_str(),
+                    run.reports.len() - seen,
+                ));
+                replay_only_tests.extend(run.results.iter().map(|result| result.test().index()));
+                continue;
             }
             if seen == run.reports.len() {
                 let first = owners[&run.reports[0]];
@@ -604,10 +637,10 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
                     )
                 });
                 if metadata_changed {
-                    eprintln!("greenshift: warning: report replay retains destination metadata, including source, partial coverage and branch/tag");
+                    metadata_replays += 1;
                 }
                 if !exact {
-                    eprintln!("greenshift: warning: existing report grouping retained; subset aggregate equivalence is not independently verified");
+                    nonexact_replays += 1;
                 }
                 // Non-exact all-seen groups prove membership only, not aggregate
                 // equivalence. Destination grouping and all metadata stay intact.
@@ -658,10 +691,18 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
         }
         merged = builder.freeze();
     }
-    Ok(Data {
-        tests: merged,
-        runs: freeze_runs(runs.into_iter()),
-    })
+    Ok((
+        Data {
+            tests: merged,
+            runs: freeze_runs(runs.into_iter()),
+        },
+        MergeReport::new(
+            excluded_groups,
+            retained_groups,
+            nonexact_replays,
+            metadata_replays,
+        ),
+    ))
 }
 
 #[cfg(test)]
@@ -840,7 +881,7 @@ mod import_tests {
     }
 
     #[test]
-    fn test_import_snapshot_partial_overlap_rejects_without_output_or_restore_changes() {
+    fn test_import_snapshot_partial_overlap_excludes_whole_group_and_reports_both_directions() {
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("first");
         let combined = dir.path().join("combined");
@@ -848,17 +889,26 @@ mod import_tests {
         record(&first, &[A]);
         record(&combined, &[A, B]);
         let before = std::fs::read(&first).unwrap();
-        assert!(matches!(
-            merge(&first, &combined, &output),
-            Err(SnapshotError::Invalid("report membership partial overlap"))
-        ));
-        assert!(!output.exists());
-        assert!(matches!(
-            restore_existing(&first, &combined, || false),
-            Err(SnapshotError::Invalid("report membership partial overlap"))
-        ));
+        let incoming_before = std::fs::read(&combined).unwrap();
+        let first_ids = identities(&first);
+        let combined_ids = identities(&combined);
+        let report = merge(&first, &combined, &output).unwrap();
+        assert_eq!(report.excluded_groups().len(), 1);
+        assert_eq!(report.excluded_groups()[0].history_id(), combined_ids[0]);
+        assert_eq!(report.excluded_groups()[0].unseen_memberships(), 1);
+        assert_eq!(identities(&output), first_ids);
         assert_eq!(std::fs::read(&first).unwrap(), before);
-        merge(&combined, &first, &output).unwrap();
+        assert_eq!(std::fs::read(&combined).unwrap(), incoming_before);
+        let restored = restore_existing(&first, &combined, || false).unwrap();
+        assert_eq!(restored, report);
+        assert_eq!(identities(&first), first_ids);
+        assert_eq!(std::fs::read(&combined).unwrap(), incoming_before);
+        let reverse = merge(&combined, &first, &output).unwrap();
+        assert!(reverse.excluded_groups().is_empty());
+        assert_eq!(reverse.retained_groups().len(), 1);
+        assert_eq!(reverse.retained_groups()[0].history_id(), combined_ids[0]);
+        assert_eq!(reverse.retained_groups()[0].unseen_memberships(), 1);
+        assert_eq!(reverse.nonexact_replays(), 1);
         assert_eq!(identities(&output), identities(&combined));
     }
 
@@ -917,6 +967,61 @@ mod import_tests {
     }
 
     #[test]
+    fn test_import_snapshot_later_shared_id_conflict_aborts_before_partial_group_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("destination");
+        let incoming = dir.path().join("incoming");
+        let output = dir.path().join("output");
+        record(&destination, &[A]);
+        Store::open(&destination)
+            .unwrap()
+            .record_run(
+                &NewRun {
+                    commit: None,
+                    source: "shared",
+                    files: &[],
+                    partial: false,
+                    branch: None,
+                    tag: None,
+                },
+                std::iter::empty(),
+            )
+            .unwrap();
+        record(&incoming, &[A, B]);
+        let connection = Connection::open(&incoming).unwrap();
+        connection
+            .execute(
+                "ATTACH DATABASE ?1 AS original",
+                [destination.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runs(commit_sha,source,ingested_at,partial,branch,tag,history_id)
+             SELECT commit_sha,'conflicting',ingested_at,partial,branch,tag,history_id
+             FROM original.runs WHERE source='shared'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&destination).unwrap();
+        assert!(matches!(
+            merge(&destination, &incoming, &output),
+            Err(SnapshotError::Invalid(
+                "one run identity has conflicting contents"
+            ))
+        ));
+        assert!(!output.exists());
+        assert!(matches!(
+            restore_existing(&destination, &incoming, || false),
+            Err(SnapshotError::Invalid(
+                "one run identity has conflicting contents"
+            ))
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+    }
+
+    #[test]
     fn test_import_snapshot_restore_roundtrip_retains_membership_and_local_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let original = dir.path().join("original");
@@ -968,7 +1073,7 @@ pub(crate) fn restore_existing(
     db: &Path,
     incoming: &Path,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<(), SnapshotError> {
+) -> Result<MergeReport, SnapshotError> {
     restore_existing_transaction(db, incoming, &mut cancelled, |_, _| Ok(()))
 }
 
@@ -985,7 +1090,7 @@ fn restore_existing_transaction(
     incoming: &Path,
     cancelled: &mut impl FnMut() -> bool,
     mut observe: impl FnMut(RestoreCheckpoint, &Connection) -> Result<(), SnapshotError>,
-) -> Result<(), SnapshotError> {
+) -> Result<MergeReport, SnapshotError> {
     if cancelled() {
         return Err(SnapshotError::Cancelled);
     }
@@ -1015,7 +1120,7 @@ fn restore_existing_transaction(
         let version = checked_connection_version(&tx)?;
         load_connection(&tx, version)?
     };
-    let data = union(local, incoming)?;
+    let (data, report) = union(local, incoming)?;
     if cancelled() {
         return Err(SnapshotError::Cancelled);
     }
@@ -1041,7 +1146,7 @@ fn restore_existing_transaction(
         return Err(SnapshotError::Cancelled);
     }
     tx.commit()?;
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]

@@ -119,7 +119,7 @@ fn fifty_thousand_rows_restore_from_ref_after_every_cache_entry_is_deleted() {
         .publish(&input, Some(&cache))
         .unwrap();
     let publish = start.elapsed();
-    assert!(cache.join(&published).is_dir());
+    assert!(cache.join(published.oid()).is_dir());
     std::fs::remove_dir_all(&cache).unwrap();
     std::fs::remove_file(&input).unwrap();
     assert!(!cache.exists());
@@ -129,7 +129,10 @@ fn fifty_thousand_rows_restore_from_ref_after_every_cache_entry_is_deleted() {
     // compressed DB is the only remaining source of these result rows.
     let reader = Remote::new(url).unwrap();
     let start = Instant::now();
-    assert!(reader.restore(&restored, Some(&cache)).unwrap());
+    assert!(matches!(
+        reader.restore(&restored, Some(&cache)).unwrap(),
+        greenshift::history::RestoreOutcome::Restored(_)
+    ));
     let restore = start.elapsed();
     let start = Instant::now();
     let store = Store::open_read_only(&restored).unwrap().unwrap();

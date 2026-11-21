@@ -100,8 +100,10 @@ pub(crate) fn run_with_control(
             return Ok(ExitCode::from(130));
         }
         match restored {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok(crate::history::RestoreOutcome::Restored(report)) => {
+                cli::show_restore_report(&report);
+            }
+            Ok(crate::history::RestoreOutcome::Missing) => {
                 history_unavailable = true;
                 eprintln!("greenshift: ⚠ no durable history; running without it");
             }

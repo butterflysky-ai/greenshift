@@ -18,7 +18,9 @@ greenshift ingest <JUNIT_XML>... [--db PATH] [--commit SHA] [--source NAME]
                   [--branch NAME | --tag NAME] [--partial]
 ```
 
-Every file given in one invocation is recorded as one run. For example, with
+A bundle of previously unseen unique reports is recorded as one aggregate run.
+Repeated files collapse; an all-seen bundle is a no-op, while mixing seen and
+unseen reports conflicts without recording anything. For example, with
 cargo-nextest's JUnit output turned on in `.config/nextest.toml`:
 
 ```toml
@@ -93,9 +95,23 @@ greenshift ingest target/nextest/default/junit.xml \
   publisher sharing the store or history ref together; older binaries reject
   newer stores. Do not
   downgrade or strip the membership table to make an old publisher accept it.
+  A stale or rolled-back CI pin can leave the job green while printing
+  ⚠ warnings containing `unsupported snapshot schema version` and
+  `History was not published`: history publication stops and that run's artifact
+  is not recovered automatically. Move the pin forward to a schema-5-capable release; do not
+  downgrade the database.
   Membership survives snapshot export, merge and restore. Publication keeps
   the remote destination's grouping/provenance; restore into an existing store
-  keeps the local destination's. Partial-overlap failures leave history intact.
+  keeps the local destination's. Unlike strict local imports, transport excludes
+  an entire partially overlapping incoming group, warns with its opaque history
+  ID, and still transfers unrelated runs. It neither splits aggregates nor counts
+  overlapping reports twice. After publication, that group's unseen reports
+  remain only in the source artifact, not the canonical snapshot; there is no
+  automatic recovery. After restore, excluded remote groups remain in the source
+  rather than the local store. A retained local grouping can still be excluded
+  by the next publication: successful restore does not reconcile that conflict.
+  [Durable history](docs/design/durable-history.md#schema-5-report-memberships)
+  describes the typed outcomes and limitations.
 - greenshift's messages show what was given on the command line (paths,
   and in usage errors a rejected value or an unexpected argument or
   subcommand) with control characters and backslashes escaped as in

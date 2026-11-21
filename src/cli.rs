@@ -627,15 +627,20 @@ fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<Exi
     let result = (|| -> anyhow::Result<()> {
         match &args.operation {
             HistoryCommand::Restore(options) => {
-                if !remote.restore(&options.db, options.cache_dir.as_deref())? {
-                    eprintln!("greenshift: ⚠ no durable history; running without it");
+                match remote.restore(&options.db, options.cache_dir.as_deref())? {
+                    crate::history::RestoreOutcome::Missing => {
+                        eprintln!("greenshift: ⚠ no durable history; running without it");
+                    }
+                    crate::history::RestoreOutcome::Restored(report) => {
+                        show_restore_report(&report);
+                    }
                 }
             }
             HistoryCommand::Publish(options) => {
-                println!(
-                    "{}",
-                    remote.publish(&options.data.db, options.data.cache_dir.as_deref())?
-                );
+                let published =
+                    remote.publish(&options.data.db, options.data.cache_dir.as_deref())?;
+                println!("{}", published.oid());
+                show_publish_report(published.report());
             }
             HistoryCommand::CacheKey(_) => {
                 println!(
@@ -660,6 +665,41 @@ fn history(args: &HistoryArgs, control: &TransportControl) -> anyhow::Result<Exi
     }
     // History storage must never turn a successful test job into a failed one.
     Ok(ExitCode::SUCCESS)
+}
+
+fn show_publish_report(report: &crate::history::MergeReport) {
+    show_merge_replays(report);
+    for group in report.excluded_groups() {
+        eprintln!(
+            "greenshift: ⚠ history group {} was not published: partial report overlap; {} unseen report memberships remain only in the source artifact, with no automatic recovery. Nonconflicting history was published",
+            group.history_id(), group.unseen_memberships(),
+        );
+    }
+}
+
+pub(crate) fn show_restore_report(report: &crate::history::MergeReport) {
+    show_merge_replays(report);
+    for group in report.excluded_groups() {
+        eprintln!(
+            "greenshift: ⚠ history group {} was not restored locally: partial report overlap; {} unseen report memberships remain in the incoming source, not the local destination",
+            group.history_id(), group.unseen_memberships(),
+        );
+    }
+    for group in report.retained_groups() {
+        eprintln!(
+            "greenshift: ⚠ local history group {} retains {} report memberships absent from the source; publishing back may exclude this group. Restore did not reconcile the grouping conflict; no automatic recovery",
+            group.history_id(), group.unseen_memberships(),
+        );
+    }
+}
+
+fn show_merge_replays(report: &crate::history::MergeReport) {
+    if report.metadata_replays() != 0 {
+        eprintln!("greenshift: ⚠ report replay retains destination metadata, including source, partial coverage and branch/tag ({} replay groups)", report.metadata_replays());
+    }
+    if report.nonexact_replays() != 0 {
+        eprintln!("greenshift: ⚠ existing report grouping retained; subset/spanning aggregate equivalence is not independently verified ({} replay groups)", report.nonexact_replays());
+    }
 }
 
 /// Name `err` on stderr as greenshift names every error, whether it ends
