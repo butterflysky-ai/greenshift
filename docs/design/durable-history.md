@@ -1,7 +1,8 @@
 <!-- design-meta: status=implemented-repair-review-pending; last-updated=2026-11-21; phase=implementation -->
 # Durable history
 
-`refs/greenshift/history` is the canonical complete database. Each publication
+`refs/greenshift/history` is the canonical full-database snapshot of published
+history, not a promise that every source observation was admitted. Each publication
 replaces a parentless commit containing exactly `history.sqlite.gz`. Reachable
 history is bounded to the current snapshot. Replaced objects remain subject to
 the forge's garbage collection and retention; this does not promise bounded

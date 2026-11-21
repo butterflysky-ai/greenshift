@@ -100,7 +100,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Record JUnit XML results in the history store, all as one run.
+    /// Import all-new JUnit reports as one aggregate run; all-seen replays
+    /// no-op, and mixing seen/unseen reports fails without recording.
     Ingest(IngestArgs),
     /// Print which tests to run first (rich) and after (poor), from history.
     Select(SelectArgs),
