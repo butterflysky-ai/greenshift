@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::Output;
 
+use greenshift::history::{GroupOverlap, MergeReport, PublishOutcome, Remote, RestoreOutcome};
 use greenshift::junit::{Outcome, TestCase};
 use greenshift::store::{NewRun, Store};
 use greenshift::tainted::Tainted;
@@ -301,6 +302,45 @@ fn fixture(directory: &Path) -> (std::path::PathBuf, std::path::PathBuf, std::pa
         .unwrap();
     }
     (repository, a, b)
+}
+
+#[test]
+fn public_transport_reports_expose_named_types_and_nonempty_shared_readers() {
+    let directory = tempfile::tempdir().unwrap();
+    let (repository, a, b) = fixture(directory.path());
+    let destination = directory.path().join("destination.sqlite");
+    let incoming = directory.path().join("incoming.sqlite");
+    import(&destination, &[&a], "remote-group", true);
+    let incoming_id = import(&incoming, &[&a, &b], "local-group", false);
+    let remote = Remote::new(repository.to_str().unwrap()).unwrap();
+    let initial: PublishOutcome = remote.publish(&destination, None).unwrap();
+    assert!(initial.report().excluded_groups().is_empty());
+    let published: PublishOutcome = remote.publish(&incoming, None).unwrap();
+    assert_eq!(remote.head().unwrap().as_deref(), Some(published.oid()));
+    let report: &MergeReport = published.report();
+    assert_eq!(report.excluded_groups().len(), 1);
+    let excluded: &GroupOverlap = &report.excluded_groups()[0];
+    assert_eq!(excluded.history_id(), incoming_id);
+    assert_eq!(excluded.unseen_memberships(), 1);
+    assert!(report.retained_groups().is_empty());
+    assert_eq!(
+        (report.nonexact_replays(), report.metadata_replays()),
+        (0, 0)
+    );
+
+    let restored: RestoreOutcome = remote.restore(&incoming, None).unwrap();
+    let RestoreOutcome::Restored(report) = restored else {
+        panic!("canonical history exists");
+    };
+    assert!(report.excluded_groups().is_empty());
+    assert_eq!(report.retained_groups().len(), 1);
+    let retained: &GroupOverlap = &report.retained_groups()[0];
+    assert_eq!(retained.history_id(), incoming_id);
+    assert_eq!(retained.unseen_memberships(), 1);
+    assert_eq!(
+        (report.nonexact_replays(), report.metadata_replays()),
+        (1, 1)
+    );
 }
 
 #[cfg(unix)]
