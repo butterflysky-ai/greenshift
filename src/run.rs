@@ -7,7 +7,8 @@
 //! poor group, each as one or more [`Invocation`]s, every one writing
 //! JUnit to a file of its own; the execution's JUnit files are recorded
 //! together as one distinct run, even when their bytes match a previous
-//! execution. `greenshift ingest` instead imports identical reports once.
+//! execution. `greenshift ingest` instead imports identical reports once
+//! per textual commit namespace.
 //! The exit status is that of the first invocation that failed, or 0.
 //!
 //! Each backend lives in a module of its own beside [`nextest`]; this
