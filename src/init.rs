@@ -76,21 +76,28 @@ impl fmt::Display for Forge {
     }
 }
 
+/// Why [`detect_forge`] could not tell which forge a repository uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DetectForgeError {
+    #[error(
+        "found neither .github nor .forgejo; say which forge with --ci github or --ci forgejo"
+    )]
+    Neither,
+    #[error("found both .github and .forgejo; say which forge with --ci github or --ci forgejo")]
+    Both,
+}
+
 /// The forge whose directory ([`Forge::dir`]) `root` has, when exactly
 /// one does.
-pub fn detect_forge(root: &Path) -> Result<Forge, String> {
+pub fn detect_forge(root: &Path) -> Result<Forge, DetectForgeError> {
     let found: Vec<Forge> = [Forge::Github, Forge::Forgejo]
         .into_iter()
         .filter(|forge| root.join(forge.dir()).is_dir())
         .collect();
     match found[..] {
         [forge] => Ok(forge),
-        [] => Err("found neither .github nor .forgejo; say which forge with \
-                   --ci github or --ci forgejo"
-            .into()),
-        _ => Err("found both .github and .forgejo; say which forge with \
-                  --ci github or --ci forgejo"
-            .into()),
+        [] => Err(DetectForgeError::Neither),
+        _ => Err(DetectForgeError::Both),
     }
 }
 
@@ -165,7 +172,9 @@ impl Sha256 {
 
 /// Why a `--sha256` was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("expected a SHA-256 checksum: 64 hex digits, as the release's .sha256 file gives it")]
+#[error(
+    "expected a SHA-256 checksum: 64 hex digits, the first field of the release's .sha256 file"
+)]
 pub struct Sha256Error;
 
 impl std::str::FromStr for Sha256 {
@@ -403,6 +412,16 @@ fn stage(path: &Path, content: &str) -> std::io::Result<tempfile::NamedTempFile>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_forge_is_detected_only_when_exactly_one_directory_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(detect_forge(dir.path()), Err(DetectForgeError::Neither));
+        std::fs::create_dir(dir.path().join(".forgejo")).unwrap();
+        assert_eq!(detect_forge(dir.path()), Ok(Forge::Forgejo));
+        std::fs::create_dir(dir.path().join(".github")).unwrap();
+        assert_eq!(detect_forge(dir.path()), Err(DetectForgeError::Both));
+    }
 
     #[test]
     fn releases_are_plain_tags_newer_than_the_last_without_history() {

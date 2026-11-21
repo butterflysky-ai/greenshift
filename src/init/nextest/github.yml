@@ -25,7 +25,9 @@
 # The history, every run's test results by commit and branch, is kept
 # whole, never pruned, and published where anyone who can read this
 # repository can read it: anyone at all, if the repository is public.
-# Deleting refs/greenshift/history removes the published copy.
+# Deleting refs/greenshift/history stops publishing it, but earlier
+# copies stay with the forge until its garbage collection and cache
+# eviction remove them: delete the greenshift-history-* caches too.
 name: greenshift
 
 on: [push, pull_request]

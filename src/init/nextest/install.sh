@@ -4,13 +4,14 @@ set -euo pipefail
 [[ "$GREENSHIFT_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
   { echo "::error::GREENSHIFT_SHA256 is not a SHA-256 checksum"; exit 1; }
 bin="$RUNNER_TEMP/greenshift"
+# Whatever fails, no download is left behind (curl --remove-on-error
+# would need curl 7.83, newer than many runner images have).
+trap 'rm -f "$bin.download"' EXIT
 curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  --remove-on-error \
   "https://github.com/paceheart/greenshift/releases/download/$GREENSHIFT_RELEASE/greenshift-$GREENSHIFT_RELEASE-x86_64-unknown-linux-musl" \
   --output "$bin.download"
 # Fail closed: only a binary matching the pinned checksum is installed.
 if ! printf '%s  %s\n' "$GREENSHIFT_SHA256" "$bin.download" | sha256sum --check --strict; then
-  rm -f "$bin.download"
   echo "::error::greenshift $GREENSHIFT_RELEASE does not match the pinned SHA-256; not installed"
   exit 1
 fi

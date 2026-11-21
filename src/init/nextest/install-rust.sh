@@ -10,16 +10,15 @@ fi
 rustup_version=1.29.3
 rustup_sha256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 init="$RUNNER_TEMP/rustup-init"
+# Whatever fails, rustup-init is not left behind.
+trap 'rm -f "$init"' EXIT
 curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  --remove-on-error \
   "https://static.rust-lang.org/rustup/archive/$rustup_version/x86_64-unknown-linux-gnu/rustup-init" \
   --output "$init"
 if ! printf '%s  %s\n' "$rustup_sha256" "$init" | sha256sum --check --strict; then
-  rm -f "$init"
   echo "::error::rustup-init $rustup_version does not match its pinned SHA-256; not installed"
   exit 1
 fi
 chmod +x "$init"
 "$init" -y --no-modify-path --profile minimal
-rm -f "$init"
 echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"

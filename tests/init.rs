@@ -568,3 +568,60 @@ fn a_github_file_that_is_not_a_directory_does_not_name_the_forge() {
         "{out}"
     );
 }
+
+/// Two wanted files, `new.txt` and `sub/other.txt`, as a backend with
+/// more than one would ask for them.
+#[cfg(unix)]
+fn two_wants() -> Vec<greenshift::init::Want> {
+    ["new.txt", "sub/other.txt"]
+        .into_iter()
+        .map(|path| greenshift::init::Want {
+            path: path.into(),
+            content: "wanted\n".into(),
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_conflict_in_one_wanted_file_means_none_is_written() {
+    use greenshift::init::{apply, decide, Action};
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "sub/other.txt", "different\n");
+    let actions = decide(dir.path(), two_wants(), false).unwrap();
+    assert!(matches!(actions[0], Action::Write { .. }), "{actions:?}");
+    assert!(matches!(actions[1], Action::Conflict { .. }), "{actions:?}");
+    let code = apply(dir.path(), &actions).unwrap();
+    assert_eq!(code, std::process::ExitCode::from(1));
+    assert_eq!(
+        snapshot(dir.path()),
+        vec![(PathBuf::from("sub/other.txt"), b"different\n".to_vec())],
+        "the file without a conflict is not written either"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn one_wanted_file_that_cannot_be_staged_means_none_is_written() {
+    use greenshift::init::{apply, decide};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    // The second file cannot be staged in its directory; the first can.
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::File::create(sub.join("probe")).is_ok() {
+        // Running as root, which can write anywhere: nothing to test.
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let actions = decide(dir.path(), two_wants(), false).unwrap();
+    let result = apply(dir.path(), &actions);
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = result.expect_err("staging sub/other.txt fails");
+    assert!(format!("{err:#}").contains("nothing written"), "{err:#}");
+    assert!(
+        snapshot(dir.path()).is_empty(),
+        "new.txt, staged first, is neither renamed into place nor left staged"
+    );
+}

@@ -155,13 +155,13 @@ fn github_keeps_the_reference_trust_boundary() {
 /// Run the install step's script of `job`, with `curl` replaced by one
 /// that writes `binary` where the real one would write the download (or,
 /// when `curl_fails`, fails partway through it), and return whether it
-/// succeeded and what it installed.
+/// succeeded, what it installed and whether it downloaded anything.
 fn install(
     workflow: &Value,
     job: &str,
     binary: &[u8],
     curl_fails: bool,
-) -> (bool, Option<Vec<u8>>) {
+) -> (bool, Option<Vec<u8>>, bool) {
     let script = step(workflow, job, "Install pinned greenshift release")["run"]
         .as_str()
         .unwrap()
@@ -203,28 +203,32 @@ fn install(
         .collect();
     assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
     let release = env["GREENSHIFT_RELEASE"].as_str().unwrap();
-    assert_eq!(
-        std::fs::read_to_string(&urls).unwrap(),
-        format!(
-            "https://github.com/paceheart/greenshift/releases/download/{release}/\
+    let fetched = std::fs::read_to_string(&urls).unwrap_or_default();
+    assert!(
+        fetched.is_empty()
+            || fetched
+                == format!(
+                    "https://github.com/paceheart/greenshift/releases/download/{release}/\
              greenshift-{release}-x86_64-unknown-linux-musl\n"
-        ),
-        "the one download is the pinned release's Linux binary"
+                ),
+        "the one download, if any, is the pinned release's Linux binary: {fetched}"
     );
     (
         status.success(),
         installed
             .exists()
             .then(|| std::fs::read(installed).unwrap()),
+        !fetched.is_empty(),
     )
 }
 
 /// An executable `curl` in `bin` that writes `payload` where the real one
 /// would write the download, and appends each URL it is given to `urls`.
-/// Like the real one with --fail, it fails without an --output. When
+/// Like the real one with --fail, it fails without an --output. It knows
+/// only the options curl 7.61 (RHEL 8's) knows, of those the scripts may
+/// use, and refuses any other as an older curl does: exit 2. When
 /// `fails`, it writes part of the download and then fails as the real one
-/// does on a broken transfer: exit 22, removing the partial file only if
-/// given --remove-on-error.
+/// does on a broken transfer: exit 22, leaving the partial file.
 fn fake_curl(
     bin: &std::path::Path,
     payload: &std::path::Path,
@@ -233,7 +237,7 @@ fn fake_curl(
 ) {
     let curl = bin.join("curl");
     let finish = if fails {
-        "head -c 3 {payload} > \"$out\"\n[[ -z $remove ]] || rm -f \"$out\"\nexit 22\n"
+        "head -c 3 {payload} > \"$out\"\nexit 22\n"
     } else {
         "cp {payload} \"$out\"\n"
     }
@@ -241,10 +245,12 @@ fn fake_curl(
     std::fs::write(
         &curl,
         format!(
-            "#!/usr/bin/env bash\nout=\nremove=\nwhile [[ $# -gt 0 ]]; do\n  \
+            "#!/usr/bin/env bash\nout=\nwhile [[ $# -gt 0 ]]; do\n  \
              case $1 in\n    --output) out=$2; shift ;;\n    \
-             --remove-on-error) remove=1 ;;\n    \
-             https://*) echo \"$1\" >> {urls:?} ;;\n  esac\n  \
+             --retry|--proto|--proto-redir) shift ;;\n    \
+             --fail|--location|--tlsv1.2) ;;\n    \
+             https://*) echo \"$1\" >> {urls:?} ;;\n    \
+             *) echo \"curl: option $1: is unknown\" >&2; exit 2 ;;\n  esac\n  \
              shift\ndone\n[[ -n $out ]] || exit 22\n{finish}"
         ),
     )
@@ -272,10 +278,13 @@ fn the_install_step_fails_closed_on_a_checksum_mismatch() {
     for forge in forges() {
         let workflow = generated(forge, &pinned, &[]);
         for job in ["test", "publish"] {
-            let (ok, installed) = install(&workflow, job, binary, false);
-            assert!(ok, "{forge} {job}: the matching binary is installed");
+            let (ok, installed, fetched) = install(&workflow, job, binary, false);
+            assert!(
+                ok && fetched,
+                "{forge} {job}: the matching binary is installed"
+            );
             assert_eq!(installed.as_deref(), Some(&binary[..]));
-            let (ok, installed) = install(&workflow, job, b"tampered", false);
+            let (ok, installed, _) = install(&workflow, job, b"tampered", false);
             assert!(!ok, "{forge} {job}: a mismatch fails the step");
             assert_eq!(installed, None, "{forge} {job}: nothing is installed");
         }
@@ -290,9 +299,33 @@ fn a_broken_download_fails_the_install_step_and_leaves_nothing() {
         let workflow = generated(forge, &sha256_hex(binary), &[]);
         for job in ["test", "publish"] {
             // install() asserts that nothing but an installed binary is left.
-            let (ok, installed) = install(&workflow, job, binary, true);
+            let (ok, installed, _) = install(&workflow, job, binary, true);
             assert!(!ok, "{forge} {job}: a broken download fails the step");
             assert_eq!(installed, None, "{forge} {job}: nothing is installed");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_install_step_refuses_a_hand_edited_pin_before_downloading() {
+    let binary = b"#!/bin/sh\necho pretend greenshift\n";
+    let sha256 = sha256_hex(binary);
+    for forge in forges() {
+        for (name, bad) in [
+            ("GREENSHIFT_RELEASE", "v0.2.0/../../evil"),
+            ("GREENSHIFT_RELEASE", "main"),
+            ("GREENSHIFT_SHA256", "not-a-checksum"),
+            ("GREENSHIFT_SHA256", &sha256[1..]),
+        ] {
+            let mut workflow = generated(forge, &sha256, &[]);
+            workflow["env"][name] = Value::String(bad.into());
+            for job in ["test", "publish"] {
+                let (ok, installed, fetched) = install(&workflow, job, binary, false);
+                assert!(!ok, "{forge} {job}: {name}={bad} fails the step");
+                assert!(!fetched, "{forge} {job}: {name}={bad} downloads nothing");
+                assert_eq!(installed, None);
+            }
         }
     }
 }
@@ -531,7 +564,8 @@ struct RustStep {
 
 /// Run the Forgejo test job's Rust step with a PATH that has only the
 /// tools it needs, `cargo` among them when `with_cargo`, and a `curl`
-/// that downloads `payload`. When `pin_payload`, the step's pinned
+/// that downloads `payload` (or, when `curl_fails`, fails partway through
+/// it). When `pin_payload`, the step's pinned
 /// checksum is replaced with `payload`'s, standing in for the published
 /// rustup-init; `cargo_home` is `$CARGO_HOME`, if any.
 #[cfg(unix)]
@@ -540,6 +574,7 @@ fn install_rust(
     payload: &[u8],
     pin_payload: bool,
     cargo_home: Option<&str>,
+    curl_fails: bool,
 ) -> RustStep {
     let workflow = generated("forgejo", &"a".repeat(64), &[]);
     let mut script = step(&workflow, "test", "Install Rust when the runner has none")["run"]
@@ -584,7 +619,7 @@ fn install_rust(
     let download = dir.path().join("payload");
     std::fs::write(&download, payload).unwrap();
     let urls = dir.path().join("urls");
-    fake_curl(&bin, &download, &urls, false);
+    fake_curl(&bin, &download, &urls, curl_fails);
     let temp = dir.path().join("runner-temp");
     std::fs::create_dir(&temp).unwrap();
     let home = dir.path().join("home");
@@ -618,13 +653,13 @@ fn the_rust_step_uses_the_runners_cargo_and_otherwise_installs_only_a_matching_r
     let rustup = b"#!/usr/bin/env bash\ntouch \"$RAN\"\n";
     let url =
         "https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init\n";
-    let present = install_rust(true, rustup, false, None);
+    let present = install_rust(true, rustup, false, None, false);
     assert!(
         present.ok && present.urls.is_empty() && !present.ran,
         "cargo present: nothing fetched"
     );
     assert!(present.github_path.is_empty(), "and PATH left as it is");
-    let mismatch = install_rust(false, rustup, false, None);
+    let mismatch = install_rust(false, rustup, false, None, false);
     assert!(
         !mismatch.ok,
         "a rustup-init that does not match the pin fails the step"
@@ -632,7 +667,7 @@ fn the_rust_step_uses_the_runners_cargo_and_otherwise_installs_only_a_matching_r
     assert!(!mismatch.ran, "and is never run");
     assert!(mismatch.github_path.is_empty());
     assert_eq!(mismatch.urls, url);
-    let matching = install_rust(false, rustup, true, None);
+    let matching = install_rust(false, rustup, true, None, false);
     assert!(matching.ok, "a matching rustup-init is installed");
     assert!(matching.ran, "and run");
     assert_eq!(matching.urls, url);
@@ -641,10 +676,25 @@ fn the_rust_step_uses_the_runners_cargo_and_otherwise_installs_only_a_matching_r
         format!("{}/.cargo/bin\n", matching.home.display()),
         "and cargo's directory is put on PATH for later steps"
     );
-    let elsewhere = install_rust(false, rustup, true, Some("/opt/cargo"));
+    let elsewhere = install_rust(false, rustup, true, Some("/opt/cargo"), false);
     assert!(elsewhere.ok && elsewhere.ran);
     assert_eq!(
         elsewhere.github_path, "/opt/cargo/bin\n",
         "$CARGO_HOME wins"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_broken_rustup_download_or_a_failing_rustup_fails_the_step_and_leaves_nothing() {
+    // install_rust() asserts that nothing is left in $RUNNER_TEMP.
+    let rustup = b"#!/usr/bin/env bash\ntouch \"$RAN\"\n";
+    let broken = install_rust(false, rustup, true, None, true);
+    assert!(!broken.ok, "a broken download fails the step");
+    assert!(!broken.ran && broken.github_path.is_empty());
+    let failing = b"#!/usr/bin/env bash\ntouch \"$RAN\"\nexit 1\n";
+    let failed = install_rust(false, failing, true, None, false);
+    assert!(failed.ran, "the matching rustup-init is run");
+    assert!(!failed.ok, "and its failure fails the step");
+    assert!(failed.github_path.is_empty(), "and PATH is left as it is");
 }

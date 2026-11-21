@@ -29,7 +29,9 @@
 # The history, every run's test results by commit and branch, is kept
 # whole, never pruned, and published where anyone who can read this
 # repository can read it: anyone at all, if the repository is public.
-# Deleting refs/greenshift/history removes the published copy.
+# Deleting refs/greenshift/history stops publishing it, but earlier
+# copies stay with the forge until its garbage collection and cache
+# eviction remove them: delete the greenshift-history-* caches too.
 #
 # Forgejo's artifact and cache actions differ from GitHub's: the artifact
 # steps use Forgejo's own forks, as stock v4 refuses to run here. Check a
@@ -62,13 +64,14 @@ jobs:
           [[ "$GREENSHIFT_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
             { echo "::error::GREENSHIFT_SHA256 is not a SHA-256 checksum"; exit 1; }
           bin="$RUNNER_TEMP/greenshift"
+          # Whatever fails, no download is left behind (curl --remove-on-error
+          # would need curl 7.83, newer than many runner images have).
+          trap 'rm -f "$bin.download"' EXIT
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --remove-on-error \
             "https://github.com/paceheart/greenshift/releases/download/$GREENSHIFT_RELEASE/greenshift-$GREENSHIFT_RELEASE-x86_64-unknown-linux-musl" \
             --output "$bin.download"
           # Fail closed: only a binary matching the pinned checksum is installed.
           if ! printf '%s  %s\n' "$GREENSHIFT_SHA256" "$bin.download" | sha256sum --check --strict; then
-            rm -f "$bin.download"
             echo "::error::greenshift $GREENSHIFT_RELEASE does not match the pinned SHA-256; not installed"
             exit 1
           fi
@@ -102,18 +105,17 @@ jobs:
           rustup_version=1.29.3
           rustup_sha256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
           init="$RUNNER_TEMP/rustup-init"
+          # Whatever fails, rustup-init is not left behind.
+          trap 'rm -f "$init"' EXIT
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --remove-on-error \
             "https://static.rust-lang.org/rustup/archive/$rustup_version/x86_64-unknown-linux-gnu/rustup-init" \
             --output "$init"
           if ! printf '%s  %s\n' "$rustup_sha256" "$init" | sha256sum --check --strict; then
-            rm -f "$init"
             echo "::error::rustup-init $rustup_version does not match its pinned SHA-256; not installed"
             exit 1
           fi
           chmod +x "$init"
           "$init" -y --no-modify-path --profile minimal
-          rm -f "$init"
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
       - name: Install cargo-nextest
         run: cargo install --locked cargo-nextest --version 0.9.143
@@ -159,13 +161,14 @@ jobs:
           [[ "$GREENSHIFT_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
             { echo "::error::GREENSHIFT_SHA256 is not a SHA-256 checksum"; exit 1; }
           bin="$RUNNER_TEMP/greenshift"
+          # Whatever fails, no download is left behind (curl --remove-on-error
+          # would need curl 7.83, newer than many runner images have).
+          trap 'rm -f "$bin.download"' EXIT
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --remove-on-error \
             "https://github.com/paceheart/greenshift/releases/download/$GREENSHIFT_RELEASE/greenshift-$GREENSHIFT_RELEASE-x86_64-unknown-linux-musl" \
             --output "$bin.download"
           # Fail closed: only a binary matching the pinned checksum is installed.
           if ! printf '%s  %s\n' "$GREENSHIFT_SHA256" "$bin.download" | sha256sum --check --strict; then
-            rm -f "$bin.download"
             echo "::error::greenshift $GREENSHIFT_RELEASE does not match the pinned SHA-256; not installed"
             exit 1
           fi
