@@ -3,6 +3,41 @@
 use std::path::Path;
 mod common;
 
+#[test]
+fn external_completed_history_constructors_preserve_typed_inputs_and_order() {
+    use greenshift::junit::Outcome;
+    use greenshift::store::{History, StoredResult, StoredRun};
+    use greenshift::tainted::Tainted;
+
+    let failed = StoredResult::new(7, Outcome::Failed, Some(12));
+    let passed = StoredResult::new(8, Outcome::Passed, None);
+    let first = StoredRun::new(42, "first".to_owned(), true, vec![failed]);
+    let second = StoredRun::new(43, "second".to_owned(), false, vec![passed]);
+    let names = [
+        (7, (Tainted::raw("suite"), Tainted::raw("first\n"))),
+        (8, (Tainted::raw("suite"), Tainted::raw("second"))),
+    ]
+    .into();
+    let history = History::new(vec![first.clone(), second.clone()], names);
+    assert_eq!(history.runs(), &[first, second]);
+    assert_eq!(history.tests()[&7].1.to_string(), "first\\n");
+    assert_eq!(history.runs()[0].source(), "first");
+    assert!(history.runs()[0].partial());
+    assert!(!history.runs()[1].partial());
+    let mut runs = history.into_runs();
+    assert_eq!(runs.len(), 2);
+    let last = runs.next_back().unwrap();
+    assert_eq!(last.id(), 43);
+    let mut results = last.into_results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.next_back(), Some(passed));
+    assert_eq!(results.next(), None);
+    let first = runs.next().unwrap();
+    assert_eq!(first.id(), 42);
+    assert_eq!(first.results(), &[failed]);
+    assert_eq!(runs.len(), 0);
+}
+
 fn fixture(body: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     // Compile the actual payloads, builders, Outcome and Tainted implementations
