@@ -539,6 +539,14 @@ pub fn init_nextest(args: &InitNextestArgs, root: &std::path::Path) -> anyhow::R
             "greenshift: note: the Forgejo workflow is not isolated: every step, the tests \
              included, gets a token that can write the repository (see the top of the file)"
         );
+        if let Some(hidden) = init::forgejo_would_hide(root) {
+            println!(
+                "greenshift: note: Forgejo runs the workflows of only the first of \
+                 .forgejo/workflows, .gitea/workflows and .github/workflows there is, so \
+                 committing .forgejo/workflows stops running the workflows in {hidden}; \
+                 move them into .forgejo/workflows to keep them"
+            );
+        }
     }
     let runs_on = args
         .runs_on

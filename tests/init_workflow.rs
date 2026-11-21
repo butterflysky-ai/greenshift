@@ -168,6 +168,8 @@ struct Install {
     installed: Option<Vec<u8>>,
     /// Whether it downloaded anything.
     fetched: bool,
+    /// Whether what it installed has an execute bit set.
+    executable: bool,
 }
 
 /// Run the install step's script of `job`, with `curl` replaced by one
@@ -224,8 +226,16 @@ fn install(workflow: &Value, job: &str, binary: &[u8], curl: Curl) -> Install {
                 ),
         "the one download, if any, is the pinned release's Linux binary: {fetched}"
     );
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(&installed).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+    };
+    #[cfg(not(unix))]
+    let executable = installed.exists();
     Install {
         ok: status.success(),
+        executable,
         installed: installed
             .exists()
             .then(|| std::fs::read(installed).unwrap()),
@@ -289,6 +299,7 @@ fn the_install_step_fails_closed_on_a_checksum_mismatch() {
                 "{forge} {job}: the matching binary is installed"
             );
             assert_eq!(good.installed.as_deref(), Some(&binary[..]));
+            assert!(good.executable, "{forge} {job}: and can be run");
             let bad = install(&workflow, job, b"tampered", Curl::Works);
             assert!(!bad.ok, "{forge} {job}: a mismatch fails the step");
             assert_eq!(bad.installed, None, "{forge} {job}: nothing is installed");
@@ -572,6 +583,8 @@ struct RustStep {
     urls: String,
     /// Whether the downloaded rustup-init was run.
     ran: bool,
+    /// The arguments it was run with, one per line, if it records them.
+    args: String,
     /// What the step appended to `$GITHUB_PATH`.
     github_path: String,
     /// The `$HOME` it ran with.
@@ -674,6 +687,7 @@ fn install_rust(
         ok: status.success(),
         urls: std::fs::read_to_string(&urls).unwrap_or_default(),
         ran: ran.exists(),
+        args: std::fs::read_to_string(&ran).unwrap_or_default(),
         github_path: std::fs::read_to_string(&github_path).unwrap_or_default(),
         home,
     }
@@ -682,7 +696,7 @@ fn install_rust(
 #[cfg(unix)]
 #[test]
 fn the_rust_step_uses_the_runners_cargo_and_otherwise_installs_only_a_matching_rustup() {
-    let rustup = b"#!/usr/bin/env bash\ntouch \"$RAN\"\n";
+    let rustup = b"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$RAN\"\n";
     let url =
         "https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init\n";
     let present = install_rust(Cargo::OnRunner, rustup, Pin::Published, None, Curl::Works);
@@ -702,6 +716,15 @@ fn the_rust_step_uses_the_runners_cargo_and_otherwise_installs_only_a_matching_r
     let matching = install_rust(Cargo::Missing, rustup, Pin::Payload, None, Curl::Works);
     assert!(matching.ok, "a matching rustup-init is installed");
     assert!(matching.ran, "and run");
+    // Without -y, rustup-init asks for confirmation, and a runner has no
+    // terminal to give it.
+    for arg in ["-y", "--no-modify-path"] {
+        assert!(
+            matching.args.lines().any(|given| given == arg),
+            "rustup-init is run with {arg}: {:?}",
+            matching.args
+        );
+    }
     assert_eq!(matching.urls, url);
     assert_eq!(
         matching.github_path,

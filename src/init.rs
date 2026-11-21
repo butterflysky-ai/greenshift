@@ -101,6 +101,22 @@ pub fn detect_forge(root: &Path) -> Result<Forge, DetectForgeError> {
     }
 }
 
+/// The directory of workflows that Forgejo runs for `root` now and stops
+/// running once `.forgejo/workflows` is there, if it has any. Forgejo runs
+/// the workflows of only the first of `.forgejo/workflows`,
+/// `.gitea/workflows` and `.github/workflows` that a commit has.
+pub fn forgejo_would_hide(root: &Path) -> Option<&'static str> {
+    if root.join(".forgejo/workflows").exists() {
+        return None;
+    }
+    let now = [".gitea/workflows", ".github/workflows"]
+        .into_iter()
+        .find(|dir| root.join(dir).exists())?;
+    let has_any =
+        std::fs::read_dir(root.join(now)).is_ok_and(|mut entries| entries.next().is_some());
+    has_any.then_some(now)
+}
+
 /// A greenshift release tag, `vMAJOR.MINOR.PATCH`, as the release
 /// workflow publishes and the generated workflow checks it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -440,12 +456,13 @@ mod tests {
             "v+1.2.3",
             "V0.2.0",
             "v0.2.0 ",
-            "v0.1.0",
-            "v0.0.1",
             // Too big for a u64.
             "v18446744073709551616.0.0",
         ] {
-            assert!(bad.parse::<Release>().is_err(), "{bad:?}");
+            assert_eq!(bad.parse::<Release>(), Err(ReleaseError::Shape), "{bad:?}");
+        }
+        for old in ["v0.1.0", "v0.0.1", "v0.0.0"] {
+            assert_eq!(old.parse::<Release>(), Err(ReleaseError::TooOld), "{old:?}");
         }
     }
 

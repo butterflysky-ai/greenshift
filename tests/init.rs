@@ -492,6 +492,53 @@ fn forgejo_is_found_from_the_repository_and_is_idempotent() {
     assert_eq!(snapshot(dir.path()), before);
 }
 
+/// The note `init --ci forgejo` gives about the workflows in `dir` that
+/// Forgejo stops running once .forgejo/workflows is committed.
+fn hides(dir: &str) -> String {
+    format!("stops running the workflows in {dir}")
+}
+
+#[test]
+fn forgejo_says_when_its_workflows_would_stop_others_running() {
+    // Forgejo runs the workflows of only the first of .forgejo/workflows,
+    // .gitea/workflows and .github/workflows that the commit has.
+    for (others, hidden) in [
+        (&[".github/workflows"][..], ".github/workflows"),
+        (&[".gitea/workflows"], ".gitea/workflows"),
+        (
+            &[".gitea/workflows", ".github/workflows"],
+            ".gitea/workflows",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        for other in others {
+            write(dir.path(), &format!("{other}/ci.yml"), "on: push\n");
+        }
+        let out = stdout_of(&mut init(dir.path(), &["--ci", "forgejo"]));
+        assert_eq!(out.matches(&hides(hidden)).count(), 1, "{others:?}: {out}");
+        assert_eq!(out.matches("stops running").count(), 1, "{others:?}: {out}");
+        // Once .forgejo/workflows is there, those already do not run.
+        let out = stdout_of(&mut init(dir.path(), &["--ci", "forgejo"]));
+        assert!(!out.contains("stops running"), "{others:?}: {out}");
+    }
+    // Nothing is hidden: no other workflows, an empty directory, or GitHub.
+    for (others, forge) in [(&[][..], "forgejo"), (&[".github/workflows"], "github")] {
+        let dir = tempfile::tempdir().unwrap();
+        for other in others {
+            write(dir.path(), &format!("{other}/ci.yml"), "on: push\n");
+        }
+        let out = stdout_of(&mut init(dir.path(), &["--ci", forge]));
+        assert!(!out.contains("stops running"), "{forge} {others:?}: {out}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+    let out = stdout_of(&mut init(dir.path(), &["--ci", "forgejo"]));
+    assert!(
+        !out.contains("stops running"),
+        "empty .github/workflows: {out}"
+    );
+}
+
 #[test]
 fn force_replaces_an_existing_workflow_that_is_not_utf8() {
     let dir = tempfile::tempdir().unwrap();

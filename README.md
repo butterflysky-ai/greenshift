@@ -431,7 +431,10 @@ On Forgejo the workflow is **not isolated**: stock Forgejo gives every
 step, the tests included, a token that can write the repository, and
 ignores `permissions` (see the
 [Forgejo capability gate](docs/design/durable-history.md#forgejo-capability-gate)).
-The file says so at the top, and `init` says so when it runs.
+The file says so at the top, and `init` says so when it runs. Forgejo
+runs the workflows of only the first of `.forgejo/workflows`,
+`.gitea/workflows` and `.github/workflows` there is, so `init` also says
+when writing `.forgejo/workflows` would stop the others running.
 
 The workflow publishes the history to `refs/greenshift/history`, whole
 and never pruned, where anyone who can read the repository can read it:
