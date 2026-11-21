@@ -19,7 +19,7 @@ use std::process::{ExitCode, ExitStatus};
 use anyhow::Context;
 
 use crate::cli::{self, IngestArgs, RunOptions};
-use crate::plan::InventoryTest;
+use crate::plan::{Inventory, InventoryTest};
 use crate::select::Class;
 use crate::tainted::Tainted;
 
@@ -38,10 +38,18 @@ pub struct Invocation {
 }
 
 /// What a backend's listing found.
+///
+/// ```
+/// use greenshift::run::Listed;
+/// let listed = Listed::Tests(Default::default());
+/// if let Listed::Tests(inventory) = &listed {
+///     assert_eq!(inventory.iter().count(), 0);
+/// }
+/// ```
 #[derive(Debug)]
 pub enum Listed {
     /// The tests that would run now, in the runner's order.
-    Tests(Vec<InventoryTest>),
+    Tests(Inventory),
     /// The listing failed, with this exit status; the runner has said why
     /// on stderr.
     Failed(u8),
@@ -131,7 +139,7 @@ pub(crate) fn run_with_control(
         eprintln!("greenshift: running every test as rich");
     }
     let mut invocations = Vec::new();
-    for (class, group) in planned_groups(&groups.rich, &groups.poor) {
+    for (class, group) in planned_groups(groups.rich(), groups.poor()) {
         invocations.extend(backend.invocations(class, group, &dir)?);
     }
     let codes: Vec<u8> = invocations.iter().map(execute).collect();
@@ -151,17 +159,27 @@ pub(crate) fn run_with_control(
 
 /// The groups to run, in order: rich, then poor, each only if it has a
 /// test, or rich alone, empty, when neither has one.
+///
+/// ```
+/// let mut groups = greenshift::run::planned_groups(&[], &[]);
+/// assert_eq!(groups.len(), 1);
+/// assert_eq!(groups.next_back().unwrap().0, greenshift::select::Class::Rich);
+/// assert!(groups.next().is_none());
+/// ```
 pub fn planned_groups<'g, 't>(
     rich: &'g [&'t InventoryTest],
     poor: &'g [&'t InventoryTest],
-) -> Vec<(Class, &'g [&'t InventoryTest])> {
-    if rich.is_empty() && poor.is_empty() {
-        return vec![(Class::Rich, rich)];
+) -> impl DoubleEndedIterator<Item = (Class, &'g [&'t InventoryTest])> + ExactSizeIterator {
+    let mut groups = [(Class::Rich, rich), (Class::Poor, poor)];
+    if rich.is_empty() && !poor.is_empty() {
+        groups.swap(0, 1);
     }
-    [(Class::Rich, rich), (Class::Poor, poor)]
-        .into_iter()
-        .filter(|(_, group)| !group.is_empty())
-        .collect()
+    let count = if !rich.is_empty() && !poor.is_empty() {
+        2
+    } else {
+        1
+    };
+    groups.into_iter().take(count)
 }
 
 /// Write the invocation's setup files and run it, its output going to

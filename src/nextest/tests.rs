@@ -1,6 +1,5 @@
 use super::*;
 use crate::tainted::Tainted;
-use std::collections::BTreeSet;
 
 #[test]
 fn escape_leaves_ordinary_text_alone() {
@@ -87,18 +86,12 @@ fn all_but_negates_and_matches_everything_when_empty() {
     );
 }
 
-fn bins(ids: &[&str]) -> BTreeSet<String> {
-    ids.iter().map(|id| (*id).to_owned()).collect()
+fn bins(ids: &[&str]) -> BinaryIds {
+    BinaryIds::new(ids.iter().map(|id| (*id).to_owned()).collect())
 }
 
 fn line<'a>(class: Class, suite: &'a Tainted, name: &'a Tainted) -> Line<'a> {
-    Line {
-        class,
-        coverage: 100.0,
-        confidence: 100.0,
-        suite,
-        name,
-    }
+    Line::new(class, 100.0, 100.0, suite, name)
 }
 
 #[test]
@@ -204,7 +197,10 @@ fn binary_ids_refuses_anything_else() {
 #[test]
 fn a_full_listing_names_its_binaries_tests() {
     let listing = listing(FULL_LIST).unwrap();
-    assert_eq!(listing.binaries, bins(&["greenshift", "greenshift::cli"]));
+    assert_eq!(
+        listing.binaries(),
+        &bins(&["greenshift", "greenshift::cli"])
+    );
     assert!(listing.has("greenshift", "cli::tests::ingest_options"));
     assert!(!listing.has("greenshift", "cli::tests::gone"));
     // A listed binary with no tests has none to keep.
@@ -217,7 +213,7 @@ fn a_full_listing_names_its_binaries_tests() {
 #[test]
 fn a_binaries_only_listing_keeps_every_test_of_its_binaries() {
     let listing = listing(BINARIES_ONLY).unwrap();
-    assert!(listing.tests.is_empty());
+    assert!(listing.tests().is_empty());
     assert!(listing.has("greenshift", "any::name"));
     assert!(!listing.has("gone", "any::name"));
 }
@@ -243,7 +239,7 @@ fn a_binary_a_full_listing_skipped_keeps_every_test() {
 fn raw(tests: &[crate::plan::InventoryTest]) -> Vec<(&str, &str)> {
     tests
         .iter()
-        .map(|t| (t.suite.as_raw(), t.name.as_raw()))
+        .map(|t| (t.suite().as_raw(), t.name().as_raw()))
         .collect()
 }
 

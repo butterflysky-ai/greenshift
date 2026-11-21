@@ -3,17 +3,14 @@ use crate::cli::{parse, Backend as BackendCommand, Command};
 use crate::plan::HistoryState;
 
 fn test(suite: &str, name: &str) -> InventoryTest {
-    InventoryTest {
-        suite: Tainted::raw(suite),
-        name: Tainted::raw(name),
-    }
+    InventoryTest::new(Tainted::raw(suite), Tainted::raw(name))
 }
 
 #[test]
 fn both_groups_run_rich_first() {
     let (a, b) = (test("s", "a"), test("s", "b"));
     let (rich, poor) = ([&a], [&b]);
-    let groups = planned_groups(&rich, &poor);
+    let groups: Vec<_> = planned_groups(&rich, &poor).collect();
     let classes: Vec<Class> = groups.iter().map(|(class, _)| *class).collect();
     assert_eq!(classes, [Class::Rich, Class::Poor]);
     assert_eq!(groups[0].1, [&a]);
@@ -24,12 +21,12 @@ fn both_groups_run_rich_first() {
 fn an_empty_group_is_not_run() {
     let a = test("s", "a");
     let classes = |rich: &[&InventoryTest], poor: &[&InventoryTest]| -> Vec<Class> {
-        planned_groups(rich, poor).iter().map(|g| g.0).collect()
+        planned_groups(rich, poor).map(|g| g.0).collect()
     };
     assert_eq!(classes(&[&a], &[]), [Class::Rich]);
     assert_eq!(classes(&[], &[&a]), [Class::Poor]);
     // With no test at all, rich runs empty, so the runner decides.
-    let none = planned_groups(&[], &[]);
+    let none: Vec<_> = planned_groups(&[], &[]).collect();
     assert_eq!(none.len(), 1);
     assert_eq!(none[0].0, Class::Rich);
     assert!(none[0].1.is_empty());
@@ -83,8 +80,8 @@ fn a_store_that_cannot_be_read_plans_every_test_rich() {
     let tests = [test("s", "a"), test("s", "b")];
     let (history, groups) = cli::plan_groups(&opts.select, &tests).unwrap();
     assert_eq!(history, HistoryState::Error);
-    assert_eq!(groups.rich, tests.iter().collect::<Vec<_>>());
-    assert!(groups.poor.is_empty());
+    assert_eq!(groups.rich(), tests.iter().collect::<Vec<_>>());
+    assert!(groups.poor().is_empty());
 }
 
 #[test]
@@ -95,8 +92,8 @@ fn no_store_plans_every_test_rich() {
     let tests = [test("s", "a")];
     let (history, groups) = cli::plan_groups(&opts.select, &tests).unwrap();
     assert_eq!(history, HistoryState::Ok);
-    assert_eq!(groups.rich, [&tests[0]]);
-    assert!(groups.poor.is_empty());
+    assert_eq!(groups.rich(), [&tests[0]]);
+    assert!(groups.poor().is_empty());
 }
 
 #[test]

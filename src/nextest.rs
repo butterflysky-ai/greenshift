@@ -13,10 +13,9 @@
 //! tests, are never rich. A binaries-only listing names no tests, so a
 //! test gone from a binary it lists can still be.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use crate::plan::InventoryTest;
+use crate::plan::{Inventory, InventoryTest};
 use crate::select::{Class, Line};
 use crate::tainted::Tainted;
 
@@ -89,32 +88,9 @@ pub fn all_but<'a>(tests: impl IntoIterator<Item = (&'a str, &'a str)>) -> Strin
 #[error("not cargo nextest list JSON: {0}")]
 pub struct InventoryError(String);
 
-/// What a `cargo nextest list --message-format json` listing says exists
-/// now.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Listing {
-    /// Every binary id.
-    pub binaries: BTreeSet<String>,
-    /// The test names of each binary whose tests the listing gives: the
-    /// `testcases` of a full listing's `listed` binaries. A binaries-only
-    /// listing, or a binary a full listing skipped, names no tests.
-    pub tests: BTreeMap<String, BTreeSet<String>>,
-}
-
-impl Listing {
-    /// Whether the stored test `suite`, `name` is in the listing: its
-    /// binary is, and so is its name if the binary's tests are listed. A
-    /// test with no suite matches by name in any binary, so it is kept.
-    pub fn has(&self, suite: &str, name: &str) -> bool {
-        if suite.is_empty() {
-            return true;
-        }
-        match self.tests.get(suite) {
-            Some(names) => names.contains(name),
-            None => self.binaries.contains(suite),
-        }
-    }
-}
+mod payload;
+use payload::ListingBuilder;
+pub use payload::{BinaryIds, Listing};
 
 /// A `cargo nextest list --message-format json` listing, full
 /// (`rust-suites`) or `--list-type binaries-only` (`rust-binaries`):
@@ -128,7 +104,7 @@ pub fn listing(json: &str) -> Result<Listing, InventoryError> {
         .ok_or_else(|| InventoryError("no rust-suites or rust-binaries".to_owned()))?
         .as_object()
         .ok_or_else(|| InventoryError("binaries are not an object".to_owned()))?;
-    let mut listing = Listing::default();
+    let mut listing = ListingBuilder::default();
     for entry in entries.values() {
         let id = entry
             .get("binary-id")
@@ -147,7 +123,7 @@ pub fn listing(json: &str) -> Result<Listing, InventoryError> {
         }
         listing.binaries.insert(id.to_owned());
     }
-    Ok(listing)
+    Ok(listing.finish())
 }
 
 /// The tests a full `cargo nextest list --message-format json` listing
@@ -156,7 +132,7 @@ pub fn listing(json: &str) -> Result<Listing, InventoryError> {
 /// filters, or its being ignored, leave out is `mismatch`. Each test's
 /// suite is its binary id, as in nextest's JUnit. A binaries-only listing
 /// names no tests, so it is refused.
-pub fn selected_tests(json: &str) -> Result<Vec<InventoryTest>, InventoryError> {
+pub fn selected_tests(json: &str) -> Result<Inventory, InventoryError> {
     let value: serde_json::Value =
         serde_json::from_str(json).map_err(|err| InventoryError(err.to_string()))?;
     let entries = value
@@ -183,19 +159,19 @@ pub fn selected_tests(json: &str) -> Result<Vec<InventoryTest>, InventoryError> 
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| InventoryError("a testcase without a filter-match".to_owned()))?;
             if status == "matches" {
-                tests.push(InventoryTest {
-                    suite: Tainted::raw(id),
-                    name: Tainted::raw(name.as_str()),
-                });
+                tests.push(InventoryTest::new(
+                    Tainted::raw(id),
+                    Tainted::raw(name.as_str()),
+                ));
             }
         }
     }
-    Ok(tests)
+    Ok(Inventory::new(tests))
 }
 
 /// The binary ids of a [`listing`].
-pub fn binary_ids(json: &str) -> Result<BTreeSet<String>, InventoryError> {
-    listing(json).map(|listing| listing.binaries)
+pub fn binary_ids(json: &str) -> Result<BinaryIds, InventoryError> {
+    listing(json).map(Listing::into_binary_ids)
 }
 
 /// The filterset for `class` from `select`'s `lines`. Both are decided by
@@ -205,15 +181,15 @@ pub fn binary_ids(json: &str) -> Result<BTreeSet<String>, InventoryError> {
 /// tests are not in the inventory, and their terms would make nextest
 /// refuse the filterset. A line with no suite has no `binary_id` term and
 /// is kept.
-pub fn filter(lines: &[Line<'_>], class: Class, binaries: &BTreeSet<String>) -> String {
+pub fn filter(lines: &[Line<'_>], class: Class, binaries: &BinaryIds) -> String {
     let poor = lines
         .iter()
-        .filter(|line| line.class == Class::Poor)
+        .filter(|line| line.class() == Class::Poor)
         .filter(|line| {
-            let suite = line.suite.as_raw();
+            let suite = line.suite().as_raw();
             suite.is_empty() || binaries.contains(suite)
         })
-        .map(|line| (line.suite.as_raw(), line.name.as_raw()));
+        .map(|line| (line.suite().as_raw(), line.name().as_raw()));
     match class {
         Class::Rich => all_but(poor),
         Class::Poor => any_of(poor),

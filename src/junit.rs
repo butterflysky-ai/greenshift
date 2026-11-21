@@ -33,22 +33,8 @@ use crate::tainted::Tainted;
 mod outcome;
 pub use outcome::Outcome;
 
-/// One `<testcase>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestCase {
-    /// `classname`, or the enclosing suite's name when there is none.
-    pub suite: Tainted,
-    pub name: Tainted,
-    pub outcome: Outcome,
-    /// `time` rounded to whole milliseconds; `None` when the producer gave no time.
-    pub duration_ms: Option<i64>,
-}
-
-/// Every test case in one JUnit document, in document order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Report {
-    pub cases: Vec<TestCase>,
-}
+mod payload;
+pub use payload::{Report, TestCase};
 
 /// Why a document could not be read as JUnit XML.
 #[derive(Debug, thiserror::Error)]
@@ -129,12 +115,7 @@ impl CaseBuilder {
         } else {
             Outcome::Passed
         };
-        TestCase {
-            suite: self.suite,
-            name: self.name,
-            outcome,
-            duration_ms: self.duration_ms,
-        }
+        TestCase::new(self.suite, self.name, outcome, self.duration_ms)
     }
 }
 
@@ -143,7 +124,7 @@ impl CaseBuilder {
 /// Failure and error text is not kept: only which elements are present.
 pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
     let mut reader = Reader::from_str(xml);
-    let mut report = Report::default();
+    let mut report = Vec::new();
     let mut seen_root = false;
     let mut depth: usize = 0;
     // Names of the enclosing <testsuite> elements, with the depth each opened at.
@@ -187,7 +168,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                     (b"testcase", None) => {
                         let builder = start_case(e, &suites, position)?;
                         if empty {
-                            report.cases.push(builder.finish());
+                            report.push(builder.finish());
                         } else {
                             case = Some((at, builder));
                         }
@@ -201,7 +182,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
             Event::End(_) => {
                 if case.as_ref().is_some_and(|(d, _)| *d == depth) {
                     let (_, builder) = case.take().expect("checked above");
-                    report.cases.push(builder.finish());
+                    report.push(builder.finish());
                 } else if suites.last().is_some_and(|(d, _)| *d == depth) {
                     suites.pop();
                 }
@@ -234,7 +215,7 @@ pub fn parse_str(xml: &str) -> Result<Report, JunitError> {
                 if depth != 0 {
                     return Err(JunitError::Truncated);
                 }
-                return Ok(report);
+                return Ok(Report::new(report));
             }
             Event::Text(_)
             | Event::CData(_)

@@ -572,7 +572,7 @@ pub fn ingest(args: &IngestArgs) -> anyhow::Result<()> {
     let mut cases = Vec::new();
     for file in &args.files {
         let report = junit::parse_file(file).with_context(|| Tainted::from(file.as_path()))?;
-        cases.extend(report.cases);
+        cases.extend(report.into_cases());
     }
     let git_ref = resolve_git_ref(args.branch.as_deref(), args.tag.as_deref(), |var| {
         std::env::var_os(var)
@@ -706,7 +706,7 @@ pub fn nextest_filter(args: &NextestFilterArgs) -> anyhow::Result<ExitCode> {
     with_lines(&args.select, eligible, |lines| {
         let mut out = std::io::stdout().lock();
         let lines = lines.unwrap_or_default();
-        let filter = nextest::filter(lines, args.class(), &listing.binaries);
+        let filter = nextest::filter(lines, args.class(), listing.binaries());
         writeln!(out, "{filter}")
             .and_then(|()| out.flush())
             .map(|()| ExitCode::SUCCESS)
@@ -750,8 +750,10 @@ pub fn plan_groups<'t>(
             return Ok((plan::HistoryState::Error, plan::plan(&[], tests)));
         }
     };
-    let known: HashSet<(&Tainted, &Tainted)> =
-        tests.iter().map(|test| (&test.suite, &test.name)).collect();
+    let known: HashSet<(&Tainted, &Tainted)> = tests
+        .iter()
+        .map(|test| (test.suite(), test.name()))
+        .collect();
     let eligible = |suite: &Tainted, name: &Tainted| known.contains(&(suite, name));
     let mut groups = None;
     with_history(&history, args, eligible, |lines| {
@@ -862,9 +864,9 @@ fn with_history(
             confidence: args.confidence,
         },
     );
-    let lines = select::lines(&analysis, estimator, decided.rich, args.min_runs);
-    let code = written(write(Some(&lines)))?;
-    for missed in decided.unreached {
+    let lines = select::lines(&analysis, estimator, decided.rich(), args.min_runs);
+    let code = written(write(Some(lines.as_slice())))?;
+    for missed in decided.unreached() {
         eprintln!("greenshift: {missed}");
     }
     Ok(code)

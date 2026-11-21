@@ -1041,7 +1041,7 @@ mod tests {
             assert_eq!(std::fs::read(&input).unwrap(), before);
             let upgraded = Store::open_read_only(&output).unwrap().unwrap();
             assert_eq!(upgraded.schema_version().unwrap(), SCHEMA_VERSION);
-            assert_eq!(upgraded.history(&[]).unwrap().runs.len(), 1);
+            assert_eq!(upgraded.history(&[]).unwrap().runs().len(), 1);
         }
     }
 
@@ -1240,9 +1240,9 @@ mod tests {
         };
         let forward_selection = analyse(&forward);
         assert!(forward_selection
-            .tests
+            .tests()
             .iter()
-            .any(|test| test.name.as_raw() == "new-case"));
+            .any(|test| test.name().as_raw() == "new-case"));
         assert_eq!(analyse(&reverse), forward_selection);
     }
 
@@ -1451,7 +1451,7 @@ mod tests {
         drop(Store::open(&input).unwrap());
         snapshot(&input, &output).unwrap();
         let store = Store::open_read_only(&output).unwrap().unwrap();
-        assert!(store.history(&[]).unwrap().runs.is_empty());
+        assert!(store.history(&[]).unwrap().runs().is_empty());
     }
 
     #[test]

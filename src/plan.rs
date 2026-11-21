@@ -21,25 +21,8 @@ use std::fmt::Write;
 use crate::select::{Class, Line};
 use crate::tainted::Tainted;
 
-/// A test, as the inventory gives it and the plan writes it. Suite and
-/// name are text from outside the program, so they are [`Tainted`]: the
-/// raw text is reachable only through [`Tainted::as_raw`]. It is matched
-/// with the store by suite and name, never by the store's test id.
-///
-/// ```
-/// let tests = greenshift::plan::parse_inventory(r#"{"suite":"s","name":"n"}"#).unwrap();
-/// assert_eq!(tests[0].name.as_raw(), "n");
-/// ```
-///
-/// ```compile_fail
-/// let tests = greenshift::plan::parse_inventory(r#"{"suite":"s","name":"n"}"#).unwrap();
-/// let name: &str = &tests[0].name;
-/// ```
-#[derive(Debug, PartialEq, Eq)]
-pub struct InventoryTest {
-    pub suite: Tainted,
-    pub name: Tainted,
-}
+mod payload;
+pub use payload::{Inventory, InventoryTest, Plan};
 
 /// Why an inventory cannot be read: the 1-based line and what is wrong.
 #[derive(Debug, thiserror::Error)]
@@ -52,7 +35,7 @@ pub struct InventoryError {
 /// The tests of an inventory: JSON lines, each an object with string
 /// `suite` and `name` members (other members are ignored). Blank lines
 /// are skipped.
-pub fn parse_inventory(text: &str) -> Result<Vec<InventoryTest>, InventoryError> {
+pub fn parse_inventory(text: &str) -> Result<Inventory, InventoryError> {
     let mut tests = Vec::new();
     for (at, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -71,12 +54,9 @@ pub fn parse_inventory(text: &str) -> Result<Vec<InventoryTest>, InventoryError>
                 .map(Tainted::raw)
                 .ok_or_else(|| error(format!("no string {key:?}")))
         };
-        tests.push(InventoryTest {
-            suite: member("suite")?,
-            name: member("name")?,
-        });
+        tests.push(InventoryTest::new(member("suite")?, member("name")?));
     }
-    Ok(tests)
+    Ok(Inventory::new(tests))
 }
 
 /// serde_json's message for an error in one inventory line, which it
@@ -91,21 +71,11 @@ fn json_why(err: &serde_json::Error) -> String {
     }
 }
 
-/// The inventory split into rich and poor.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Plan<'a> {
-    /// `select`'s rich tests in pick order, then every other non-poor
-    /// inventory test in inventory order.
-    pub rich: Vec<&'a InventoryTest>,
-    /// `select`'s poor tests in its order.
-    pub poor: Vec<&'a InventoryTest>,
-}
-
 /// Split `inventory` by `select`'s `lines`: poor is the inventory tests on
 /// poor lines, rich the rest, rich lines' tests first. A test listed twice
 /// is planned once. With no lines (no history) every test is rich.
 pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [InventoryTest]) -> Plan<'a> {
-    let key = |t: &'a InventoryTest| (&t.suite, &t.name);
+    let key = |t: &'a InventoryTest| (t.suite(), t.name());
     // A test listed twice has one key. The last pass below, not this map,
     // puts the rest in inventory order. Keyed as the store keys a test:
     // by its suite and name, as `Tainted`.
@@ -114,8 +84,8 @@ pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [InventoryTest]) -> Plan<'a> 
     let mut take = |class: Class| -> Vec<&'a InventoryTest> {
         lines
             .iter()
-            .filter(|line| line.class == class)
-            .filter_map(|line| unplanned.remove(&(line.suite, line.name)))
+            .filter(|line| line.class() == class)
+            .filter_map(|line| unplanned.remove(&(line.suite(), line.name())))
             .collect()
     };
     let mut rich = take(Class::Rich);
@@ -125,7 +95,7 @@ pub fn plan<'a>(lines: &[Line<'_>], inventory: &'a [InventoryTest]) -> Plan<'a> 
             .iter()
             .filter(|&test| unplanned.remove(&key(test)).is_some()),
     );
-    Plan { rich, poor }
+    Plan::new(rich, poor)
 }
 
 /// `text` as a JSON string that reads back as exactly `text`, with every
@@ -204,8 +174,8 @@ impl Plan<'_> {
                 .map(|t| {
                     format!(
                         r#"{{"suite":{},"name":{}}}"#,
-                        json_string(t.suite.as_raw()),
-                        json_string(t.name.as_raw())
+                        json_string(t.suite().as_raw()),
+                        json_string(t.name().as_raw())
                     )
                 })
                 .collect();
@@ -213,8 +183,8 @@ impl Plan<'_> {
         };
         format!(
             r#"{{"history":"{history}","rich":{},"poor":{}}}"#,
-            group(&self.rich),
-            group(&self.poor)
+            group(self.rich()),
+            group(self.poor())
         )
     }
 }
