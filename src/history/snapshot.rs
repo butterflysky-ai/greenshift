@@ -537,13 +537,13 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
     };
     let first = remap(&data.tests)?;
     let second = remap(&other.tests)?;
-    let merged = builder.freeze();
+    let mut merged = builder.freeze();
     let mut runs = remap_runs(&data.runs, &first, &merged)?;
     let incoming = remap_runs(&other.runs, &second, &merged)?;
     drop(data);
     drop(other);
-    drop(first);
     drop(second);
+    let mut replay_only_tests = BTreeSet::new();
     {
         let known: HashMap<_, _> = runs
             .iter()
@@ -611,6 +611,7 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
                 }
                 // Non-exact all-seen groups prove membership only, not aggregate
                 // equivalence. Destination grouping and all metadata stay intact.
+                replay_only_tests.extend(run.results.iter().map(|result| result.test().index()));
                 continue;
             }
         }
@@ -619,6 +620,43 @@ fn union(data: Data, other: Data) -> Result<Data, SnapshotError> {
             owners.insert(key.clone(), index);
         }
         runs.push(run);
+    }
+    // Preserve every destination key, including historical unused entries. Also
+    // preserve keys needed by admitted observations and unrelated input metadata.
+    // Only names contributed exclusively by ignored replay results are omitted.
+    for test in &first {
+        replay_only_tests.remove(&test.index());
+    }
+    drop(first);
+    for run in &runs {
+        for result in &run.results {
+            replay_only_tests.remove(&result.test().index());
+        }
+    }
+    if !replay_only_tests.is_empty() {
+        let mut builder = DictionaryBuilder::default();
+        let mapping: Vec<_> = merged
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                if replay_only_tests.contains(&index) {
+                    None
+                } else {
+                    Some(builder.insert(key.clone()))
+                }
+            })
+            .collect();
+        for run in &mut runs {
+            for result in &mut run.results {
+                let test = mapping
+                    .get(result.test().index())
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| invalid("retained result missing from merged dictionary"))?;
+                *result = ResultRow::new(test, result.outcome(), result.duration());
+            }
+        }
+        merged = builder.freeze();
     }
     Ok(Data {
         tests: merged,
@@ -672,6 +710,108 @@ mod import_tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
+    }
+
+    fn dictionary_rows(path: &Path) -> Vec<(String, String)> {
+        Connection::open(path)
+            .unwrap()
+            .prepare("SELECT suite,name FROM tests ORDER BY suite,name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_import_snapshot_ignored_replay_does_not_retain_incoming_only_names() {
+        for spanning in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join("destination");
+            let incoming = dir.path().join("incoming");
+            if spanning {
+                record(&destination, &[A]);
+                record(&destination, &[B]);
+                record(&incoming, &[A, B]);
+            } else {
+                record(&destination, &[A, B]);
+                record(&incoming, &[A]);
+            }
+            Connection::open(&destination)
+                .unwrap()
+                .execute(
+                    "INSERT INTO tests(suite,name) VALUES ('old-unused','keep-destination')",
+                    [],
+                )
+                .unwrap();
+            let mut expected = dictionary_rows(&destination);
+            let conn = Connection::open(&incoming).unwrap();
+            conn.execute(
+                "UPDATE tests SET name='ignored-replay-label' WHERE name='turns'",
+                [],
+            )
+            .unwrap();
+            // Unrelated existing dictionary metadata is not a historical cleanup
+            // target. Only payload contributed exclusively by ignored runs goes.
+            conn.execute(
+                "INSERT INTO tests(suite,name) VALUES ('orphan','keep-unrelated-input')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            expected.push(("orphan".to_owned(), "keep-unrelated-input".to_owned()));
+            expected.sort();
+            let before_source = std::fs::read(&incoming).unwrap();
+            let before_ids = identities(&destination);
+            let output = dir.path().join("merged");
+            merge(&destination, &incoming, &output).unwrap();
+            assert_eq!(dictionary_rows(&output), expected);
+            assert_eq!(identities(&output), before_ids);
+            let restored = dir.path().join("restored");
+            std::fs::copy(&destination, &restored).unwrap();
+            restore_existing(&restored, &incoming, || false).unwrap();
+            assert_eq!(dictionary_rows(&restored), expected);
+            assert_eq!(identities(&restored), before_ids);
+            assert_eq!(std::fs::read(&incoming).unwrap(), before_source);
+        }
+    }
+
+    #[test]
+    fn test_import_snapshot_replay_name_shared_with_admitted_run_is_retained() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("destination");
+        let incoming = dir.path().join("incoming");
+        record(&destination, &[A, B]);
+        record(&incoming, &[A]);
+        Connection::open(&incoming)
+            .unwrap()
+            .execute("UPDATE tests SET name='admitted-label'", [])
+            .unwrap();
+        let report = crate::junit::parse_str(
+            r#"<testsuite name="gears"><testcase name="admitted-label"/></testsuite>"#,
+        )
+        .unwrap();
+        let mut store = Store::open(&incoming).unwrap();
+        store
+            .record_run(
+                &NewRun {
+                    commit: None,
+                    source: "admitted",
+                    files: &[],
+                    partial: false,
+                    branch: None,
+                    tag: None,
+                },
+                report.cases(),
+            )
+            .unwrap();
+        drop(store);
+        let output = dir.path().join("output");
+        merge(&destination, &incoming, &output).unwrap();
+        assert!(
+            dictionary_rows(&output).contains(&("gears".to_owned(), "admitted-label".to_owned()))
+        );
+        assert_eq!(identities(&output).len(), 2);
     }
 
     #[test]
@@ -997,11 +1137,19 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let local = dir.path().join("local");
             let incoming = dir.path().join("incoming");
-            if version < 4 {
+            if version < SCHEMA_VERSION {
                 historical_fixture(&local, version);
             } else {
                 fixture(&local, "legacy");
             }
+            assert_eq!(
+                Connection::open(&local)
+                    .unwrap()
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .unwrap(),
+                version,
+                "restore fixture must exercise the named source schema"
+            );
             fixture(&incoming, "remote");
             let before = load(&local)
                 .unwrap()

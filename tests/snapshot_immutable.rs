@@ -118,7 +118,7 @@ fn immutable_fixture(body: &str) -> String {
          #[path = {text:?}] mod text;\n\
          #[path = {dictionary:?}] mod dictionary;\n\
          #[path = {outcome:?}] mod junit;\n\
-         mod report_key {{ pub use greenshift::report_key::*; }}\n\
+         #[path = {report_key:?}] mod report_key;\n\
          #[path = {frozen:?}] mod frozen;\n\
          use text::FrozenText;\n\
          use dictionary::{{DictionaryBuilder,TestKey}};\n\
@@ -137,8 +137,8 @@ fn immutable_fixture(body: &str) -> String {
              let mut result = ResultRow::new(id,junit::Outcome::Passed,Some(12));\n\
              let mut results = FrozenResults::from_vec(vec![result]);\n\
              let mut metadata = RunMetadata::new(FrozenText::new(\"0123456789abcdef0123456789abcdef\".to_owned()),Some(text.clone()),text.clone(),text.clone(),0,Some(text.clone()),None);\n\
-             let mut reports = FrozenReports::from_vec(vec![report_key::ReportKey::from_bytes(None,b\"report\")]);\n\
-             let mut report_keys = report_key::ReportKeySet::new(reports.as_slice().iter().cloned()).unwrap();\n\
+             let mut reports = FrozenReports::from_vec(vec![report_key::ReportKey::from_validated_parts(String::new(),\"0\".repeat(64))]);\n\
+             let mut report_keys = report_key::ReportKeySet::from_canonical(reports.as_slice().to_vec());\n\
              assert_eq!(report_keys.keys(),reports.as_slice());\n\
              assert_eq!(reports.as_slice().len(),1);\n\
              assert_eq!(reports.as_slice()[0].namespace(),\"\");\n\
@@ -171,6 +171,7 @@ fn immutable_fixture(body: &str) -> String {
         text = root.join("text.rs").to_str().unwrap(),
         dictionary = root.join("dictionary.rs").to_str().unwrap(),
         outcome = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/junit/outcome.rs"),
+        report_key = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/report_key/payload.rs"),
         frozen = root.join("frozen.rs").to_str().unwrap(),
     )
 }
@@ -212,11 +213,11 @@ fn immutable_text_and_dictionary_reject_actual_mutation_after_valid_setup() {
         ("results.iter_mut();", "error[E0599]"),
         ("runs.iter_mut();", "error[E0599]"),
         (
-            "reports.as_slice()[0]=report_key::ReportKey::from_bytes(None,b\"other\");",
+            "reports.as_slice()[0]=report_key::ReportKey::from_validated_parts(String::new(),\"1\".repeat(64));",
             "error[E0594]",
         ),
         (
-            "reports.0[0]=report_key::ReportKey::from_bytes(None,b\"other\");",
+            "reports.0[0]=report_key::ReportKey::from_validated_parts(String::new(),\"1\".repeat(64));",
             "error[E0616]",
         ),
         (
@@ -225,7 +226,7 @@ fn immutable_text_and_dictionary_reject_actual_mutation_after_valid_setup() {
         ),
         ("run.reports=reports.clone();", "error[E0616]"),
         (
-            "report_keys.keys()[0]=report_key::ReportKey::from_bytes(None,b\"other\");",
+            "report_keys.keys()[0]=report_key::ReportKey::from_validated_parts(String::new(),\"1\".repeat(64));",
             "error[E0594]",
         ),
         (

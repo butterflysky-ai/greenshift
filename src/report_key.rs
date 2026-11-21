@@ -2,6 +2,9 @@
 
 use sha2::{Digest, Sha256};
 
+mod payload;
+pub use payload::{ReportKey, ReportKeySet};
+
 /// A commit id as `ingest --commit` takes it: 7 to 64 hex digits, a full
 /// SHA-1 (40) or SHA-256 (64) object name or an abbreviation of one at
 /// least as long as git's default. Upper-case digits are accepted and kept
@@ -57,14 +60,6 @@ impl std::fmt::Display for CommitId {
     }
 }
 
-/// An asserted report fingerprint, not proof that a test execution occurred.
-/// The empty namespace explicitly means unknown commit.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ReportKey {
-    namespace: String,
-    digest: String,
-}
-
 /// Invalid persisted key data or an invalid import key set.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReportKeyError {
@@ -81,15 +76,12 @@ pub enum ReportKeyError {
 }
 
 impl ReportKey {
-    /// The supported fingerprint format: SHA256 of exact captured raw bytes.
-    pub const VERSION: i64 = 1;
-
     /// Hash the same bytes supplied to the report parser, without reopening a path.
     pub fn from_bytes(commit: Option<&CommitId>, bytes: &[u8]) -> Self {
-        Self {
-            namespace: commit.map_or("", CommitId::as_str).to_owned(),
-            digest: format!("{:x}", Sha256::digest(bytes)),
-        }
+        Self::from_validated_parts(
+            commit.map_or("", CommitId::as_str).to_owned(),
+            format!("{:x}", Sha256::digest(bytes)),
+        )
     }
 
     /// Admit transported key data. Persisted spellings must already be canonical.
@@ -106,34 +98,16 @@ impl ReportKey {
         if digest.len() != 64 || !lower_hex(digest) {
             return Err(ReportKeyError::Digest);
         }
-        Ok(Self {
-            namespace: namespace.to_owned(),
-            digest: digest.to_owned(),
-        })
-    }
-
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    pub fn version(&self) -> i64 {
-        Self::VERSION
-    }
-
-    pub fn digest(&self) -> &str {
-        &self.digest
+        Ok(Self::from_validated_parts(
+            namespace.to_owned(),
+            digest.to_owned(),
+        ))
     }
 }
 
 fn lower_hex(text: &str) -> bool {
     text.bytes()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-/// A nonempty, canonical, deeply read-only set for a single import namespace.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReportKeySet {
-    keys: Vec<ReportKey>,
 }
 
 impl ReportKeySet {
@@ -145,16 +119,7 @@ impl ReportKeySet {
         if keys.iter().any(|key| key.namespace() != first.namespace()) {
             return Err(ReportKeyError::MixedNamespaces);
         }
-        Ok(Self { keys })
-    }
-
-    pub fn keys(&self) -> &[ReportKey] {
-        &self.keys
-    }
-
-    pub fn namespace(&self) -> &str {
-        // The constructor guarantees a nonempty set; no mutable access is exposed.
-        self.keys[0].namespace()
+        Ok(Self::from_canonical(keys))
     }
 }
 
